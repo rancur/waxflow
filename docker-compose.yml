@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  sync-api:
+    build: ./sync-api
+    container_name: sync-api
+    ports:
+      - "8402:8402"
+    volumes:
+      - sync-data:/app/data
+      - /volume1/music/Database:/music
+      - ./.git:/app/.git:ro
+    environment:
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8400,http://192.168.1.221:8400}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://192.168.1.221:8402/api/spotify/callback}
+      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}
+      - LEXICON_API_URL=${LEXICON_API_URL:-http://192.168.1.116:48624}
+      - MUSIC_LIBRARY_PATH=/music
+      - SLS_DB_PATH=/app/data/sync.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8402/api/admin/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  sync-worker:
+    build: ./sync-worker
+    container_name: sync-worker
+    volumes:
+      - sync-data:/app/data
+      - /volume1/music/Database:/music
+    environment:
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://192.168.1.221:8402/api/spotify/callback}
+      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}
+      - LEXICON_API_URL=${LEXICON_API_URL:-http://192.168.1.116:48624}
+      - MUSIC_LIBRARY_PATH=/music
+      - SLS_DB_PATH=/app/data/sync.db
+    depends_on:
+      sync-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sync-web:
+    build:
+      context: ./sync-web
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.221:8402}
+    container_name: sync-web
+    ports:
+      - "8400:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.221:8402}
+    depends_on:
+      - sync-api
+    restart: unless-stopped
+
+volumes:
+  sync-data:
