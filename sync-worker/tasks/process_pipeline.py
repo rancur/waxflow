@@ -30,7 +30,14 @@ from tasks.helpers import (
 
 log = logging.getLogger("worker.pipeline")
 
-BATCH_SIZE = 10
+BATCH_SIZE = 10  # legacy default
+
+# Per-stage batch sizes
+BATCH_NEW = 50       # Lexicon/file checks are fast
+BATCH_MATCH = 20     # Tidal API calls
+BATCH_DOWNLOAD = 2   # Tidarr one at a time
+BATCH_VERIFY = 20    # ffprobe is fast
+BATCH_ORGANIZE = 20  # Lexicon API
 
 
 async def process_pipeline(db_path: str):
@@ -83,7 +90,17 @@ def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
 
 
 def _process_new(db_path: str):
-    tracks = get_tracks_by_stage(db_path, "new", limit=BATCH_SIZE)
+    # One-time reset: move downloading tracks back to new for Lexicon re-check
+    if get_config(db_path, "_lexicon_recheck_done") != "1":
+        with get_db(db_path) as conn:
+            r = conn.execute(
+                """UPDATE tracks SET pipeline_stage = 'new', updated_at = datetime('now')
+                   WHERE pipeline_stage = 'downloading' AND download_status = 'pending'"""
+            )
+            log.info("One-time Lexicon recheck: reset %d downloading tracks to new", r.rowcount)
+        set_config(db_path, "_lexicon_recheck_done", "1")
+
+    tracks = get_tracks_by_stage(db_path, "new", limit=BATCH_NEW)
     for track in tracks:
         # Safety: skip tracks that are already complete (prevents reprocessing)
         if track.get("pipeline_stage") == "complete":
@@ -168,7 +185,7 @@ def _process_new(db_path: str):
 
 
 def _check_existing_in_lexicon(track: dict) -> dict | None:
-    """Check if a track already exists in Lexicon's database via the search API."""
+    """Check if a track already exists in Lexicon's database."""
     artist = track.get("artist", "")
     title = track.get("title", "")
     if not artist or not title:
@@ -176,39 +193,54 @@ def _check_existing_in_lexicon(track: dict) -> dict | None:
 
     lexicon_url = os.environ.get("LEXICON_API_URL", LEXICON_API_URL)
     spotify_title = title.lower().strip()
-    spotify_artist_first = artist.lower().split(",")[0].strip()
-    # Clean title for broader matching
-    title_clean = spotify_title.replace(" - original mix", "").replace(" (original mix)", "")
-    title_base = title_clean.split(" - ")[0].strip()
+    spotify_artists = [a.strip().lower() for a in artist.split(",")]
 
-    # Try multiple search queries (Lexicon's filter is exact-ish, so try variations)
-    search_queries = [
-        {"filter[artist]": artist, "filter[title]": title},
-        {"filter[artist]": artist.split(",")[0].strip(), "filter[title]": title},
-        {"filter[title]": title},  # Title-only search as fallback
-    ]
+    # Clean title for matching
+    title_base = spotify_title
+    for suffix in [" - original mix", " (original mix)", " - extended mix", " (extended mix)",
+                   " - radio edit", " (radio edit)", " - vip", " (vip)"]:
+        title_base = title_base.replace(suffix, "")
+    title_base = title_base.split(" - ")[0].strip()  # Before remix indicator
 
     try:
         with httpx.Client(base_url=lexicon_url, timeout=15) as client:
-            for params in search_queries:
-                resp = client.get("/v1/search/tracks", params=params)
-                if resp.status_code != 200:
+            # Search by TITLE ONLY — more reliable than combined filter
+            resp = client.get("/v1/search/tracks", params={"filter[title]": title})
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            results = data.get("data", {}).get("tracks", [])
+
+            for t in results:
+                lex_title = (t.get("title") or "").lower().strip()
+                lex_artist = (t.get("artist") or "").lower().strip()
+
+                # Check if ANY spotify artist appears in the lexicon artist
+                artist_match = any(a in lex_artist for a in spotify_artists)
+                if not artist_match:
+                    # Also check reverse: lexicon artist words in spotify artists
+                    lex_artists = [a.strip() for a in lex_artist.split(",")]
+                    artist_match = any(la in " ".join(spotify_artists) for la in lex_artists if len(la) > 2)
+
+                if not artist_match:
                     continue
 
-                data = resp.json()
-                results = data.get("data", {}).get("tracks", [])
-                for t in results:
-                    lex_title = (t.get("title") or "").lower().strip()
-                    lex_artist = (t.get("artist") or "").lower().strip()
-                    # Fuzzy match: spotify "Hot One" matches lexicon "Hot One (Original Mix)"
-                    if ((spotify_title in lex_title or title_base in lex_title or lex_title in spotify_title)
-                            and spotify_artist_first in lex_artist):
-                        return {
-                            "lexicon_track_id": str(t["id"]),
-                            "file_path": t.get("location", ""),
-                        }
+                # Title matching: fuzzy bidirectional
+                title_match = (
+                    spotify_title in lex_title or
+                    lex_title in spotify_title or
+                    title_base in lex_title or
+                    lex_title.split(" (")[0].strip() in spotify_title
+                )
+
+                if title_match:
+                    return {
+                        "lexicon_track_id": str(t["id"]),
+                        "file_path": t.get("location", ""),
+                    }
     except Exception as e:
-        log.warning("Lexicon existing-track check failed for '%s - %s': %s", artist, title, e)
+        log.warning("Lexicon check failed: %s", e)
 
     return None
 
@@ -288,7 +320,7 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
 # ---------------------------------------------------------------------------
 
 def _process_matching(db_path: str):
-    tracks = get_tracks_by_stage(db_path, "matching", limit=BATCH_SIZE)
+    tracks = get_tracks_by_stage(db_path, "matching", limit=BATCH_MATCH)
     for track in tracks:
         try:
             _match_track(db_path, track)
@@ -491,7 +523,7 @@ def _tidal_search_via_tidarr(query: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _process_downloading(db_path: str):
-    tracks = get_tracks_by_stage(db_path, "downloading", limit=BATCH_SIZE)
+    tracks = get_tracks_by_stage(db_path, "downloading", limit=BATCH_DOWNLOAD)
     tracks = [t for t in tracks if t.get("download_status") in ("pending", "failed")]
 
     max_concurrent = int(get_config(db_path, "max_concurrent_downloads") or 2)
@@ -753,7 +785,7 @@ def _sha256(filepath: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _process_verifying(db_path: str):
-    tracks = get_tracks_by_stage(db_path, "verifying", limit=BATCH_SIZE)
+    tracks = get_tracks_by_stage(db_path, "verifying", limit=BATCH_VERIFY)
     min_fp_score = float(get_config(db_path, "fingerprint_min_score") or 0.85)
 
     for track in tracks:
@@ -888,7 +920,7 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
 # ---------------------------------------------------------------------------
 
 def _process_organizing(db_path: str):
-    tracks = get_tracks_by_stage(db_path, "organizing", limit=BATCH_SIZE)
+    tracks = get_tracks_by_stage(db_path, "organizing", limit=BATCH_ORGANIZE)
     for track in tracks:
         try:
             _organize_track(db_path, track)
@@ -944,10 +976,16 @@ def _organize_track(db_path: str, track: dict):
         relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
         mac_path = f"/Users/willcurran/SynologyDrive/Database/{relative_path}"
 
-        # Wait for SynologyDrive to sync the file from NAS to Mac Mini
-        sync_delay = int(get_config(db_path, "synology_sync_delay_seconds") or 10)
-        log.info("Waiting %ds for SynologyDrive sync...", sync_delay)
-        time.sleep(sync_delay)
+        # Wait for SynologyDrive to sync — only needed for freshly downloaded files
+        download_source = track.get("download_source", "")
+        match_source = track.get("match_source", "")
+        if download_source == "tidarr":
+            sync_delay = int(get_config(db_path, "synology_sync_delay_seconds") or 10)
+            log.info("Waiting %ds for SynologyDrive sync (new download)...", sync_delay)
+            time.sleep(sync_delay)
+        else:
+            log.debug("Skipping SynologyDrive delay for existing file (source=%s/%s)",
+                       match_source, download_source)
 
         # Search Lexicon for the track by file path
         lexicon_track_id = _lexicon_find_or_import(client, mac_path, track)

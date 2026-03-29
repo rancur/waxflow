@@ -82,7 +82,7 @@ async def main():
             run_task("poll_spotify", poll_spotify, interval_key="spotify_poll_interval_seconds", default_interval=300)
         ),
         asyncio.create_task(
-            run_task("process_pipeline", process_pipeline, default_interval=30)
+            run_task("process_pipeline", process_pipeline, default_interval=10)
         ),
         asyncio.create_task(
             run_task("parity_check", parity_check, default_interval=600)
