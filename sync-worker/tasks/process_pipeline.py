@@ -537,7 +537,9 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
     except Exception as e:
         log.warning("fpcalc failed for track %d: %s", track_id, e)
 
-    is_lossless = codec in ("flac", "alac", "wav", "aiff") and sample_rate >= 44100
+    lossless_codecs = ("flac", "alac", "wav", "aiff", "pcm_s16be", "pcm_s24be", "pcm_s32be",
+                       "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le")
+    is_lossless = codec in lossless_codecs and sample_rate >= 44100
 
     # Duration match score
     fp_match_score = None
@@ -717,7 +719,7 @@ def _ensure_playlist(db_path: str, year: int, month: int, folder_name: str, play
 # ---------------------------------------------------------------------------
 
 def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) -> str | None:
-    """Find a track in Lexicon by file path, or import it."""
+    """Find a track in Lexicon by artist+title, or import it via file path."""
     # Search by artist + title first
     try:
         resp = client.get("/v1/search/tracks", params={
@@ -730,26 +732,22 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
             for t in tracks:
                 if t.get("location", "") == mac_path:
                     return str(t["id"])
-                # Also check title + artist match
                 if (t.get("title", "").lower() == track.get("title", "").lower() and
                         t.get("artist", "").lower() == track.get("artist", "").lower()):
                     return str(t["id"])
     except Exception as e:
         log.warning("Lexicon search failed: %s", e)
 
-    # Try to import/create the track
+    # Import the track file via POST /v1/tracks (with locations array)
     try:
-        resp = client.post("/v1/track", json={
-            "location": mac_path,
-            "title": track.get("title", ""),
-            "artist": track.get("artist", ""),
-            "albumTitle": track.get("album", ""),
-        })
+        resp = client.post("/v1/tracks", json={"locations": [mac_path]})
         if resp.status_code in (200, 201):
             data = resp.json()
-            return str(data.get("data", {}).get("id", data.get("id", "")))
+            imported = data.get("data", {}).get("tracks", [])
+            if imported:
+                return str(imported[0]["id"])
     except Exception as e:
-        log.warning("Lexicon import failed: %s", e)
+        log.warning("Lexicon import via /v1/tracks failed: %s", e)
 
     return None
 
@@ -819,13 +817,15 @@ def _lexicon_ensure_playlist(client: httpx.Client, playlist_name: str, folder_id
 
 
 def _lexicon_add_to_playlist(client: httpx.Client, playlist_id: str, track_id: str):
+    """Add a track to a playlist via PATCH /v1/playlist-tracks."""
     try:
-        resp = client.post(
-            f"/v1/playlist/{playlist_id}/tracks",
-            json={"trackIds": [int(track_id)]},
+        resp = client.patch(
+            "/v1/playlist-tracks",
+            json={"id": int(playlist_id), "trackIds": [int(track_id)]},
         )
         if resp.status_code not in (200, 201, 204):
-            log.warning("Failed to add track to Lexicon playlist: HTTP %d", resp.status_code)
+            log.warning("Failed to add track %s to playlist %s: HTTP %d - %s",
+                        track_id, playlist_id, resp.status_code, resp.text)
     except Exception as e:
         log.warning("Lexicon add-to-playlist failed: %s", e)
 
