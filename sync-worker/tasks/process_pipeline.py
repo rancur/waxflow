@@ -720,7 +720,10 @@ def _ensure_playlist(db_path: str, year: int, month: int, folder_name: str, play
 
 def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) -> str | None:
     """Find a track in Lexicon by artist+title, or import it via file path."""
-    # Search by artist + title first
+    spotify_title = (track.get("title") or "").lower().strip()
+    spotify_artist = (track.get("artist") or "").lower().split(",")[0].strip()
+
+    # Search by artist + title
     try:
         resp = client.get("/v1/search/tracks", params={
             "filter[artist]": track.get("artist", ""),
@@ -728,13 +731,21 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
         })
         if resp.status_code == 200:
             data = resp.json()
-            tracks = data.get("data", {}).get("tracks", [])
-            for t in tracks:
+            results = data.get("data", {}).get("tracks", [])
+            for t in results:
+                # Exact path match
                 if t.get("location", "") == mac_path:
                     return str(t["id"])
-                if (t.get("title", "").lower() == track.get("title", "").lower() and
-                        t.get("artist", "").lower() == track.get("artist", "").lower()):
+                # Fuzzy title match: Spotify "Hot One" matches Lexicon "Hot One (Original Mix)"
+                lex_title = (t.get("title") or "").lower().strip()
+                lex_artist = (t.get("artist") or "").lower().strip()
+                if spotify_title in lex_title and spotify_artist in lex_artist:
                     return str(t["id"])
+            # If any results at all and artist matches, take first
+            if results:
+                first_artist = (results[0].get("artist") or "").lower()
+                if spotify_artist in first_artist:
+                    return str(results[0]["id"])
     except Exception as e:
         log.warning("Lexicon search failed: %s", e)
 
