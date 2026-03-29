@@ -13,6 +13,7 @@ import time
 from tasks.poll_spotify import poll_spotify
 from tasks.process_pipeline import process_pipeline
 from tasks.parity_check import parity_check
+from tasks.retry_unmatched import retry_unmatched
 from tasks.helpers import get_config
 
 DB_PATH = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
@@ -82,6 +83,9 @@ async def main():
         ),
         asyncio.create_task(
             run_task("parity_check", parity_check, default_interval=600)
+        ),
+        asyncio.create_task(
+            run_task("retry_unmatched", retry_unmatched, interval_key="retry_search_interval_seconds", default_interval=43200)
         ),
     ]
 
