@@ -5,7 +5,8 @@ const nextConfig = {
     return [
       {
         source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8402'}/api/:path*`,
+        // Server-side rewrite: use Docker service name for container-to-container communication
+        destination: `${process.env.INTERNAL_API_URL || 'http://sync-api:8402'}/api/:path*`,
       },
     ]
   },

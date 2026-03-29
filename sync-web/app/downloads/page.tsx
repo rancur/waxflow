@@ -2,62 +2,35 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { apiFetch } from '../api'
-import { DownloadsResponse, DownloadQueueItem } from '../types'
 import StatusBadge from '../components/StatusBadge'
 
 const POLL_INTERVAL = 5_000
 
-function DownloadItem({ item, onRetry }: { item: DownloadQueueItem; onRetry?: (id: string) => void }) {
-  return (
-    <div className="flex items-center gap-4 px-4 py-3 hover:bg-slate-800/30 transition-colors">
-      <div className="flex-1 min-w-0">
-        <p className="text-sm text-slate-200 font-medium truncate">{item.title}</p>
-        <p className="text-xs text-slate-500 truncate">{item.artist}</p>
-      </div>
-      <div className="w-32 hidden sm:block">
-        <StatusBadge status={item.status} />
-      </div>
-      {item.status === 'downloading' && (
-        <div className="w-32 flex items-center gap-2">
-          <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-blue-500 rounded-full transition-all"
-              style={{ width: `${item.progress}%` }}
-            />
-          </div>
-          <span className="text-xs text-slate-500 tabular-nums w-10 text-right">
-            {item.progress}%
-          </span>
-        </div>
-      )}
-      {item.speed_kbps && (
-        <span className="text-xs text-slate-500 tabular-nums hidden md:block">
-          {item.speed_kbps > 1000
-            ? `${(item.speed_kbps / 1000).toFixed(1)} MB/s`
-            : `${item.speed_kbps} KB/s`}
-        </span>
-      )}
-      {item.status === 'failed' && onRetry && (
-        <button
-          className="text-xs text-amber-400 hover:text-amber-300 transition-colors"
-          onClick={() => onRetry(item.id)}
-        >
-          Retry
-        </button>
-      )}
-    </div>
-  )
+interface DownloadItem {
+  id: number
+  track_id: number
+  source: string
+  status: string
+  attempts: number
+  max_attempts: number
+  error: string | null
+  created_at: string | null
+  started_at: string | null
+  completed_at: string | null
+  track_title: string
+  track_artist: string
+  track_album: string
 }
 
 export default function DownloadsPage() {
-  const [data, setData] = useState<DownloadsResponse | null>(null)
+  const [items, setItems] = useState<DownloadItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const fetchDownloads = useCallback(async () => {
     try {
-      const result = await apiFetch<DownloadsResponse>('/downloads')
-      setData(result)
+      const result = await apiFetch<any>('/downloads')
+      setItems(result.items || [])
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch downloads')
@@ -72,136 +45,117 @@ export default function DownloadsPage() {
     return () => clearInterval(interval)
   }, [fetchDownloads])
 
-  const handleRetry = async (id: string) => {
+  const handleRetry = async (trackId: number) => {
     try {
-      await apiFetch(`/downloads/${id}/retry`, { method: 'POST' })
+      await apiFetch(`/downloads/${trackId}/retry`, { method: 'POST' })
       fetchDownloads()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Retry failed')
-    }
+    } catch {}
   }
 
-  const stats = data?.stats
+  const active = items.filter(i => i.status === 'downloading')
+  const queued = items.filter(i => i.status === 'queued' || i.status === 'pending')
+  const failed = items.filter(i => i.status === 'failed')
+  const complete = items.filter(i => i.status === 'complete')
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-100">Downloads</h1>
-        <p className="text-sm text-slate-500 mt-1">Download queue and status</p>
+        <p className="text-sm text-slate-500 mt-1">{items.length} items in queue</p>
       </div>
 
       {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-5 py-4 flex items-center justify-between">
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-5 py-4">
           <p className="text-sm text-red-400">{error}</p>
-          <button onClick={fetchDownloads} className="btn-secondary text-xs">Retry</button>
         </div>
       )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[
-          { label: 'Downloaded', value: stats?.total_downloaded, color: 'text-emerald-400' },
-          { label: 'Failed', value: stats?.total_failed, color: 'text-red-400' },
-          { label: 'In Queue', value: stats?.queue_size, color: 'text-blue-400' },
-          {
-            label: 'Avg Speed',
-            value: stats?.avg_speed_kbps
-              ? stats.avg_speed_kbps > 1000
-                ? `${(stats.avg_speed_kbps / 1000).toFixed(1)} MB/s`
-                : `${stats.avg_speed_kbps} KB/s`
-              : '-',
-            color: 'text-slate-300',
-            raw: true,
-          },
-        ].map((s) => (
-          <div key={s.label} className="card">
-            {loading ? (
-              <>
-                <div className="w-16 h-8 skeleton mb-2" />
-                <div className="w-20 h-4 skeleton" />
-              </>
-            ) : (
-              <>
-                <p className={`text-2xl font-bold tabular-nums ${s.color}`}>
-                  {(s as any).raw ? s.value : (s.value ?? 0).toLocaleString()}
-                </p>
-                <p className="text-xs text-slate-500 mt-1">{s.label}</p>
-              </>
-            )}
-          </div>
-        ))}
+        <div className="card text-center">
+          <p className="text-2xl font-bold text-blue-400">{active.length}</p>
+          <p className="text-xs text-slate-500">Active</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-2xl font-bold text-slate-400">{queued.length}</p>
+          <p className="text-xs text-slate-500">Queued</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-2xl font-bold text-emerald-400">{complete.length}</p>
+          <p className="text-xs text-slate-500">Complete</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-2xl font-bold text-red-400">{failed.length}</p>
+          <p className="text-xs text-slate-500">Failed</p>
+        </div>
       </div>
 
       {/* Active Downloads */}
-      <div className="card p-0 overflow-hidden">
-        <div className="px-5 py-3 border-b border-slate-800">
-          <h2 className="text-sm font-semibold text-slate-300">
-            Active Downloads
-            {data?.active && (
-              <span className="ml-2 text-xs text-slate-500">({data.active.length})</span>
-            )}
-          </h2>
-        </div>
-        {loading ? (
-          <div className="p-4 space-y-3">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="h-12 skeleton rounded" />
-            ))}
-          </div>
-        ) : data?.active && data.active.length > 0 ? (
-          <div className="divide-y divide-slate-800/50">
-            {data.active.map((item) => (
-              <DownloadItem key={item.id} item={item} />
-            ))}
-          </div>
-        ) : (
-          <div className="py-8 text-center text-sm text-slate-500">No active downloads</div>
-        )}
-      </div>
-
-      {/* Queued */}
-      <div className="card p-0 overflow-hidden">
-        <div className="px-5 py-3 border-b border-slate-800">
-          <h2 className="text-sm font-semibold text-slate-300">
-            Queued
-            {data?.queued && (
-              <span className="ml-2 text-xs text-slate-500">({data.queued.length})</span>
-            )}
-          </h2>
-        </div>
-        {loading ? (
-          <div className="p-4 space-y-3">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="h-12 skeleton rounded" />
-            ))}
-          </div>
-        ) : data?.queued && data.queued.length > 0 ? (
-          <div className="divide-y divide-slate-800/50">
-            {data.queued.map((item) => (
-              <DownloadItem key={item.id} item={item} />
-            ))}
-          </div>
-        ) : (
-          <div className="py-8 text-center text-sm text-slate-500">Queue empty</div>
-        )}
-      </div>
-
-      {/* Failed */}
-      {data?.failed && data.failed.length > 0 && (
+      {active.length > 0 && (
         <div className="card p-0 overflow-hidden">
-          <div className="px-5 py-3 border-b border-red-500/20 bg-red-500/5">
-            <h2 className="text-sm font-semibold text-red-400">
-              Failed ({data.failed.length})
-            </h2>
+          <div className="px-4 py-3 border-b border-slate-800">
+            <h2 className="text-sm font-semibold text-blue-400">Active Downloads</h2>
           </div>
-          <div className="divide-y divide-slate-800/50">
-            {data.failed.map((item) => (
-              <div key={item.id}>
-                <DownloadItem item={item} onRetry={handleRetry} />
-                {item.error_message && (
-                  <p className="px-4 pb-3 text-xs text-red-400/70">{item.error_message}</p>
-                )}
+          {active.map(item => (
+            <div key={item.id} className="flex items-center gap-4 px-4 py-3 border-b border-slate-800/50">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-slate-200 font-medium truncate">{item.track_title}</p>
+                <p className="text-xs text-slate-500">{item.track_artist}</p>
               </div>
+              <StatusBadge status={item.status} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Failed Downloads */}
+      {failed.length > 0 && (
+        <div className="card p-0 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-800">
+            <h2 className="text-sm font-semibold text-red-400">Failed ({failed.length})</h2>
+          </div>
+          {failed.slice(0, 20).map(item => (
+            <div key={item.id} className="flex items-center gap-4 px-4 py-3 border-b border-slate-800/50">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-slate-200 font-medium truncate">{item.track_title}</p>
+                <p className="text-xs text-slate-500">{item.track_artist}</p>
+                {item.error && <p className="text-xs text-red-400 mt-1 truncate">{item.error}</p>}
+              </div>
+              <span className="text-xs text-slate-500">Attempt {item.attempts}/{item.max_attempts}</span>
+              <button
+                className="text-xs text-amber-400 hover:text-amber-300 px-2 py-1 border border-amber-500/30 rounded"
+                onClick={() => handleRetry(item.track_id)}
+              >
+                Retry
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Recent Complete */}
+      {complete.length > 0 && (
+        <div className="card p-0 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-800">
+            <h2 className="text-sm font-semibold text-emerald-400">Recently Complete ({complete.length})</h2>
+          </div>
+          {complete.slice(0, 10).map(item => (
+            <div key={item.id} className="flex items-center gap-4 px-4 py-3 border-b border-slate-800/50">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-slate-200 font-medium truncate">{item.track_title}</p>
+                <p className="text-xs text-slate-500">{item.track_artist}</p>
+              </div>
+              <StatusBadge status="complete" />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {loading && items.length === 0 && (
+        <div className="card">
+          <div className="space-y-3">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="h-12 skeleton rounded" />
             ))}
           </div>
         </div>

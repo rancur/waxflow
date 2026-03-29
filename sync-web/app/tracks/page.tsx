@@ -2,13 +2,12 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { apiFetch } from '../api'
-import { Track, TracksResponse, PipelineStage, MatchStatus } from '../types'
 import TrackRow from '../components/TrackRow'
 
 const PER_PAGE = 50
 
 export default function TracksPage() {
-  const [tracks, setTracks] = useState<Track[]>([])
+  const [tracks, setTracks] = useState<any[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
@@ -24,11 +23,11 @@ export default function TracksPage() {
         page: page.toString(),
         per_page: PER_PAGE.toString(),
       })
-      if (search) params.set('q', search)
+      if (search) params.set('search', search)
       if (stageFilter) params.set('pipeline_stage', stageFilter)
-      if (matchFilter) params.set('match_status', matchFilter)
+      if (matchFilter) params.set('status', matchFilter)
 
-      const result = await apiFetch<TracksResponse>(`/tracks?${params}`)
+      const result = await apiFetch<any>(`/tracks?${params}`)
       setTracks(result.tracks)
       setTotal(result.total)
       setError(null)
@@ -81,10 +80,11 @@ export default function TracksPage() {
           onChange={(e) => { setStageFilter(e.target.value); setPage(1) }}
         >
           <option value="">All Stages</option>
-          <option value="pending">Pending</option>
+          <option value="new">New</option>
           <option value="matching">Matching</option>
           <option value="downloading">Downloading</option>
           <option value="verifying">Verifying</option>
+          <option value="organizing">Organizing</option>
           <option value="complete">Complete</option>
           <option value="error">Error</option>
         </select>
@@ -94,11 +94,11 @@ export default function TracksPage() {
           onChange={(e) => { setMatchFilter(e.target.value); setPage(1) }}
         >
           <option value="">All Match Status</option>
-          <option value="unmatched">Unmatched</option>
+          <option value="pending">Pending</option>
           <option value="matched">Matched</option>
           <option value="mismatched">Mismatched</option>
-          <option value="approved">Approved</option>
-          <option value="rejected">Rejected</option>
+          <option value="failed">Failed</option>
+          <option value="manual">Manual</option>
         </select>
       </div>
 

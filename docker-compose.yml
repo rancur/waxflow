@@ -52,11 +52,13 @@ services:
       context: ./sync-web
       args:
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.221:8402}
+        - INTERNAL_API_URL=http://sync-api:8402
     container_name: sync-web
     ports:
       - "8400:3000"
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.221:8402}
+      - INTERNAL_API_URL=http://sync-api:8402
     depends_on:
       - sync-api
     restart: unless-stopped
