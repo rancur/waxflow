@@ -188,7 +188,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </span>
           </div>
 
-          <div className="p-6 lg:p-8 max-w-7xl mx-auto">
+          <div className={`${pathname === '/tracks' ? 'p-0' : 'p-6 lg:p-8 max-w-7xl mx-auto'}`}>
             {children}
           </div>
         </main>

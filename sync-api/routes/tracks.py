@@ -18,12 +18,25 @@ def row_to_track(row) -> dict:
     return d
 
 
+ALLOWED_SORT_COLUMNS = {
+    "title", "artist", "album", "duration_ms", "spotify_added_at",
+    "pipeline_stage", "match_status", "download_status", "verify_status",
+    "verify_codec", "lexicon_status", "match_confidence",
+    "verify_sample_rate", "verify_bit_depth",
+}
+
+
 @router.get("/tracks", response_model=TrackListResponse)
 async def list_tracks(
     status: Optional[str] = Query(None, description="Filter by match_status"),
     pipeline_stage: Optional[str] = Query(None, description="Filter by pipeline_stage"),
+    download_status: Optional[str] = Query(None, description="Filter by download_status"),
+    verify_status: Optional[str] = Query(None, description="Filter by verify_status"),
+    lexicon_status: Optional[str] = Query(None, description="Filter by lexicon_status"),
     search: Optional[str] = Query(None, description="Search title/artist/album"),
     playlist_id: Optional[int] = Query(None, description="Filter by playlist"),
+    sort_by: Optional[str] = Query(None, description="Column to sort by"),
+    sort_dir: Optional[str] = Query("desc", description="Sort direction: asc or desc"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
 ):
@@ -38,6 +51,15 @@ async def list_tracks(
             if pipeline_stage:
                 conditions.append("t.pipeline_stage = ?")
                 params.append(pipeline_stage)
+            if download_status:
+                conditions.append("t.download_status = ?")
+                params.append(download_status)
+            if verify_status:
+                conditions.append("t.verify_status = ?")
+                params.append(verify_status)
+            if lexicon_status:
+                conditions.append("t.lexicon_status = ?")
+                params.append(lexicon_status)
             if search:
                 conditions.append("(t.title LIKE ? OR t.artist LIKE ? OR t.album LIKE ?)")
                 like = f"%{search}%"
@@ -57,9 +79,15 @@ async def list_tracks(
             pages = max(1, math.ceil(total / per_page))
             offset = (page - 1) * per_page
 
+            # Determine sort column (whitelist to prevent SQL injection)
+            order_col = "t.spotify_added_at"
+            if sort_by and sort_by in ALLOWED_SORT_COLUMNS:
+                order_col = f"t.{sort_by}"
+            order_dir = "ASC" if sort_dir and sort_dir.lower() == "asc" else "DESC"
+
             query = f"""
                 SELECT t.* FROM tracks t {join_clause} {where}
-                ORDER BY t.spotify_added_at DESC
+                ORDER BY {order_col} {order_dir}
                 LIMIT ? OFFSET ?
             """
             rows = conn.execute(query, params + [per_page, offset]).fetchall()
