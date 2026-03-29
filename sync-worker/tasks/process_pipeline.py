@@ -368,41 +368,30 @@ def _download_track(db_path: str, track: dict):
     log.info("Track %d downloaded -> %s", track_id, dest_path)
 
 
-def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 120, poll_interval: int = 3):
-    """Poll Tidarr SSE stream until download completes or timeout."""
+def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 60, poll_interval: int = 5):
+    """Wait for Tidarr to finish downloading a track by polling the item-specific output."""
     start = time.time()
-    # Give Tidarr a moment to start the download
-    time.sleep(5)
+    time.sleep(8)  # Give Tidarr time to start and potentially finish the download
+
     while time.time() - start < max_wait:
         try:
-            with httpx.Client(timeout=10) as client:
-                # Check the SSE stream for this specific item
-                resp = client.get(
-                    f"{TIDARR_URL}/api/stream-processing",
-                    headers={"Accept": "text/event-stream"},
-                    timeout=8,
-                )
+            with httpx.Client(timeout=15) as client:
+                # Check the item-specific output stream
+                resp = client.get(f"{TIDARR_URL}/api/stream-item-output/{tidal_id}", timeout=10)
                 if resp.status_code == 200:
-                    for line in resp.text.split("\n"):
-                        if line.startswith("data:"):
-                            import json as _json
-                            items = _json.loads(line[5:])
-                            for item in items:
-                                if str(item.get("id")) == str(tidal_id):
-                                    status = item.get("status", "")
-                                    if status == "finished":
-                                        time.sleep(3)  # Wait for file move to complete
-                                        return
-                                    elif status in ("error",):
-                                        return  # Failed, let the file search handle it
-                            # If our track isn't in the queue at all, it's already done
-                            if not any(str(i.get("id")) == str(tidal_id) for i in items):
-                                time.sleep(3)
-                                return
+                    text = resp.text
+                    if "Move complete" in text or "Post processing complete" in text:
+                        time.sleep(2)
+                        return
+                    if "Download succeed" in text:
+                        time.sleep(3)
+                        return
+                    if "No file to process" in text:
+                        return  # skip_existing or auth issue
         except Exception:
             pass
         time.sleep(poll_interval)
-    # Timeout — proceed anyway, file search will handle it
+    # Timeout — proceed anyway
 
 
 def _find_and_move_downloaded_file(db_path: str, track_id: int, artist: str, album: str, title: str) -> str | None:
