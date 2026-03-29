@@ -9,7 +9,7 @@ services:
     volumes:
       - sync-data:/app/data
       - /volume1/music/Database:/music
-      - ./.git:/app/.git:ro
+      # - ./.git:/app/.git:ro  # Optional: mount for version info
     environment:
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8400,http://192.168.1.221:8400}
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
@@ -21,7 +21,7 @@ services:
       - SLS_DB_PATH=/app/data/sync.db
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8402/api/admin/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8402/api/admin/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
