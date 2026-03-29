@@ -108,6 +108,74 @@ async def parity_check():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/tracks/errors")
+async def get_error_tracks():
+    """Get all error tracks grouped by error category."""
+    try:
+        with get_db() as conn:
+            errors = conn.execute(
+                """SELECT * FROM tracks WHERE pipeline_stage = 'error'
+                   ORDER BY pipeline_error, title"""
+            ).fetchall()
+            ignored = conn.execute(
+                """SELECT * FROM tracks WHERE pipeline_stage = 'ignored'
+                   ORDER BY title"""
+            ).fetchall()
+
+            categories = {
+                "not_lossless": [],
+                "no_tidal_match": [],
+                "download_failed": [],
+                "lexicon_sync_failed": [],
+                "fingerprint_mismatch": [],
+                "other": [],
+            }
+            for r in errors:
+                t = row_to_track(r)
+                err = (t.get("pipeline_error") or "").lower()
+                if "not lossless" in err or "aac" in err or "mp3" in err:
+                    categories["not_lossless"].append(t)
+                elif "no tidal match" in err or "no match" in err or "not found on tidal" in err:
+                    categories["no_tidal_match"].append(t)
+                elif "download failed" in err or "download error" in err:
+                    categories["download_failed"].append(t)
+                elif "lexicon" in err:
+                    categories["lexicon_sync_failed"].append(t)
+                elif "fingerprint" in err:
+                    categories["fingerprint_mismatch"].append(t)
+                else:
+                    categories["other"].append(t)
+
+            return {
+                "categories": categories,
+                "ignored": [row_to_track(r) for r in ignored],
+                "total_errors": len(errors),
+                "total_ignored": len(ignored),
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tracks/bulk-ignore")
+async def bulk_ignore_tracks(track_ids: list[int]):
+    """Ignore multiple tracks at once."""
+    try:
+        with get_db() as conn:
+            for track_id in track_ids:
+                conn.execute(
+                    """UPDATE tracks SET pipeline_stage = 'ignored', is_protected = 1,
+                       updated_at = datetime('now') WHERE id = ?""",
+                    (track_id,),
+                )
+                conn.execute(
+                    "INSERT INTO activity_log (event_type, track_id, message) VALUES (?, ?, ?)",
+                    ("track_ignored", track_id, f"Track {track_id} bulk-ignored by user"),
+                )
+        return {"status": "ok", "count": len(track_ids)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/tracks/{track_id}", response_model=TrackOut)
 async def get_track(track_id: int):
     try:
@@ -188,6 +256,52 @@ async def update_track(track_id: int, update: TrackUpdate):
 
             row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
             return TrackOut(**row_to_track(row))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tracks/{track_id}/ignore")
+async def ignore_track(track_id: int):
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT id FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Track not found")
+            conn.execute(
+                """UPDATE tracks SET pipeline_stage = 'ignored', is_protected = 1,
+                   updated_at = datetime('now') WHERE id = ?""",
+                (track_id,),
+            )
+            conn.execute(
+                "INSERT INTO activity_log (event_type, track_id, message) VALUES (?, ?, ?)",
+                ("track_ignored", track_id, f"Track {track_id} ignored by user"),
+            )
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tracks/{track_id}/unignore")
+async def unignore_track(track_id: int):
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT id FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Track not found")
+            conn.execute(
+                """UPDATE tracks SET pipeline_stage = 'new', is_protected = 0,
+                   pipeline_error = NULL, updated_at = datetime('now') WHERE id = ?""",
+                (track_id,),
+            )
+            conn.execute(
+                "INSERT INTO activity_log (event_type, track_id, message) VALUES (?, ?, ?)",
+                ("track_unignored", track_id, f"Track {track_id} un-ignored by user"),
+            )
+        return {"status": "ok"}
     except HTTPException:
         raise
     except Exception as e:

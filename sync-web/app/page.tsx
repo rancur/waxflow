@@ -164,7 +164,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Stage Breakdown */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
         {[
           { label: 'New', value: stages.new, color: 'text-slate-400', bg: 'bg-slate-500/10 border-slate-500/20' },
           { label: 'Matching', value: stages.matching, color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20' },
@@ -173,6 +173,7 @@ export default function DashboardPage() {
           { label: 'Verifying', value: stages.verifying, color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
           { label: 'Complete', value: stages.complete, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' },
           { label: 'Error', value: stages.error, color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/20' },
+          { label: 'Ignored', value: stages.ignored, color: 'text-slate-500', bg: 'bg-slate-500/5 border-slate-700/30' },
         ].map((stat) => (
           <div key={stat.label} className={`rounded-xl border p-4 ${stat.bg}`}>
             <p className={`text-2xl font-bold tabular-nums ${stat.color}`}>

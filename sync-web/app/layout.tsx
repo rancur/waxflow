@@ -3,7 +3,7 @@
 import './globals.css'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 const navItems = [
   {
@@ -52,6 +52,15 @@ const navItems = [
     ),
   },
   {
+    href: '/errors',
+    label: 'Errored Tracks',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+      </svg>
+    ),
+  },
+  {
     href: '/playlists',
     label: 'Playlists',
     icon: (
@@ -75,6 +84,22 @@ const navItems = [
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [errorCount, setErrorCount] = useState(0)
+
+  useEffect(() => {
+    const fetchErrorCount = async () => {
+      try {
+        const res = await fetch('/api/tracks/errors')
+        if (res.ok) {
+          const data = await res.json()
+          setErrorCount(data.total_errors ?? 0)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchErrorCount()
+    const interval = setInterval(fetchErrorCount, 30_000)
+    return () => clearInterval(interval)
+  }, [])
 
   return (
     <html lang="en" className="dark">
@@ -129,7 +154,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   }`}
                 >
                   {item.icon}
-                  {item.label}
+                  <span className="flex-1">{item.label}</span>
+                  {item.href === '/errors' && errorCount > 0 && (
+                    <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">
+                      {errorCount}
+                    </span>
+                  )}
                 </Link>
               )
             })}
