@@ -7,6 +7,13 @@ import ActivityFeed from './components/ActivityFeed'
 
 const POLL_INTERVAL = 10_000
 
+interface MonthlyRow {
+  month: string
+  total: number
+  complete: number
+  errors: number
+}
+
 interface RawDashboard {
   spotify_total: number
   lexicon_synced: number
@@ -34,13 +41,18 @@ interface RawDashboard {
 
 export default function DashboardPage() {
   const [data, setData] = useState<RawDashboard | null>(null)
+  const [monthly, setMonthly] = useState<MonthlyRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const result = await apiFetch<RawDashboard>('/dashboard')
+      const [result, monthlyResult] = await Promise.all([
+        apiFetch<RawDashboard>('/dashboard'),
+        apiFetch<{ months: MonthlyRow[] }>('/dashboard/monthly'),
+      ])
       setData(result)
+      setMonthly(monthlyResult.months?.slice(0, 24) ?? [])
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch dashboard')
@@ -112,6 +124,58 @@ export default function DashboardPage() {
           </div>
         ))}
       </div>
+
+      {/* Monthly Progress */}
+      {monthly.length > 0 && (
+        <div className="card">
+          <h2 className="text-sm font-semibold text-slate-300 mb-4">Monthly Progress</h2>
+          <div className="space-y-2">
+            {monthly.map((m) => {
+              const pct = m.total > 0 ? Math.round((m.complete / m.total) * 100) : 0
+              const errPct = m.total > 0 ? Math.round((m.errors / m.total) * 100) : 0
+              const remaining = m.total - m.complete - m.errors
+              const remainPct = m.total > 0 ? Math.round((remaining / m.total) * 100) : 0
+              const [year, mon] = m.month.split('-')
+              const label = new Date(Number(year), Number(mon) - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+              const glowColor = pct > 90 ? '0 0 8px rgba(34,197,94,0.4)' : pct >= 50 ? '0 0 8px rgba(245,158,11,0.3)' : '0 0 8px rgba(239,68,68,0.3)'
+              const borderColor = pct > 90 ? 'border-emerald-500/30' : pct >= 50 ? 'border-amber-500/30' : 'border-red-500/30'
+              return (
+                <div key={m.month} className="flex items-center gap-3">
+                  <span className="text-xs text-slate-400 w-20 shrink-0 tabular-nums">{label}</span>
+                  <div
+                    className={`flex-1 h-5 rounded-full overflow-hidden border ${borderColor}`}
+                    style={{ background: 'rgb(30,41,59)', boxShadow: glowColor }}
+                  >
+                    <div className="flex h-full">
+                      {pct > 0 && (
+                        <div
+                          style={{ width: `${pct}%` }}
+                          className="bg-emerald-500 transition-all duration-500"
+                        />
+                      )}
+                      {errPct > 0 && (
+                        <div
+                          style={{ width: `${errPct}%` }}
+                          className="bg-red-500 transition-all duration-500"
+                        />
+                      )}
+                      {remainPct > 0 && (
+                        <div
+                          style={{ width: `${remainPct}%` }}
+                          className="bg-slate-600 transition-all duration-500"
+                        />
+                      )}
+                    </div>
+                  </div>
+                  <span className="text-xs text-slate-500 w-16 shrink-0 text-right tabular-nums">
+                    {m.complete}/{m.total}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Match + Download stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

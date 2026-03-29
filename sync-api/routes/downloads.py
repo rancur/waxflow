@@ -136,6 +136,9 @@ async def download_stats():
             ).fetchone()
             avg_time = round(avg_row["avg_time"], 1) if avg_row and avg_row["avg_time"] else None
 
+            remaining_count = pending + queued + downloading
+            estimated_remaining = round(avg_time * remaining_count, 1) if avg_time and remaining_count else None
+
             return DownloadStatsResponse(
                 total=total,
                 pending=pending,
@@ -144,6 +147,7 @@ async def download_stats():
                 complete=complete,
                 failed=failed,
                 avg_download_time_seconds=avg_time,
+                estimated_remaining_seconds=estimated_remaining,
             )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

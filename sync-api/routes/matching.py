@@ -10,12 +10,30 @@ router = APIRouter(prefix="/api/matching", tags=["matching"])
 
 @router.get("/review")
 async def review_matches():
+    """Return mismatched tracks with details useful for side-by-side comparison."""
     try:
         with get_db() as conn:
             rows = conn.execute(
                 "SELECT * FROM tracks WHERE match_status = 'mismatched' ORDER BY updated_at DESC"
             ).fetchall()
-            tracks = [TrackOut(**row_to_track(r)) for r in rows]
+            tracks = []
+            for r in rows:
+                t = row_to_track(r)
+                # Add comparison-friendly fields
+                track_out = TrackOut(**t)
+                comparison = {
+                    "track": track_out,
+                    "spotify_duration_s": round((t.get("duration_ms") or 0) / 1000.0, 1),
+                    "file_path": t.get("file_path"),
+                    "fingerprint_match_score": t.get("fingerprint_match_score"),
+                    "verify_codec": t.get("verify_codec"),
+                    "verify_sample_rate": t.get("verify_sample_rate"),
+                    "pipeline_error": t.get("pipeline_error"),
+                    "tidal_id": t.get("tidal_id"),
+                    "match_source": t.get("match_source"),
+                    "match_confidence": t.get("match_confidence"),
+                }
+                tracks.append(comparison)
             return {"tracks": tracks, "total": len(tracks)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

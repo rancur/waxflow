@@ -122,3 +122,25 @@ async def get_dashboard():
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/monthly")
+async def monthly_progress():
+    """Return sync progress broken down by month."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT
+                    substr(spotify_added_at, 1, 7) as month,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN pipeline_stage = 'complete' THEN 1 ELSE 0 END) as complete,
+                    SUM(CASE WHEN pipeline_stage = 'error' THEN 1 ELSE 0 END) as errors
+                FROM tracks
+                WHERE spotify_added_at IS NOT NULL
+                GROUP BY month
+                ORDER BY month DESC
+            """).fetchall()
+            months = [{"month": r[0], "total": r[1], "complete": r[2], "errors": r[3]} for r in rows]
+            return {"months": months}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

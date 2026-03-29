@@ -48,7 +48,32 @@ def _process_new(db_path: str):
     tracks = get_tracks_by_stage(db_path, "new", limit=BATCH_SIZE)
     for track in tracks:
         try:
-            # Check if track already exists in the music library or Lexicon
+            # Check if track already exists in Lexicon's database
+            lexicon_existing = _check_existing_in_lexicon(track)
+            if lexicon_existing:
+                log.info(
+                    "Track %d (%s - %s) already in Lexicon (track_id=%s): %s",
+                    track["id"], track["artist"], track["title"],
+                    lexicon_existing["lexicon_track_id"], lexicon_existing["file_path"],
+                )
+                update_track(
+                    db_path, track["id"],
+                    pipeline_stage="organizing",
+                    match_status="matched",
+                    match_source="lexicon_existing",
+                    download_status="skipped",
+                    download_source="lexicon_existing",
+                    file_path=lexicon_existing["file_path"],
+                    lexicon_track_id=lexicon_existing["lexicon_track_id"],
+                )
+                log_activity(
+                    db_path, "lexicon_existing_found", track["id"],
+                    f"Found in Lexicon (track_id={lexicon_existing['lexicon_track_id']}): {lexicon_existing['file_path']}",
+                    {"lexicon_track_id": lexicon_existing["lexicon_track_id"], "file_path": lexicon_existing["file_path"]},
+                )
+                continue
+
+            # Check if track already exists in the music library on disk
             existing = _check_existing_in_library(track)
             if existing:
                 log.info("Track %d (%s - %s) already exists: %s", track["id"], track["artist"], track["title"], existing["file_path"])
@@ -73,6 +98,43 @@ def _process_new(db_path: str):
             log.info("Track %d (%s - %s) -> matching", track["id"], track["artist"], track["title"])
         except Exception as e:
             log.error("Failed to advance track %d: %s", track["id"], e)
+
+
+def _check_existing_in_lexicon(track: dict) -> dict | None:
+    """Check if a track already exists in Lexicon's database via the search API."""
+    artist = track.get("artist", "")
+    title = track.get("title", "")
+    if not artist or not title:
+        return None
+
+    lexicon_url = os.environ.get("LEXICON_API_URL", LEXICON_API_URL)
+    spotify_title = title.lower().strip()
+    spotify_artist = artist.lower().split(",")[0].strip()
+
+    try:
+        with httpx.Client(base_url=lexicon_url, timeout=15) as client:
+            resp = client.get("/v1/search/tracks", params={
+                "filter[artist]": artist,
+                "filter[title]": title,
+            })
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            results = data.get("data", {}).get("tracks", [])
+            for t in results:
+                lex_title = (t.get("title") or "").lower().strip()
+                lex_artist = (t.get("artist") or "").lower().strip()
+                # Fuzzy match: spotify "Hot One" matches lexicon "Hot One (Original Mix)"
+                if spotify_title in lex_title and spotify_artist in lex_artist:
+                    return {
+                        "lexicon_track_id": str(t["id"]),
+                        "file_path": t.get("location", ""),
+                    }
+    except Exception as e:
+        log.warning("Lexicon existing-track check failed for '%s - %s': %s", artist, title, e)
+
+    return None
 
 
 def _check_existing_in_library(track: dict) -> dict | None:
@@ -556,6 +618,7 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
 
     # Duration match score
     fp_match_score = None
+    duration_diff = None
     spotify_duration_ms = track.get("duration_ms") or 0
     if fp_duration and spotify_duration_ms:
         spotify_duration_s = spotify_duration_ms / 1000.0
@@ -569,6 +632,7 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
 
     verify_pass = True
     reasons = []
+    is_mismatched = False
 
     if not is_lossless:
         verify_pass = False
@@ -578,8 +642,22 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         verify_pass = False
         reasons.append(f"fingerprint score low: {fp_match_score:.2f}")
 
+    # Stricter duration-based mismatch detection
+    if duration_diff is not None and duration_diff > 10:
+        is_mismatched = True
+        verify_pass = False
+        reasons.append(f"duration mismatch ({duration_diff:.1f}s diff): likely wrong track")
+    elif duration_diff is not None and duration_diff > 5:
+        is_mismatched = True
+        verify_pass = False
+        reasons.append(f"duration suspicious ({duration_diff:.1f}s diff): possible wrong track")
+
     verify_status = "pass" if verify_pass else "fail"
     next_stage = "organizing" if verify_pass else "error"
+
+    extra_updates = {}
+    if is_mismatched:
+        extra_updates["match_status"] = "mismatched"
 
     update_track(
         db_path, track_id,
@@ -592,6 +670,7 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         fingerprint_match_score=fp_match_score,
         pipeline_stage=next_stage,
         pipeline_error="; ".join(reasons) if reasons else None,
+        **extra_updates,
     )
 
     log_activity(
@@ -664,6 +743,11 @@ def _organize_track(db_path: str, track: dict):
         relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
         mac_path = f"/Users/willcurran/SynologyDrive/Database/{relative_path}"
 
+        # Wait for SynologyDrive to sync the file from NAS to Mac Mini
+        sync_delay = int(get_config(db_path, "synology_sync_delay_seconds") or 10)
+        log.info("Waiting %ds for SynologyDrive sync...", sync_delay)
+        time.sleep(sync_delay)
+
         # Search Lexicon for the track by file path
         lexicon_track_id = _lexicon_find_or_import(client, mac_path, track)
 
@@ -701,6 +785,10 @@ def _organize_track(db_path: str, track: dict):
         pipeline_stage="complete",
     )
 
+    # Auto-trigger Lexicon analysis (BPM/key detection + genre tagging)
+    if lexicon_track_id and get_config(db_path, "auto_analyze_enabled") != "0":
+        _trigger_lexicon_analysis(db_path, lexicon_track_id, track_id)
+
     if playlist_row:
         with get_db(db_path) as conn:
             conn.execute("INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id) VALUES (?, ?)",
@@ -713,6 +801,42 @@ def _organize_track(db_path: str, track: dict):
         {"lexicon_track_id": lexicon_track_id, "playlist": playlist_name},
     )
     log.info("Track %d synced to Lexicon -> %s", track_id, playlist_name)
+
+
+def _trigger_lexicon_analysis(db_path: str, lexicon_track_id: str, track_id: int):
+    """Trigger Lexicon's BPM/key analysis and genre tagging for a synced track.
+
+    Non-fatal: logs errors but never fails the pipeline.
+    """
+    track_ids_payload = [int(lexicon_track_id)]
+
+    with httpx.Client(base_url=LEXICON_API_URL, timeout=60) as client:
+        # 1. BPM / key analysis
+        try:
+            resp = client.post("/v1/analyze", json={"trackIds": track_ids_payload})
+            if resp.status_code in (200, 201, 202, 204):
+                log.info("Track %d: Lexicon analysis triggered (lexicon_id=%s)", track_id, lexicon_track_id)
+            else:
+                log.warning("Track %d: Lexicon /v1/analyze returned HTTP %d: %s",
+                            track_id, resp.status_code, resp.text[:200])
+        except Exception as e:
+            log.warning("Track %d: Lexicon /v1/analyze failed: %s", track_id, e)
+
+        # 2. Tag / genre finder
+        try:
+            resp = client.post("/v1/find-tags", json={"trackIds": track_ids_payload})
+            if resp.status_code in (200, 201, 202, 204):
+                log.info("Track %d: Lexicon find-tags triggered (lexicon_id=%s)", track_id, lexicon_track_id)
+            else:
+                log.warning("Track %d: Lexicon /v1/find-tags returned HTTP %d: %s",
+                            track_id, resp.status_code, resp.text[:200])
+        except Exception as e:
+            log.warning("Track %d: Lexicon /v1/find-tags failed: %s", track_id, e)
+
+    log_activity(
+        db_path, "lexicon_analysis_triggered", track_id,
+        f"Triggered Lexicon analysis for lexicon_track_id={lexicon_track_id}",
+    )
 
 
 def _ensure_playlist(db_path: str, year: int, month: int, folder_name: str, playlist_name: str) -> dict:

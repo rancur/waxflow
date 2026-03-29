@@ -124,6 +124,7 @@ class DownloadStatsResponse(BaseModel):
     complete: int
     failed: int
     avg_download_time_seconds: Optional[float] = None
+    estimated_remaining_seconds: Optional[float] = None
 
 
 # --- Matching models ---
