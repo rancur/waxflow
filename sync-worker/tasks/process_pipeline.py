@@ -11,6 +11,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import re
+
 import httpx
 
 from tasks.helpers import (
@@ -44,10 +46,75 @@ async def process_pipeline(db_path: str):
 # Stage: new -> matching
 # ---------------------------------------------------------------------------
 
+def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
+    """Check if a track already exists in the file_index by ISRC or fuzzy title+artist."""
+    isrc = (track.get("isrc") or "").strip()
+    title = (track.get("title") or "").strip()
+    artist = (track.get("artist") or "").strip()
+
+    with get_db(db_path) as conn:
+        # Check if the file_index table exists
+        tbl = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='file_index'"
+        ).fetchone()
+        if not tbl:
+            return None
+
+        # Primary: exact ISRC match (guaranteed same recording)
+        if isrc:
+            row = conn.execute(
+                "SELECT file_path, title, artist FROM file_index WHERE isrc = ?", (isrc,)
+            ).fetchone()
+            if row:
+                return {"file_path": row[0], "match_type": "isrc"}
+
+        # Secondary: fuzzy title + artist prefix match
+        if title and artist:
+            title_prefix = title[:15]
+            artist_first = artist.split(",")[0].strip()
+            row = conn.execute(
+                "SELECT file_path FROM file_index WHERE title LIKE ? AND artist LIKE ?",
+                (f"{title_prefix}%", f"{artist_first}%"),
+            ).fetchone()
+            if row:
+                return {"file_path": row[0], "match_type": "title_artist"}
+
+    return None
+
+
 def _process_new(db_path: str):
     tracks = get_tracks_by_stage(db_path, "new", limit=BATCH_SIZE)
     for track in tracks:
+        # Safety: skip tracks that are already complete (prevents reprocessing)
+        if track.get("pipeline_stage") == "complete":
+            log.debug("Track %d already complete, skipping", track["id"])
+            continue
         try:
+            # Check ISRC index first (fastest, most reliable)
+            isrc_match = _check_existing_by_isrc(db_path, track)
+            if isrc_match:
+                log.info(
+                    "Track %d (%s - %s) found via %s in file index: %s",
+                    track["id"], track["artist"], track["title"],
+                    isrc_match["match_type"], isrc_match["file_path"],
+                )
+                update_track(
+                    db_path, track["id"],
+                    pipeline_stage="verifying",
+                    match_status="matched",
+                    match_source=f"file_index_{isrc_match['match_type']}",
+                    match_confidence=1.0 if isrc_match["match_type"] == "isrc" else 0.85,
+                    download_status="complete",
+                    download_source="existing",
+                    file_path=isrc_match["file_path"],
+                )
+                log_activity(
+                    db_path, "isrc_index_match", track["id"],
+                    f"Found via {isrc_match['match_type']} in file index: {isrc_match['file_path']}",
+                    {"file_path": isrc_match["file_path"], "match_type": isrc_match["match_type"]},
+                )
+                continue
+
             # Check if track already exists in Lexicon's database
             lexicon_existing = _check_existing_in_lexicon(track)
             if lexicon_existing:
@@ -74,7 +141,7 @@ def _process_new(db_path: str):
                 continue
 
             # Check if track already exists in the music library on disk
-            existing = _check_existing_in_library(track)
+            existing = _check_existing_in_library(track, db_path)
             if existing:
                 log.info("Track %d (%s - %s) already exists: %s", track["id"], track["artist"], track["title"], existing["file_path"])
                 update_track(
@@ -146,12 +213,30 @@ def _check_existing_in_lexicon(track: dict) -> dict | None:
     return None
 
 
-def _check_existing_in_library(track: dict) -> dict | None:
+def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict | None:
     """Check if a track already exists in the music library or downloads directory."""
     artist = track.get("artist", "")
     title = track.get("title", "")
     if not artist or not title:
         return None
+
+    # Check file_index for title+artist fuzzy match (fast, indexed)
+    # NOTE: ISRC lookup is handled by _check_existing_by_isrc, so only do title+artist here
+    if db_path:
+        try:
+            with get_db(db_path) as conn:
+                table_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='file_index'"
+                ).fetchone()
+                if table_exists:
+                    row = conn.execute(
+                        "SELECT file_path FROM file_index WHERE title LIKE ? AND artist LIKE ? LIMIT 1",
+                        (f"%{title[:20]}%", f"%{artist.split(',')[0].strip()[:15]}%"),
+                    ).fetchone()
+                    if row and os.path.exists(row[0]):
+                        return {"file_path": row[0]}
+        except Exception:
+            pass  # file_index may not exist yet
 
     downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
 
@@ -218,6 +303,24 @@ def _process_matching(db_path: str):
             log_activity(db_path, "match_error", track["id"], f"Match failed: {e}")
 
 
+def _normalize_title(title: str) -> str:
+    """Normalize a track title for fuzzy comparison."""
+    t = title.lower().strip()
+    # Remove common suffixes
+    for suffix in [" - original mix", " (original mix)", " - extended mix", " (extended mix)",
+                   " - radio edit", " (radio edit)", " - vip", " (vip)",
+                   " - original version", " (original version)"]:
+        t = t.replace(suffix, "")
+    # Remove featured artist tags: [feat. ...], (feat. ...), [ft. ...], (ft. ...)
+    t = re.sub(r"\s*[\(\[]\s*(?:feat|ft)\.?\s+[^\)\]]+[\)\]]", "", t)
+    # Normalize parentheses vs dashes for remixes
+    # "Title - Remix Name" -> "title remix name"
+    # "Title (Remix Name)" -> "title remix name"
+    t = t.replace(" - ", " ").replace("(", "").replace(")", "").replace("[", "").replace("]", "")
+    # Remove extra whitespace
+    return " ".join(t.split())
+
+
 def _match_track(db_path: str, track: dict):
     """Try to find a Tidal match. Uses Tidarr's Tidal session for search via tiddl."""
     track_id = track["id"]
@@ -231,46 +334,86 @@ def _match_track(db_path: str, track: dict):
     confidence = 0.0
     match_source = None
 
-    # Strategy 1: Search Tidal by ISRC using Tidarr's tiddl
+    # Strategy 1: Search Tidal by ISRC
     if isrc:
         try:
             results = _tidal_search_via_tidarr(isrc)
+            # Check ALL results for matching ISRC (not just the first)
             for item in results:
                 if item.get("isrc", "").upper() == isrc.upper():
                     tidal_id = str(item["id"])
                     confidence = 1.0
                     match_source = "isrc"
                     matched = True
+                    log.debug("Track %d: ISRC match found at result index %d", track_id,
+                              results.index(item))
                     break
         except Exception as e:
             log.warning("ISRC search failed for track %d: %s", track_id, e)
 
-    # Strategy 2: Search by artist + title
+    # Strategy 2: Search by artist + title with smarter matching
     if not matched:
         query = f"{artist} {title}".strip()
         if query:
             try:
                 results = _tidal_search_via_tidarr(query)
+                spotify_norm = _normalize_title(title)
+                spotify_artists = [a.strip().lower() for a in artist.split(",")]
+
+                best_candidate = None
+                best_confidence = 0.0
+
                 for item in results:
-                    item_title = (item.get("title") or "").lower()
+                    item_title = (item.get("title") or "")
+                    item_norm = _normalize_title(item_title)
+                    item_title_lower = item_title.lower()
+
+                    # Build full artist string from Tidal response
                     item_artist = ""
                     if item.get("artist", {}).get("name"):
                         item_artist = item["artist"]["name"].lower()
                     elif item.get("artists"):
-                        item_artist = item["artists"][0].get("name", "").lower()
+                        item_artist = " ".join(
+                            a.get("name", "") for a in item["artists"]
+                        ).lower()
+
+                    # Check if ANY Spotify artist appears in the Tidal artist name
+                    artist_match = any(sa in item_artist for sa in spotify_artists)
+                    if not artist_match:
+                        continue
 
                     item_duration = (item.get("duration") or 0) * 1000
+                    duration_diff = abs(item_duration - duration_ms)
 
-                    title_match = (title.lower() in item_title or item_title in title.lower())
-                    artist_match = (artist.lower().split(",")[0].strip() in item_artist)
-                    duration_close = abs(item_duration - duration_ms) < 5000
+                    # Title matching tiers
+                    norm_exact = (spotify_norm == item_norm)
+                    partial_match = (
+                        spotify_norm in item_norm
+                        or item_norm in spotify_norm
+                        or title.lower() in item_title_lower
+                        or item_title_lower in title.lower()
+                    )
 
-                    if title_match and artist_match and duration_close:
-                        tidal_id = str(item["id"])
-                        confidence = 0.95
-                        match_source = "search"
-                        matched = True
-                        break
+                    # Compute confidence based on match quality
+                    candidate_confidence = 0.0
+                    if norm_exact and duration_diff <= 5000:
+                        candidate_confidence = 0.95
+                    elif norm_exact and duration_diff <= 15000:
+                        candidate_confidence = 0.90
+                    elif partial_match and duration_diff <= 5000:
+                        candidate_confidence = 0.85
+                    elif partial_match and duration_diff <= 15000:
+                        candidate_confidence = 0.80
+
+                    if candidate_confidence > best_confidence:
+                        best_confidence = candidate_confidence
+                        best_candidate = item
+
+                if best_candidate and best_confidence >= 0.80:
+                    tidal_id = str(best_candidate["id"])
+                    confidence = best_confidence
+                    match_source = "search"
+                    matched = True
             except Exception as e:
                 log.warning("Title/artist search failed for track %d: %s", track_id, e)
 
@@ -382,6 +525,40 @@ def _download_track(db_path: str, track: dict):
 
     if not tidal_id:
         raise ValueError("No tidal_id set for track")
+
+    # Dedup: skip if file_path is already set and file exists on disk
+    existing_path = track.get("file_path")
+    if existing_path and os.path.exists(existing_path):
+        log.info("Track %d already has file at %s, skipping download", track_id, existing_path)
+        update_track(
+            db_path, track_id,
+            download_status="complete",
+            download_source="existing",
+            pipeline_stage="verifying",
+            verify_status="pending",
+        )
+        log_activity(db_path, "download_skipped", track_id,
+                     f"File already exists: {existing_path}")
+        return
+
+    # Dedup: skip if this track_id already has a completed download in the queue
+    with get_db(db_path) as conn:
+        already_done = conn.execute(
+            "SELECT id FROM download_queue WHERE track_id = ? AND status = 'complete'",
+            (track_id,),
+        ).fetchone()
+    if already_done:
+        log.info("Track %d already has a completed download in queue, skipping", track_id)
+        update_track(
+            db_path, track_id,
+            download_status="complete",
+            download_source="existing",
+            pipeline_stage="verifying",
+            verify_status="pending",
+        )
+        log_activity(db_path, "download_skipped", track_id,
+                     "Already completed in download_queue")
+        return
 
     update_track(db_path, track_id, download_status="downloading", download_attempts=attempts)
 
@@ -793,9 +970,13 @@ def _organize_track(db_path: str, track: dict):
                     conn.execute("UPDATE playlists SET lexicon_playlist_id = ? WHERE id = ?",
                                  (lexicon_playlist_id, playlist_row["id"]))
 
-        # 3. Add track to playlist
+        # 3. Add track to playlist (only if not already present)
         if lexicon_playlist_id and lexicon_track_id:
-            _lexicon_add_to_playlist(client, lexicon_playlist_id, lexicon_track_id)
+            if _lexicon_track_in_playlist(client, lexicon_playlist_id, lexicon_track_id):
+                log.info("Track %d (lexicon_id=%s) already in playlist %s, skipping add",
+                         track_id, lexicon_track_id, playlist_name)
+            else:
+                _lexicon_add_to_playlist(client, lexicon_playlist_id, lexicon_track_id)
 
         # 4. Tag with [sls:spotify_id]
         if lexicon_track_id:
@@ -1001,6 +1182,20 @@ def _lexicon_ensure_playlist(client: httpx.Client, playlist_name: str, folder_id
     except Exception as e:
         log.warning("Lexicon playlist operation failed: %s", e)
     return None
+
+
+def _lexicon_track_in_playlist(client: httpx.Client, playlist_id: str, track_id: str) -> bool:
+    """Check if a track is already in a Lexicon playlist."""
+    try:
+        resp = client.get(f"/v1/playlist", params={"id": int(playlist_id)})
+        if resp.status_code == 200:
+            data = resp.json()
+            playlist_data = data.get("data", data)
+            existing_ids = playlist_data.get("trackIds", [])
+            return int(track_id) in existing_ids
+    except Exception as e:
+        log.warning("Lexicon playlist membership check failed: %s", e)
+    return False
 
 
 def _lexicon_add_to_playlist(client: httpx.Client, playlist_id: str, track_id: str):

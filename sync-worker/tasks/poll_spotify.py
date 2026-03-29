@@ -69,7 +69,7 @@ def _poll(db_path: str):
             if existing:
                 continue
 
-            # Extract metadata
+            # Extract metadata (needed for dedup checks below)
             artists = ", ".join(a["name"] for a in track.get("artists", []) if a.get("name"))
             album_info = track.get("album", {})
             album_name = album_info.get("name", "")
@@ -77,6 +77,35 @@ def _poll(db_path: str):
             # Get ISRC from external_ids
             external_ids = track.get("external_ids", {})
             isrc = external_ids.get("isrc")
+
+            # Dedup: same ISRC already in DB (different Spotify ID, same recording)
+            if isrc:
+                with get_db(db_path) as conn:
+                    isrc_dup = conn.execute(
+                        "SELECT id FROM tracks WHERE isrc = ? AND isrc IS NOT NULL",
+                        (isrc,),
+                    ).fetchone()
+                if isrc_dup:
+                    log.info(
+                        "Duplicate ISRC %s for %s - %s (existing track %d), skipping",
+                        isrc, artists, track.get("name"), isrc_dup[0],
+                    )
+                    continue
+
+            # Dedup: same artist + title already in DB
+            track_name = track.get("name", "")
+            if artists and track_name:
+                with get_db(db_path) as conn:
+                    title_dup = conn.execute(
+                        "SELECT id FROM tracks WHERE lower(artist) = lower(?) AND lower(title) = lower(?)",
+                        (artists, track_name),
+                    ).fetchone()
+                if title_dup:
+                    log.info(
+                        "Duplicate artist+title '%s - %s' (existing track %d), skipping",
+                        artists, track_name, title_dup[0],
+                    )
+                    continue
 
             # Insert new track
             with get_db(db_path) as conn:

@@ -74,10 +74,17 @@ def update_track(db_path: str, track_id: int, **fields):
 
 
 def get_tracks_by_stage(db_path: str, stage: str, limit: int = 10) -> list[dict]:
-    """Fetch tracks at a given pipeline_stage."""
+    """Fetch tracks at a given pipeline_stage.
+
+    Includes a 60-second timing guard: tracks updated in the last 60 seconds
+    are skipped to prevent two pipeline cycles from processing the same track.
+    """
     with get_db(db_path) as conn:
         rows = conn.execute(
-            "SELECT * FROM tracks WHERE pipeline_stage = ? ORDER BY created_at ASC LIMIT ?",
+            """SELECT * FROM tracks
+            WHERE pipeline_stage = ?
+              AND (updated_at IS NULL OR updated_at < datetime('now', '-60 seconds'))
+            ORDER BY created_at ASC LIMIT ?""",
             (stage, limit),
         ).fetchall()
         return [dict(r) for r in rows]
