@@ -8,6 +8,8 @@ export default function SettingsPage() {
   const [backups, setBackups] = useState<any[]>([])
   const [version, setVersion] = useState<any>(null)
   const [spotifyStatus, setSpotifyStatus] = useState<any>(null)
+  const [health, setHealth] = useState<any>(null)
+  const [dashboard, setDashboard] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -15,17 +17,21 @@ export default function SettingsPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [settingsRes, backupsRes, versionRes, spotifyRes] = await Promise.allSettled([
+      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes] = await Promise.allSettled([
         apiFetch<any>('/settings'),
         apiFetch<any>('/lexicon/backups'),
         apiFetch<any>('/admin/version'),
         apiFetch<any>('/spotify/status'),
+        apiFetch<any>('/admin/health'),
+        apiFetch<any>('/dashboard'),
       ])
 
       if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value.settings || {})
       if (backupsRes.status === 'fulfilled') setBackups(backupsRes.value.backups || backupsRes.value || [])
       if (versionRes.status === 'fulfilled') setVersion(versionRes.value)
       if (spotifyRes.status === 'fulfilled') setSpotifyStatus(spotifyRes.value)
+      if (healthRes.status === 'fulfilled') setHealth(healthRes.value)
+      if (dashboardRes.status === 'fulfilled') setDashboard(dashboardRes.value)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings')
@@ -121,6 +127,90 @@ export default function SettingsPage() {
           <button className="btn-primary text-sm" onClick={handleConnectSpotify}>
             {spotifyStatus?.authenticated ? 'Reconnect' : 'Connect Spotify'}
           </button>
+        </div>
+      </div>
+
+      {/* Service Health */}
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Service Health</h2>
+        <div className="space-y-3">
+          {/* Spotify */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`w-2.5 h-2.5 rounded-full ${spotifyStatus?.authenticated ? 'bg-emerald-400' : 'bg-red-400'}`} />
+              <span className="text-sm text-slate-300">Spotify</span>
+            </div>
+            <span className="text-xs text-slate-500">
+              {spotifyStatus?.authenticated ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+
+          {/* Tidarr */}
+          {(() => {
+            const tidarr = dashboard?.services?.find((s: any) => s.name === 'tidarr')
+            const tidarrUrl = settings.tidarr_url || 'http://192.168.1.221:8484'
+            return (
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`w-2.5 h-2.5 rounded-full ${tidarr?.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                  <span className="text-sm text-slate-300">Tidarr</span>
+                  <span className="text-xs text-slate-600 font-mono">{tidarrUrl}</span>
+                </div>
+                <span className="text-xs text-slate-500">
+                  {tidarr?.status === 'ok'
+                    ? `Connected (${tidarr.latency_ms}ms)`
+                    : tidarr?.error || 'Unknown'}
+                </span>
+              </div>
+            )
+          })()}
+
+          {/* Lexicon */}
+          {(() => {
+            const lexicon = dashboard?.services?.find((s: any) => s.name === 'lexicon')
+            const lexiconUrl = settings.lexicon_api_url || 'http://192.168.1.116:48624'
+            return (
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`w-2.5 h-2.5 rounded-full ${lexicon?.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                  <span className="text-sm text-slate-300">Lexicon</span>
+                  <span className="text-xs text-slate-600 font-mono">{lexiconUrl}</span>
+                </div>
+                <span className="text-xs text-slate-500">
+                  {lexicon?.status === 'ok'
+                    ? `Connected (${lexicon.latency_ms}ms)`
+                    : lexicon?.error || 'Unknown'}
+                </span>
+              </div>
+            )
+          })()}
+
+          {/* Database */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`w-2.5 h-2.5 rounded-full ${health?.database === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
+              <span className="text-sm text-slate-300">Database</span>
+            </div>
+            <span className="text-xs text-slate-500">
+              {health?.database === 'ok' ? 'OK' : health?.database || 'Unknown'}
+            </span>
+          </div>
+
+          {/* Uptime */}
+          {health?.uptime_seconds != null && (
+            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+              <span className="text-xs text-slate-500">Uptime</span>
+              <span className="text-xs text-slate-400 font-mono">
+                {(() => {
+                  const s = health.uptime_seconds
+                  const d = Math.floor(s / 86400)
+                  const h = Math.floor((s % 86400) / 3600)
+                  const m = Math.floor((s % 3600) / 60)
+                  return d > 0 ? `${d}d ${h}h ${m}m` : h > 0 ? `${h}h ${m}m` : `${m}m`
+                })()}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -225,7 +315,7 @@ export default function SettingsPage() {
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Version</h2>
         <div className="flex items-center justify-between">
           <div className="text-sm text-slate-400">
-            <span className="font-mono text-xs">{version?.git_sha || 'unknown'}</span>
+            <span className="font-mono text-xs">{version?.version || '?'}{version?.git_sha ? ` (${version.git_sha})` : ''}</span>
           </div>
           <button
             className="btn-secondary text-sm"

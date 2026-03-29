@@ -2,7 +2,11 @@ version: '3.8'
 
 services:
   sync-api:
-    build: ./sync-api
+    build:
+      context: .
+      dockerfile: sync-api/Dockerfile
+      args:
+        - GIT_SHA=${GIT_SHA:-unknown}
     container_name: sync-api
     ports:
       - "8402:8402"

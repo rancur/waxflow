@@ -211,5 +211,6 @@ class HealthResponse(BaseModel):
 
 
 class VersionResponse(BaseModel):
+    version: Optional[str] = None
     git_sha: Optional[str] = None
     build_date: Optional[str] = None

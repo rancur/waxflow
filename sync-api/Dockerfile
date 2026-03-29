@@ -4,15 +4,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libchromaprint-tools \
     sox \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY sync-api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY sync-api/ .
+COPY VERSION /app/VERSION
+
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 
 RUN chmod +x entrypoint.sh
 

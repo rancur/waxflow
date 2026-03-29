@@ -1,5 +1,7 @@
-import subprocess
+import os
 import time
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
 from db import get_db
@@ -62,9 +64,10 @@ async def health_check():
 
 @router.post("/admin/update")
 async def trigger_update():
-    """Create a signal file that the auto-update cron script watches for."""
-    import pathlib
-    signal_path = pathlib.Path("/app/data/.update-requested")
+    """Create a signal file that the auto-update cron script watches for.
+    Writes to the Docker volume at /app/data/ so it persists and is visible to host scripts.
+    """
+    signal_path = Path("/app/data/.update-requested")
     try:
         signal_path.write_text(f"requested at {time.time()}")
         return {"status": "ok", "message": "Update requested. The auto-update cron will pick this up."}
@@ -74,15 +77,18 @@ async def trigger_update():
 
 @router.get("/admin/version", response_model=VersionResponse)
 async def get_version():
-    git_sha = None
+    # Read version from VERSION file (baked into image at build time)
+    version = None
+    version_path = Path("/app/VERSION")
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5, cwd="/app",
-        )
-        if result.returncode == 0:
-            git_sha = result.stdout.strip()
+        if version_path.exists():
+            version = version_path.read_text().strip()
     except Exception:
         pass
 
-    return VersionResponse(git_sha=git_sha)
+    # Read git SHA from env var (set as build arg)
+    git_sha = os.environ.get("GIT_SHA") or None
+    if git_sha == "unknown":
+        git_sha = None
+
+    return VersionResponse(version=version, git_sha=git_sha)

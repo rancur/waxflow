@@ -128,7 +128,8 @@ def init():
             ('lexicon_backup_before_sync', '1'),
             ('max_concurrent_downloads', '2'),
             ('fingerprint_min_score', '0.85'),
-            ('music_library_path', '/music');
+            ('music_library_path', '/music'),
+            ('activity_log_retention_days', '365');
         """)
     print("Database initialized successfully.")
 

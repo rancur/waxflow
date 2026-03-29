@@ -777,7 +777,11 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
 
 
 def _lexicon_ensure_folder(client: httpx.Client, folder_name: str) -> str | None:
-    """Find or create a year folder in Lexicon."""
+    """Find or create a year folder in Lexicon under ROOT (parentId=1).
+
+    Handles the case where a year folder (e.g. "2026") doesn't exist yet
+    by creating it as a folder (type=1, folderType=1) under ROOT.
+    """
     try:
         resp = client.get("/v1/playlists")
         if resp.status_code == 200:
@@ -790,10 +794,17 @@ def _lexicon_ensure_folder(client: httpx.Client, folder_name: str) -> str | None
                 items = root
 
             for item in items:
-                if item.get("name") == folder_name and item.get("type") == "1":
+                # type may be int 1 or string "1" depending on Lexicon version
+                if item.get("name") == folder_name and str(item.get("type")) == "1":
+                    log.info("Found existing Lexicon folder '%s' (id=%s)", folder_name, item["id"])
                     return str(item["id"])
 
-        # Create folder under ROOT (parentId=1)
+            log.info("Folder '%s' not found in Lexicon, creating under ROOT (parentId=1)", folder_name)
+    except Exception as e:
+        log.warning("Lexicon folder search failed: %s — will attempt to create folder", e)
+
+    # Create folder under ROOT (parentId=1)
+    try:
         resp = client.post("/v1/playlist", json={
             "name": folder_name,
             "type": "1",
@@ -802,9 +813,13 @@ def _lexicon_ensure_folder(client: httpx.Client, folder_name: str) -> str | None
         })
         if resp.status_code in (200, 201):
             data = resp.json()
-            return str(data.get("data", {}).get("id", data.get("id", "")))
+            folder_id = str(data.get("data", {}).get("id", data.get("id", "")))
+            log.info("Created Lexicon folder '%s' (id=%s)", folder_name, folder_id)
+            return folder_id
+        else:
+            log.warning("Lexicon folder create failed: HTTP %d - %s", resp.status_code, resp.text)
     except Exception as e:
-        log.warning("Lexicon folder operation failed: %s", e)
+        log.warning("Lexicon folder creation failed: %s", e)
     return None
 
 

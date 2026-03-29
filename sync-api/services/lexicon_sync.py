@@ -59,7 +59,7 @@ class LexiconSyncService:
 
     async def create_folder(self, parent_id: int | None, name: str) -> str:
         """Create a folder in Lexicon. Returns folder ID."""
-        body = {"name": name, "type": "1", "folderType": "1"}  # type 1 = folder
+        body = {"name": name, "type": "1"}  # type 1 = folder (no folderType - Lexicon rejects it)
         if parent_id:
             body["parentId"] = int(parent_id)
         resp = await self._request("POST", "/v1/playlist", json=body)
