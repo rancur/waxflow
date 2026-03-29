@@ -11,6 +11,9 @@ router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 @router.get("")
 async def list_downloads(
     status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query("created_at"),
+    sort_dir: Optional[str] = Query("desc"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
 ):
@@ -23,19 +26,39 @@ async def list_downloads(
                 conditions.append("dq.status = ?")
                 params.append(status)
 
+            if search:
+                conditions.append("(t.title LIKE ? OR t.artist LIKE ? OR t.album LIKE ?)")
+                like = f"%{search}%"
+                params.extend([like, like, like])
+
             where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
             total = conn.execute(
-                f"SELECT COUNT(*) FROM download_queue dq {where}", params
+                f"SELECT COUNT(*) FROM download_queue dq LEFT JOIN tracks t ON t.id = dq.track_id {where}", params
             ).fetchone()[0]
+
+            # Validate sort column
+            allowed_sorts = {
+                "created_at": "dq.created_at",
+                "started_at": "dq.started_at",
+                "completed_at": "dq.completed_at",
+                "status": "dq.status",
+                "title": "t.title",
+                "artist": "t.artist",
+                "attempts": "dq.attempts",
+                "priority": "dq.priority",
+            }
+            order_col = allowed_sorts.get(sort_by, "dq.created_at")
+            order_dir = "ASC" if sort_dir and sort_dir.lower() == "asc" else "DESC"
 
             offset = (page - 1) * per_page
             rows = conn.execute(
-                f"""SELECT dq.*, t.title, t.artist, t.album, t.spotify_id
+                f"""SELECT dq.*, t.title, t.artist, t.album, t.spotify_id,
+                        t.file_path, t.verify_codec, t.verify_sample_rate, t.verify_bit_depth
                     FROM download_queue dq
                     LEFT JOIN tracks t ON t.id = dq.track_id
                     {where}
-                    ORDER BY dq.priority DESC, dq.created_at ASC
+                    ORDER BY {order_col} {order_dir}
                     LIMIT ? OFFSET ?""",
                 params + [per_page, offset],
             ).fetchall()
@@ -58,10 +81,56 @@ async def list_downloads(
                     "track_title": d.get("title"),
                     "track_artist": d.get("artist"),
                     "track_album": d.get("album"),
+                    "file_path": d.get("file_path"),
+                    "codec": d.get("verify_codec"),
+                    "sample_rate": d.get("verify_sample_rate"),
+                    "bit_depth": d.get("verify_bit_depth"),
                 }
                 items.append(item)
 
-            return {"items": items, "total": total, "page": page, "per_page": per_page}
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": max(1, (total + per_page - 1) // per_page),
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/recent")
+async def recent_downloads(limit: int = Query(10, ge=1, le=50)):
+    """Last N completed downloads with file details."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """SELECT dq.*, t.title, t.artist, t.album, t.file_path,
+                        t.verify_codec, t.verify_sample_rate, t.verify_bit_depth
+                    FROM download_queue dq
+                    LEFT JOIN tracks t ON t.id = dq.track_id
+                    WHERE dq.status = 'complete' AND dq.completed_at IS NOT NULL
+                    ORDER BY dq.completed_at DESC
+                    LIMIT ?""",
+                (limit,),
+            ).fetchall()
+
+            items = []
+            for r in rows:
+                d = dict(r)
+                items.append({
+                    "id": d["id"],
+                    "track_id": d["track_id"],
+                    "track_title": d.get("title"),
+                    "track_artist": d.get("artist"),
+                    "track_album": d.get("album"),
+                    "file_path": d.get("file_path"),
+                    "codec": d.get("verify_codec"),
+                    "sample_rate": d.get("verify_sample_rate"),
+                    "bit_depth": d.get("verify_bit_depth"),
+                    "completed_at": d["completed_at"],
+                })
+            return {"items": items}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
