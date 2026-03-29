@@ -863,14 +863,28 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         log.warning("fpcalc failed for track %d: %s", track_id, e)
 
     lossless_codecs = ("flac", "alac", "wav", "aiff", "pcm_s16be", "pcm_s24be", "pcm_s32be",
-                       "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le")
+                       "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le",
+                       "pcm_f32be", "pcm_f64be")
     is_lossless = codec in lossless_codecs and sample_rate >= 44100
 
     # Duration match score
     fp_match_score = None
     duration_diff = None
     spotify_duration_ms = track.get("duration_ms") or 0
-    if fp_duration and spotify_duration_ms:
+
+    # Trusted match sources: the file IS the correct recording (matched by ISRC or
+    # found in existing library).  Skip strict duration-based fingerprint scoring.
+    match_source = track.get("match_source") or ""
+    trusted_match = match_source in ("file_index_isrc", "isrc", "lexicon_existing", "library_existing")
+
+    if trusted_match:
+        # For trusted matches the recording identity is already confirmed.
+        # Compute duration_diff for informational logging only.
+        if fp_duration and spotify_duration_ms:
+            spotify_duration_s = spotify_duration_ms / 1000.0
+            duration_diff = abs(fp_duration - spotify_duration_s)
+        fp_match_score = 1.0
+    elif fp_duration and spotify_duration_ms:
         spotify_duration_s = spotify_duration_ms / 1000.0
         duration_diff = abs(fp_duration - spotify_duration_s)
         if duration_diff <= 2:
@@ -892,15 +906,16 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         verify_pass = False
         reasons.append(f"fingerprint score low: {fp_match_score:.2f}")
 
-    # Stricter duration-based mismatch detection
-    if duration_diff is not None and duration_diff > 10:
-        is_mismatched = True
-        verify_pass = False
-        reasons.append(f"duration mismatch ({duration_diff:.1f}s diff): likely wrong track")
-    elif duration_diff is not None and duration_diff > 5:
-        is_mismatched = True
-        verify_pass = False
-        reasons.append(f"duration suspicious ({duration_diff:.1f}s diff): possible wrong track")
+    # Stricter duration-based mismatch detection (only for untrusted search matches)
+    if not trusted_match:
+        if duration_diff is not None and duration_diff > 10:
+            is_mismatched = True
+            verify_pass = False
+            reasons.append(f"duration mismatch ({duration_diff:.1f}s diff): likely wrong track")
+        elif duration_diff is not None and duration_diff > 5:
+            is_mismatched = True
+            verify_pass = False
+            reasons.append(f"duration suspicious ({duration_diff:.1f}s diff): possible wrong track")
 
     verify_status = "pass" if verify_pass else "fail"
     next_stage = "organizing" if verify_pass else "error"
