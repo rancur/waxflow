@@ -1,13 +1,20 @@
 #!/bin/bash
 # Auto-update script for spotify-lexicon-sync
-# Polls GitHub for new commits and rebuilds if found
-# Install as cron: */5 * * * * /volume1/homes/willcurran/spotify-lexicon-sync/scripts/auto-update.sh
+# Checks the Docker volume for a signal file from the web UI
+# NAS doesn't have git, so updates are pushed via rsync from Mac Mini
+# Install as Synology Task Scheduler: every 5 min
+# Or run from Mac Mini cron: */5 * * * * /path/to/auto-update.sh
 
 set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/volume1/homes/willcurran/spotify-lexicon-sync}"
 LOG_FILE="${REPO_DIR}/logs/auto-update.log"
 LOCK_FILE="/tmp/sls-update.lock"
+DOCKER="/usr/local/bin/docker"
+
+# Signal file is in the Docker volume
+VOLUME_DATA=$(${DOCKER} volume inspect spotify-lexicon-sync_sync-data --format '{{.Mountpoint}}' 2>/dev/null || echo "")
+SIGNAL_FILE="${VOLUME_DATA}/.update-requested"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -26,27 +33,12 @@ trap 'rm -f "$LOCK_FILE"' EXIT
 cd "$REPO_DIR"
 
 # Check for signal file from web UI
-SIGNAL_FILE="${REPO_DIR}/.update-requested"
-if [ -f "$SIGNAL_FILE" ]; then
+if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
     log "Update requested via web UI"
     rm -f "$SIGNAL_FILE"
-    git pull origin main >> "$LOG_FILE" 2>&1
-    /usr/local/bin/docker compose up -d --build >> "$LOG_FILE" 2>&1
-    log "Update complete (manual trigger)"
+    ${DOCKER} compose up -d --build >> "$LOG_FILE" 2>&1
+    log "Rebuild complete (web UI trigger)"
     exit 0
 fi
 
-# Check for new commits
-git fetch origin main --quiet 2>/dev/null || { log "Failed to fetch"; exit 1; }
-
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
-
-if [ "$LOCAL" = "$REMOTE" ]; then
-    exit 0
-fi
-
-log "New commits detected: $LOCAL -> $REMOTE"
-git pull origin main >> "$LOG_FILE" 2>&1
-/usr/local/bin/docker compose up -d --build >> "$LOG_FILE" 2>&1
-log "Update complete: now at $(git rev-parse --short HEAD)"
+log "No update needed"

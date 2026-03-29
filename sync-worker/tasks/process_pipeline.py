@@ -48,10 +48,68 @@ def _process_new(db_path: str):
     tracks = get_tracks_by_stage(db_path, "new", limit=BATCH_SIZE)
     for track in tracks:
         try:
+            # Check if track already exists in the music library or Lexicon
+            existing = _check_existing_in_library(track)
+            if existing:
+                log.info("Track %d (%s - %s) already exists: %s", track["id"], track["artist"], track["title"], existing["file_path"])
+                update_track(
+                    db_path, track["id"],
+                    pipeline_stage="verifying",
+                    match_status="matched",
+                    match_source="library_existing",
+                    match_confidence=0.9,
+                    download_status="complete",
+                    download_source="existing",
+                    file_path=existing["file_path"],
+                )
+                log_activity(
+                    db_path, "existing_found", track["id"],
+                    f"Found existing file: {existing['file_path']}",
+                    {"file_path": existing["file_path"]},
+                )
+                continue
+
             update_track(db_path, track["id"], pipeline_stage="matching")
             log.info("Track %d (%s - %s) -> matching", track["id"], track["artist"], track["title"])
         except Exception as e:
             log.error("Failed to advance track %d: %s", track["id"], e)
+
+
+def _check_existing_in_library(track: dict) -> dict | None:
+    """Check if a track already exists in the music library on disk."""
+    artist = track.get("artist", "")
+    title = track.get("title", "")
+    if not artist or not title:
+        return None
+
+    # Check common artist name variations
+    artist_names = [
+        artist.split(",")[0].strip(),                    # First artist
+        artist,                                           # Full artist string
+        artist.replace(", ", " "),                        # No comma
+    ]
+
+    title_lower = title.lower()
+
+    for artist_name in artist_names:
+        artist_dir = os.path.join(MUSIC_LIBRARY_PATH, artist_name)
+        if not os.path.isdir(artist_dir):
+            continue
+
+        # Walk the artist directory for matching files
+        for root, dirs, files in os.walk(artist_dir):
+            # Skip Synology metadata dirs
+            dirs[:] = [d for d in dirs if not d.startswith("@")]
+            for f in files:
+                if not f.endswith((".flac", ".aiff", ".m4a", ".wav")):
+                    continue
+                fname_lower = f.lower()
+                # Check if the title appears in the filename
+                # Lexicon naming: "Artist - Title (Mix) KEY_BPM.ext"
+                if title_lower[:20] in fname_lower:
+                    return {"file_path": os.path.join(root, f)}
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +316,17 @@ def _download_track(db_path: str, track: dict):
     with httpx.Client(timeout=120) as client:
         resp = client.post(
             f"{TIDARR_URL}/api/save",
-            json={"item": {"type": "track", "status": "queued", "url": tidal_url}},
+            json={"item": {
+                "id": int(tidal_id),
+                "artist": artist,
+                "title": title,
+                "type": "track",
+                "quality": "max",
+                "status": "queue",
+                "loading": False,
+                "error": False,
+                "url": f"/track/{tidal_id}",
+            }},
         )
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Tidarr save failed: HTTP {resp.status_code} - {resp.text}")
@@ -325,47 +393,51 @@ def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval:
 
 
 def _find_and_move_downloaded_file(db_path: str, track_id: int, artist: str, album: str, title: str) -> str | None:
-    """Find a recently downloaded file and move it to the organized library path."""
-    # Tidarr downloads to /shared (the Docker volume) or the configured music path
-    search_dirs = ["/music", "/shared", "/downloads"]
+    """Find a recently downloaded file.
 
-    # Look for recently modified FLAC files
-    recent_files = []
-    cutoff = time.time() - 600  # files modified in last 10 minutes
+    Tidarr downloads to /music (= /volume1/music/Database) using the template:
+    tracks/{artist}/{artist} - {title}.flac
 
-    for base_dir in search_dirs:
-        if not os.path.exists(base_dir):
-            continue
-        for root, dirs, files in os.walk(base_dir):
-            for f in files:
-                if f.endswith((".flac", ".m4a", ".aiff")):
-                    fpath = os.path.join(root, f)
-                    try:
-                        mtime = os.path.getmtime(fpath)
-                        if mtime > cutoff:
-                            recent_files.append((fpath, mtime))
-                    except OSError:
-                        continue
-
-    if not recent_files:
-        return None
-
-    # Sort by most recent
-    recent_files.sort(key=lambda x: x[1], reverse=True)
-
-    # Try to match by title/artist in filename
+    So files should already be in the right place — no moving needed.
+    """
+    artist_first = artist.split(",")[0].strip()
     title_lower = title.lower()
-    artist_lower = artist.lower().split(",")[0].strip()
 
-    for fpath, _ in recent_files:
-        fname = os.path.basename(fpath).lower()
-        if title_lower[:15] in fname or artist_lower in fpath.lower():
-            # Move to organized path
-            return _move_to_library(fpath, artist, album, title, track_id)
+    # Tidarr's track template: tracks/{album.artist}/{album.artist} - {item.title_version}
+    # Check the tracks/ subdirectory in the music library
+    tracks_dir = os.path.join(MUSIC_LIBRARY_PATH, "tracks")
 
-    # If no name match, take the most recent file
-    if recent_files:
-        return _move_to_library(recent_files[0][0], artist, album, title, track_id)
+    # Also check directly under artist name (existing library structure: {Artist}/{Album}/{file})
+    search_bases = [tracks_dir, MUSIC_LIBRARY_PATH]
+
+    for base in search_bases:
+        if not os.path.isdir(base):
+            continue
+        # Check artist directories
+        for artist_variant in [artist, artist_first, artist.replace(", ", " ")]:
+            artist_dir = os.path.join(base, artist_variant)
+            if not os.path.isdir(artist_dir):
+                continue
+            for root, dirs, files in os.walk(artist_dir):
+                dirs[:] = [d for d in dirs if not d.startswith("@")]
+                for f in files:
+                    if not f.endswith((".flac", ".m4a", ".aiff", ".wav")):
+                        continue
+                    if title_lower[:15] in f.lower():
+                        return os.path.join(root, f)
+
+    # Fallback: search entire music library for recent files matching title
+    cutoff = time.time() - 600  # last 10 minutes
+    for root, dirs, files in os.walk(MUSIC_LIBRARY_PATH):
+        dirs[:] = [d for d in dirs if not d.startswith("@")]
+        for f in files:
+            if f.endswith((".flac",)) and title_lower[:15] in f.lower():
+                fpath = os.path.join(root, f)
+                try:
+                    if os.path.getmtime(fpath) > cutoff:
+                        return fpath
+                except OSError:
+                    continue
 
     return None
 

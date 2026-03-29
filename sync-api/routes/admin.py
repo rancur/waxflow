@@ -10,12 +10,15 @@ router = APIRouter(prefix="/api", tags=["admin"])
 _start_time = time.time()
 
 
+SENSITIVE_KEYS = {"spotify_access_token", "spotify_refresh_token", "spotify_token_expiry"}
+
+
 @router.get("/settings")
 async def get_settings():
     try:
         with get_db() as conn:
             rows = conn.execute("SELECT key, value FROM app_config").fetchall()
-            settings = {r["key"]: r["value"] for r in rows}
+            settings = {r["key"]: r["value"] for r in rows if r["key"] not in SENSITIVE_KEYS}
             return {"settings": settings}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -25,7 +28,7 @@ async def get_settings():
 async def update_settings(body: ConfigUpdate):
     try:
         with get_db() as conn:
-            for key, value in body.settings.items():
+            for key, value in {k: v for k, v in body.settings.items() if k not in SENSITIVE_KEYS}.items():
                 conn.execute(
                     "INSERT OR REPLACE INTO app_config (key, value) VALUES (?, ?)",
                     (key, value),
@@ -59,18 +62,12 @@ async def health_check():
 
 @router.post("/admin/update")
 async def trigger_update():
+    """Create a signal file that the auto-update cron script watches for."""
+    import pathlib
+    signal_path = pathlib.Path("/app/data/.update-requested")
     try:
-        result = subprocess.run(
-            ["git", "pull"], capture_output=True, text=True, timeout=30, cwd="/app"
-        )
-        return {
-            "status": "ok",
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
-        }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Git pull timed out")
+        signal_path.write_text(f"requested at {time.time()}")
+        return {"status": "ok", "message": "Update requested. The auto-update cron will pick this up."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
