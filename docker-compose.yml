@@ -33,6 +33,7 @@ services:
     volumes:
       - sync-data:/app/data
       - /volume1/music/Database:/music
+      - /volume1/music/Input:/downloads
     environment:
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
