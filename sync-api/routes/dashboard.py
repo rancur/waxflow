@@ -1,3 +1,4 @@
+import os
 import time
 import json
 from fastapi import APIRouter, HTTPException
@@ -8,8 +9,8 @@ from models import DashboardResponse, ServiceHealth
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
-LEXICON_API = "http://192.168.1.116:48624"
-TIDARR_API = "http://192.168.1.221:8484"
+LEXICON_API = os.environ.get("LEXICON_API_URL", "http://192.168.1.116:48624")
+TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")
 
 
 @router.get("/dashboard", response_model=DashboardResponse)

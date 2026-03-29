@@ -57,8 +57,14 @@ class VerifierService:
             sample_rate = int(stream.get("sample_rate", 0))
             bit_depth = int(stream.get("bits_per_raw_sample", stream.get("bits_per_sample", 0)))
 
-            # FLAC with >= 16-bit and >= 44100 Hz is lossless
-            is_lossless = codec in ("flac", "alac", "wav", "pcm_s16le", "pcm_s24le", "pcm_s32le")
+            # Lossless codecs with >= 16-bit and >= 44100 Hz
+            lossless_codecs = (
+                "flac", "alac", "wav", "aiff",
+                "pcm_s16le", "pcm_s24le", "pcm_s32le",
+                "pcm_s16be", "pcm_s24be", "pcm_s32be",
+                "pcm_f32le", "pcm_f64le",
+            )
+            is_lossless = codec in lossless_codecs
             is_hires = sample_rate >= 44100 and bit_depth >= 16
 
             status = "pass" if (is_lossless and is_hires) else "fail"

@@ -8,7 +8,7 @@ import os
 import shutil
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import re
@@ -969,11 +969,11 @@ def _organize_track(db_path: str, track: dict):
             year = dt.year
             month = dt.month
         except (ValueError, TypeError):
-            year = datetime.utcnow().year
-            month = datetime.utcnow().month
+            year = datetime.now(tz=timezone.utc).year
+            month = datetime.now(tz=timezone.utc).month
     else:
-        year = datetime.utcnow().year
-        month = datetime.utcnow().month
+        year = datetime.now(tz=timezone.utc).year
+        month = datetime.now(tz=timezone.utc).month
 
     month_names = [
         "", "January", "February", "March", "April", "May", "June",

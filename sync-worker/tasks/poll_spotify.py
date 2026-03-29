@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from tasks.helpers import (
     get_config,
@@ -146,7 +146,7 @@ def _poll(db_path: str):
             break
 
     # Update last poll timestamp
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     set_config(db_path, "last_spotify_poll", now)
 
     if new_count > 0:
