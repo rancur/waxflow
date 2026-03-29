@@ -74,6 +74,19 @@ async def main():
         log.info("Waiting for database at %s...", DB_PATH)
         await asyncio.sleep(5)
 
+    # Auto-detect: if tracks are already complete, we're not a fresh install — use full mode
+    try:
+        from tasks.helpers import get_db as _get_db, get_config as _get_config
+        with _get_db(DB_PATH) as conn:
+            complete = conn.execute("SELECT COUNT(*) FROM tracks WHERE pipeline_stage = 'complete'").fetchone()[0]
+            if complete > 0:
+                current_mode = _get_config(DB_PATH, "sync_mode")
+                if current_mode != "full":
+                    conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('sync_mode', 'full')")
+                    log.info("Existing install detected (%d complete tracks). Auto-set sync_mode to 'full'.", complete)
+    except Exception as e:
+        log.warning("Failed to auto-detect sync mode: %s", e)
+
     log.info("Database found. Starting task loops.")
 
     # Launch all task loops concurrently

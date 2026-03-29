@@ -43,7 +43,7 @@ def init():
             lexicon_track_id TEXT,
             lexicon_playlist_id TEXT,
             pipeline_stage TEXT NOT NULL DEFAULT 'new'
-                CHECK(pipeline_stage IN ('new','matching','downloading','verifying','organizing','complete','error')),
+                CHECK(pipeline_stage IN ('new','matching','downloading','verifying','organizing','complete','error','waiting')),
             pipeline_error TEXT,
             is_protected INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
@@ -131,8 +131,71 @@ def init():
             ('music_library_path', '/music'),
             ('activity_log_retention_days', '365'),
             ('synology_sync_delay_seconds', '10'),
-            ('auto_analyze_enabled', '1');
+            ('auto_analyze_enabled', '1'),
+            ('sync_mode', 'scan');
         """)
+    # Migration: add 'waiting' to pipeline_stage CHECK constraint
+    # SQLite can't ALTER CHECK constraints, so we recreate the table if needed
+    with get_db() as conn:
+        # Check if the 'waiting' value is already allowed
+        try:
+            conn.execute("UPDATE tracks SET pipeline_stage = 'waiting' WHERE 0")  # no-op, just tests constraint
+        except Exception:
+            # Constraint doesn't include 'waiting' -- need to migrate
+            print("Migrating tracks table to add 'waiting' pipeline stage...")
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS tracks_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    spotify_id TEXT UNIQUE NOT NULL,
+                    spotify_uri TEXT,
+                    spotify_added_at TEXT,
+                    title TEXT,
+                    artist TEXT,
+                    album TEXT,
+                    duration_ms INTEGER,
+                    isrc TEXT,
+                    spotify_popularity INTEGER,
+                    match_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(match_status IN ('pending','matched','mismatched','manual','failed')),
+                    match_source TEXT,
+                    match_confidence REAL,
+                    tidal_id TEXT,
+                    download_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(download_status IN ('pending','queued','downloading','complete','failed','skipped')),
+                    download_source TEXT,
+                    download_attempts INTEGER NOT NULL DEFAULT 0,
+                    download_error TEXT,
+                    file_path TEXT,
+                    file_hash_sha256 TEXT,
+                    verify_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(verify_status IN ('pending','pass','fail','skipped')),
+                    verify_codec TEXT,
+                    verify_sample_rate INTEGER,
+                    verify_bit_depth INTEGER,
+                    verify_is_genuine_lossless INTEGER,
+                    chromaprint TEXT,
+                    fingerprint_match_score REAL,
+                    lexicon_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(lexicon_status IN ('pending','synced','skipped','error')),
+                    lexicon_track_id TEXT,
+                    lexicon_playlist_id TEXT,
+                    pipeline_stage TEXT NOT NULL DEFAULT 'new'
+                        CHECK(pipeline_stage IN ('new','matching','downloading','verifying','organizing','complete','error','waiting')),
+                    pipeline_error TEXT,
+                    is_protected INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                INSERT OR IGNORE INTO tracks_new SELECT * FROM tracks;
+
+                DROP TABLE tracks;
+
+                ALTER TABLE tracks_new RENAME TO tracks;
+            """)
+            print("Migration complete.")
+
     print("Database initialized successfully.")
 
 

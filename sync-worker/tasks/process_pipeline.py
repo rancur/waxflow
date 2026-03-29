@@ -320,9 +320,23 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
 # ---------------------------------------------------------------------------
 
 def _process_matching(db_path: str):
+    sync_mode = get_config(db_path, "sync_mode") or "scan"
     tracks = get_tracks_by_stage(db_path, "matching", limit=BATCH_MATCH)
     for track in tracks:
         try:
+            if sync_mode == "scan":
+                # Scan mode: skip Tidal search, mark as waiting for download mode
+                update_track(
+                    db_path, track["id"],
+                    pipeline_stage="waiting",
+                    match_status="pending",
+                    pipeline_error=None,
+                )
+                log.info(
+                    "Scan mode: track %d (%s - %s) not in library, waiting for download mode",
+                    track["id"], track.get("artist", ""), track.get("title", ""),
+                )
+                continue
             _match_track(db_path, track)
         except Exception as e:
             log.error("Match error for track %d: %s", track["id"], e, exc_info=True)
@@ -523,6 +537,9 @@ def _tidal_search_via_tidarr(query: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _process_downloading(db_path: str):
+    sync_mode = get_config(db_path, "sync_mode") or "scan"
+    if sync_mode == "scan":
+        return  # Scan mode: no downloads
     tracks = get_tracks_by_stage(db_path, "downloading", limit=BATCH_DOWNLOAD)
     tracks = [t for t in tracks if t.get("download_status") in ("pending", "failed")]
 

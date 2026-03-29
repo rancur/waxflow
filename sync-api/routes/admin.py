@@ -45,6 +45,33 @@ async def update_settings(body: ConfigUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/admin/sync-mode")
+async def get_sync_mode():
+    with get_db() as conn:
+        mode = conn.execute("SELECT value FROM app_config WHERE key = 'sync_mode'").fetchone()
+        return {"sync_mode": mode[0] if mode else "scan"}
+
+
+@router.post("/admin/sync-mode")
+async def set_sync_mode(body: dict):
+    mode = body.get("mode", "scan")
+    if mode not in ("scan", "full"):
+        raise HTTPException(status_code=400, detail="Invalid mode. Must be 'scan' or 'full'.")
+    with get_db() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('sync_mode', ?)", (mode,))
+        conn.execute(
+            "INSERT INTO activity_log (event_type, message) VALUES (?, ?)",
+            ("sync_mode_changed", f"Sync mode changed to: {mode}"),
+        )
+        tracks_queued = 0
+        if mode == "full":
+            r = conn.execute(
+                "UPDATE tracks SET pipeline_stage = 'matching', updated_at = datetime('now') WHERE pipeline_stage = 'waiting'"
+            )
+            tracks_queued = r.rowcount
+        return {"sync_mode": mode, "tracks_queued": tracks_queued}
+
+
 @router.get("/admin/health", response_model=HealthResponse)
 async def health_check():
     db_status = "ok"

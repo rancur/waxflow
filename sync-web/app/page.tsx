@@ -42,17 +42,21 @@ interface RawDashboard {
 export default function DashboardPage() {
   const [data, setData] = useState<RawDashboard | null>(null)
   const [monthly, setMonthly] = useState<MonthlyRow[]>([])
+  const [syncMode, setSyncMode] = useState<string>('full')
+  const [switchingMode, setSwitchingMode] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const [result, monthlyResult] = await Promise.all([
+      const [result, monthlyResult, modeResult] = await Promise.all([
         apiFetch<RawDashboard>('/dashboard'),
         apiFetch<{ months: MonthlyRow[] }>('/dashboard/monthly'),
+        apiFetch<{ sync_mode: string }>('/admin/sync-mode'),
       ])
       setData(result)
       setMonthly(monthlyResult.months?.slice(0, 24) ?? [])
+      setSyncMode(modeResult.sync_mode || 'scan')
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch dashboard')
@@ -60,6 +64,22 @@ export default function DashboardPage() {
       setLoading(false)
     }
   }, [])
+
+  const handleStartDownloads = async () => {
+    setSwitchingMode(true)
+    try {
+      const result = await apiFetch<{ sync_mode: string; tracks_queued: number }>('/admin/sync-mode', {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'full' }),
+      })
+      setSyncMode('full')
+      fetchDashboard()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to enable downloads')
+    } finally {
+      setSwitchingMode(false)
+    }
+  }
 
   useEffect(() => {
     fetchDashboard()
@@ -87,6 +107,43 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {/* Scan Mode Banner */}
+      {!loading && syncMode === 'scan' && (
+        <div className="rounded-xl border border-blue-500/30 bg-blue-500/5 p-6">
+          <div className="flex items-start gap-3">
+            <span className="text-2xl">📋</span>
+            <div className="flex-1">
+              <h2 className="text-base font-semibold text-blue-300">Library Scan Mode</h2>
+              <p className="text-sm text-slate-400 mt-1">
+                Matching your Spotify library against existing Lexicon tracks. No downloads will start until you enable them.
+              </p>
+              <div className="flex items-center gap-6 mt-4 text-sm">
+                <span className="text-slate-300">
+                  <span className="font-semibold text-emerald-400">{(stages.complete ?? 0).toLocaleString()}</span>
+                  <span className="text-slate-500"> matched</span>
+                </span>
+                <span className="text-slate-300">
+                  <span className="font-semibold text-amber-400">{(stages.waiting ?? 0).toLocaleString()}</span>
+                  <span className="text-slate-500"> missing</span>
+                </span>
+                <span className="text-slate-300">
+                  <span className="font-semibold text-red-400">{(stages.error ?? 0).toLocaleString()}</span>
+                  <span className="text-slate-500"> errors</span>
+                </span>
+              </div>
+              <button
+                onClick={handleStartDownloads}
+                disabled={switchingMode}
+                className="mt-4 px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors disabled:opacity-50"
+              >
+                {switchingMode ? 'Enabling...' : 'Start Downloads'}
+              </button>
+              <p className="text-xs text-slate-600 mt-2">Begin downloading missing tracks via Tidal</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Parity Score */}
       <div className="card flex justify-center">
         {loading ? (
@@ -107,10 +164,11 @@ export default function DashboardPage() {
       </div>
 
       {/* Stage Breakdown */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
         {[
           { label: 'New', value: stages.new, color: 'text-slate-400', bg: 'bg-slate-500/10 border-slate-500/20' },
           { label: 'Matching', value: stages.matching, color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20' },
+          { label: 'Waiting', value: stages.waiting, color: 'text-purple-400', bg: 'bg-purple-500/10 border-purple-500/20' },
           { label: 'Downloading', value: stages.downloading, color: 'text-cyan-400', bg: 'bg-cyan-500/10 border-cyan-500/20' },
           { label: 'Verifying', value: stages.verifying, color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
           { label: 'Complete', value: stages.complete, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' },

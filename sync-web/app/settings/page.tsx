@@ -214,6 +214,31 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* Sync Mode */}
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Sync Mode</h2>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm text-slate-300">
+              {settings.sync_mode === 'full' ? 'Full Sync' : 'Scan Only'}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              {settings.sync_mode === 'full'
+                ? 'Matching, downloading, verifying, and organizing tracks.'
+                : 'Only matching against existing library. No downloads.'}
+            </p>
+          </div>
+          <select
+            className="select-field"
+            value={settings.sync_mode || 'scan'}
+            onChange={(e) => updateSetting('sync_mode', e.target.value)}
+          >
+            <option value="scan">Scan Only</option>
+            <option value="full">Full Sync</option>
+          </select>
+        </div>
+      </div>
+
       {/* Configuration */}
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Configuration</h2>
