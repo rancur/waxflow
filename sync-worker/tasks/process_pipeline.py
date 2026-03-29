@@ -368,28 +368,41 @@ def _download_track(db_path: str, track: dict):
     log.info("Track %d downloaded -> %s", track_id, dest_path)
 
 
-def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval: int = 5):
-    """Poll Tidarr queue until download completes or timeout."""
+def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 120, poll_interval: int = 3):
+    """Poll Tidarr SSE stream until download completes or timeout."""
     start = time.time()
+    # Give Tidarr a moment to start the download
+    time.sleep(5)
     while time.time() - start < max_wait:
         try:
             with httpx.Client(timeout=10) as client:
-                resp = client.get(f"{TIDARR_URL}/api/queue/status")
+                # Check the SSE stream for this specific item
+                resp = client.get(
+                    f"{TIDARR_URL}/api/stream-processing",
+                    headers={"Accept": "text/event-stream"},
+                    timeout=8,
+                )
                 if resp.status_code == 200:
-                    queue = resp.json()
-                    items = queue if isinstance(queue, list) else queue.get("items", queue.get("queue", []))
-                    # Check if our track is still processing
-                    still_active = False
-                    for item in items if isinstance(items, list) else []:
-                        item_url = item.get("url", "")
-                        if str(tidal_id) in item_url:
-                            still_active = True
-                            break
-                    if not still_active:
-                        return  # download finished
+                    for line in resp.text.split("\n"):
+                        if line.startswith("data:"):
+                            import json as _json
+                            items = _json.loads(line[5:])
+                            for item in items:
+                                if str(item.get("id")) == str(tidal_id):
+                                    status = item.get("status", "")
+                                    if status == "finished":
+                                        time.sleep(3)  # Wait for file move to complete
+                                        return
+                                    elif status in ("error",):
+                                        return  # Failed, let the file search handle it
+                            # If our track isn't in the queue at all, it's already done
+                            if not any(str(i.get("id")) == str(tidal_id) for i in items):
+                                time.sleep(3)
+                                return
         except Exception:
             pass
         time.sleep(poll_interval)
+    # Timeout — proceed anyway, file search will handle it
 
 
 def _find_and_move_downloaded_file(db_path: str, track_id: int, artist: str, album: str, title: str) -> str | None:
@@ -403,12 +416,13 @@ def _find_and_move_downloaded_file(db_path: str, track_id: int, artist: str, alb
     artist_first = artist.split(",")[0].strip()
     title_lower = title.lower()
 
-    # Tidarr's track template: tracks/{album.artist}/{album.artist} - {item.title_version}
-    # Check the tracks/ subdirectory in the music library
-    tracks_dir = os.path.join(MUSIC_LIBRARY_PATH, "tracks")
+    # Tidarr downloads to /downloads (= /volume1/music/Input) with template:
+    # tracks/{artist}/{artist} - {title}.flac
+    # Also check the main music library for existing files
+    downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
+    downloads_tracks = os.path.join(downloads_dir, "tracks")
 
-    # Also check directly under artist name (existing library structure: {Artist}/{Album}/{file})
-    search_bases = [tracks_dir, MUSIC_LIBRARY_PATH]
+    search_bases = [downloads_tracks, downloads_dir, MUSIC_LIBRARY_PATH]
 
     for base in search_bases:
         if not os.path.isdir(base):
@@ -419,25 +433,35 @@ def _find_and_move_downloaded_file(db_path: str, track_id: int, artist: str, alb
             if not os.path.isdir(artist_dir):
                 continue
             for root, dirs, files in os.walk(artist_dir):
-                dirs[:] = [d for d in dirs if not d.startswith("@")]
+                dirs[:] = [d for d in dirs if not d.startswith("@") and not d.endswith(".old")]
                 for f in files:
                     if not f.endswith((".flac", ".m4a", ".aiff", ".wav")):
                         continue
                     if title_lower[:15] in f.lower():
-                        return os.path.join(root, f)
-
-    # Fallback: search entire music library for recent files matching title
-    cutoff = time.time() - 600  # last 10 minutes
-    for root, dirs, files in os.walk(MUSIC_LIBRARY_PATH):
-        dirs[:] = [d for d in dirs if not d.startswith("@")]
-        for f in files:
-            if f.endswith((".flac",)) and title_lower[:15] in f.lower():
-                fpath = os.path.join(root, f)
-                try:
-                    if os.path.getmtime(fpath) > cutoff:
+                        fpath = os.path.join(root, f)
+                        # If in downloads dir, move to music library
+                        if fpath.startswith(downloads_dir):
+                            return _move_to_library(fpath, artist, album, title, track_id)
                         return fpath
-                except OSError:
-                    continue
+
+    # Fallback: search entire downloads dir for recent files matching title
+    cutoff = time.time() - 600  # last 10 minutes
+    for search_dir in [downloads_dir, MUSIC_LIBRARY_PATH]:
+        if not os.path.isdir(search_dir):
+            continue
+        for root, dirs, files in os.walk(search_dir):
+            dirs[:] = [d for d in dirs if not d.startswith("@") and not d.endswith(".old")]
+            for f in files:
+                if f.endswith((".flac",)) and title_lower[:15] in f.lower():
+                    fpath = os.path.join(root, f)
+                    try:
+                        if os.path.getmtime(fpath) > cutoff:
+                            # If found in downloads, move to music library
+                            if fpath.startswith(downloads_dir):
+                                return _move_to_library(fpath, artist, album, title, track_id)
+                            return fpath
+                    except OSError:
+                        continue
 
     return None
 
