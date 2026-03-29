@@ -109,28 +109,37 @@ def _check_existing_in_lexicon(track: dict) -> dict | None:
 
     lexicon_url = os.environ.get("LEXICON_API_URL", LEXICON_API_URL)
     spotify_title = title.lower().strip()
-    spotify_artist = artist.lower().split(",")[0].strip()
+    spotify_artist_first = artist.lower().split(",")[0].strip()
+    # Clean title for broader matching
+    title_clean = spotify_title.replace(" - original mix", "").replace(" (original mix)", "")
+    title_base = title_clean.split(" - ")[0].strip()
+
+    # Try multiple search queries (Lexicon's filter is exact-ish, so try variations)
+    search_queries = [
+        {"filter[artist]": artist, "filter[title]": title},
+        {"filter[artist]": artist.split(",")[0].strip(), "filter[title]": title},
+        {"filter[title]": title},  # Title-only search as fallback
+    ]
 
     try:
         with httpx.Client(base_url=lexicon_url, timeout=15) as client:
-            resp = client.get("/v1/search/tracks", params={
-                "filter[artist]": artist,
-                "filter[title]": title,
-            })
-            if resp.status_code != 200:
-                return None
+            for params in search_queries:
+                resp = client.get("/v1/search/tracks", params=params)
+                if resp.status_code != 200:
+                    continue
 
-            data = resp.json()
-            results = data.get("data", {}).get("tracks", [])
-            for t in results:
-                lex_title = (t.get("title") or "").lower().strip()
-                lex_artist = (t.get("artist") or "").lower().strip()
-                # Fuzzy match: spotify "Hot One" matches lexicon "Hot One (Original Mix)"
-                if spotify_title in lex_title and spotify_artist in lex_artist:
-                    return {
-                        "lexicon_track_id": str(t["id"]),
-                        "file_path": t.get("location", ""),
-                    }
+                data = resp.json()
+                results = data.get("data", {}).get("tracks", [])
+                for t in results:
+                    lex_title = (t.get("title") or "").lower().strip()
+                    lex_artist = (t.get("artist") or "").lower().strip()
+                    # Fuzzy match: spotify "Hot One" matches lexicon "Hot One (Original Mix)"
+                    if ((spotify_title in lex_title or title_base in lex_title or lex_title in spotify_title)
+                            and spotify_artist_first in lex_artist):
+                        return {
+                            "lexicon_track_id": str(t["id"]),
+                            "file_path": t.get("location", ""),
+                        }
     except Exception as e:
         log.warning("Lexicon existing-track check failed for '%s - %s': %s", artist, title, e)
 
@@ -138,38 +147,53 @@ def _check_existing_in_lexicon(track: dict) -> dict | None:
 
 
 def _check_existing_in_library(track: dict) -> dict | None:
-    """Check if a track already exists in the music library on disk."""
+    """Check if a track already exists in the music library or downloads directory."""
     artist = track.get("artist", "")
     title = track.get("title", "")
     if not artist or not title:
         return None
 
-    # Check common artist name variations
-    artist_names = [
-        artist.split(",")[0].strip(),                    # First artist
-        artist,                                           # Full artist string
-        artist.replace(", ", " "),                        # No comma
-    ]
+    downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
 
+    # Build list of artist name variations to check
+    artist_names = set()
+    artist_names.add(artist)                              # Full: "G Jones, Eprom"
+    artist_names.add(artist.split(",")[0].strip())         # First: "G Jones"
+    artist_names.add(artist.replace(", ", " "))            # No comma: "G Jones Eprom"
+    # Also add each individual artist
+    for a in artist.split(","):
+        artist_names.add(a.strip())                        # Each: "G Jones", "Eprom"
+
+    # Title variations for matching
     title_lower = title.lower()
+    # Strip common suffixes for broader matching
+    title_clean = title_lower.replace(" - original mix", "").replace(" (original mix)", "")
+    title_words = title_clean.split(" - ")[0].strip()  # Before any " - " suffix
 
-    for artist_name in artist_names:
-        artist_dir = os.path.join(MUSIC_LIBRARY_PATH, artist_name)
-        if not os.path.isdir(artist_dir):
+    # Search both music library and downloads directory
+    search_dirs = [MUSIC_LIBRARY_PATH, downloads_dir]
+
+    for base_dir in search_dirs:
+        if not os.path.isdir(base_dir):
             continue
-
-        # Walk the artist directory for matching files
-        for root, dirs, files in os.walk(artist_dir):
-            # Skip Synology metadata dirs
-            dirs[:] = [d for d in dirs if not d.startswith("@")]
-            for f in files:
-                if not f.endswith((".flac", ".aiff", ".m4a", ".wav")):
+        for artist_name in artist_names:
+            # Check both root level and tracks/ subdirectory
+            for prefix in ["", "tracks"]:
+                artist_dir = os.path.join(base_dir, prefix, artist_name) if prefix else os.path.join(base_dir, artist_name)
+                if not os.path.isdir(artist_dir):
                     continue
-                fname_lower = f.lower()
-                # Check if the title appears in the filename
-                # Lexicon naming: "Artist - Title (Mix) KEY_BPM.ext"
-                if title_lower[:20] in fname_lower:
-                    return {"file_path": os.path.join(root, f)}
+
+                for root, dirs, files in os.walk(artist_dir):
+                    dirs[:] = [d for d in dirs if not d.startswith("@") and not d.endswith(".old")]
+                    for f in files:
+                        if not f.endswith((".flac", ".aiff", ".m4a", ".wav")):
+                            continue
+                        fname_lower = f.lower()
+                        # Match if title (or cleaned title) appears in filename
+                        if (title_words[:15] in fname_lower or
+                                title_lower[:20] in fname_lower or
+                                title_clean[:20] in fname_lower):
+                            return {"file_path": os.path.join(root, f)}
 
     return None
 
