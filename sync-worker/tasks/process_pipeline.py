@@ -990,7 +990,7 @@ def _download_track(db_path: str, track: dict):
             with get_db(db_path) as conn:
                 conn.execute(
                     """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
-                    VALUES (?, 'tiddl', 'downloading', ?, datetime('now'), NULL)""",
+                    VALUES (?, 'tidarr', 'downloading', ?, datetime('now'), NULL)""",
                     (track_id, attempts),
                 )
             dest_path = _download_track_via_tiddl(db_path, track)
@@ -999,7 +999,7 @@ def _download_track(db_path: str, track: dict):
             log.warning("Track %d: tiddl failed (%s), falling back to Tidarr", track_id, tiddl_err)
             with get_db(db_path) as conn:
                 conn.execute(
-                    "UPDATE download_queue SET status='failed', error=? WHERE track_id=? AND source='tiddl' AND status='downloading'",
+                    "UPDATE download_queue SET status='failed', error=? WHERE track_id=? AND status='downloading'",
                     (str(tiddl_err)[:500], track_id),
                 )
 
