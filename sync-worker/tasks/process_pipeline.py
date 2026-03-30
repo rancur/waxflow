@@ -216,26 +216,38 @@ def _check_existing_in_lexicon(track: dict) -> dict | None:
             data = resp.json()
             results = data.get("data", {}).get("tracks", [])
 
+            def _strip_special(s):
+                """Strip apostrophes, quotes, and special chars for comparison."""
+                return s.replace("'", "").replace("'", "").replace("`", "").replace('"', "").replace(".", "").strip()
+
             for t in results:
                 lex_title = (t.get("title") or "").lower().strip()
                 lex_artist = (t.get("artist") or "").lower().strip()
 
+                # Strip special chars for comparison
+                sp_clean = _strip_special(spotify_title)
+                lex_clean = _strip_special(lex_title)
+                sp_base_clean = _strip_special(title_base)
+
                 # Check if ANY spotify artist appears in the lexicon artist
-                artist_match = any(a in lex_artist for a in spotify_artists)
+                sp_artists_clean = [_strip_special(a) for a in spotify_artists]
+                lex_artist_clean = _strip_special(lex_artist)
+                artist_match = any(a in lex_artist_clean for a in sp_artists_clean)
                 if not artist_match:
-                    # Also check reverse: lexicon artist words in spotify artists
-                    lex_artists = [a.strip() for a in lex_artist.split(",")]
-                    artist_match = any(la in " ".join(spotify_artists) for la in lex_artists if len(la) > 2)
+                    lex_artists = [_strip_special(a.strip()) for a in lex_artist.split(",")]
+                    artist_match = any(la in " ".join(sp_artists_clean) for la in lex_artists if len(la) > 2)
 
                 if not artist_match:
                     continue
 
-                # Title matching: fuzzy bidirectional
+                # Title matching: fuzzy bidirectional with special chars stripped
                 title_match = (
+                    sp_clean in lex_clean or
+                    lex_clean in sp_clean or
+                    sp_base_clean in lex_clean or
+                    _strip_special(lex_title.split(" (")[0].strip()) in sp_clean or
                     spotify_title in lex_title or
-                    lex_title in spotify_title or
-                    title_base in lex_title or
-                    lex_title.split(" (")[0].strip() in spotify_title
+                    lex_title in spotify_title
                 )
 
                 if title_match:
