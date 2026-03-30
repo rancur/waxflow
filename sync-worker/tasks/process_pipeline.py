@@ -1147,10 +1147,10 @@ def _organize_track(db_path: str, track: dict):
     with httpx.Client(base_url=LEXICON_API_URL, timeout=60) as client:
         # 1. Find or import the track in Lexicon
         # The file is already in the music library (/music/ = NAS /volume1/music/Database/)
-        # SynologyDrive will sync it to the Mac Mini where Lexicon reads it
-        # The Mac Mini path will be: /Users/willcurran/SynologyDrive/Database/{relative_path}
+        # SynologyDrive syncs NAS files to Mac Mini where Lexicon reads them
+        # Mac Mini path: /Users/willcurran/Music/Database/{relative_path}
         relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
-        mac_path = f"/Users/willcurran/SynologyDrive/Database/{relative_path}"
+        mac_path = f"/Users/willcurran/Music/Database/{relative_path}"
 
         # Wait for SynologyDrive to sync — only needed for freshly downloaded files
         download_source = track.get("download_source", "")
