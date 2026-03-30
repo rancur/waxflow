@@ -130,7 +130,7 @@ def init():
             ('fingerprint_min_score', '0.85'),
             ('music_library_path', '/music'),
             ('activity_log_retention_days', '365'),
-            ('synology_sync_delay_seconds', '10'),
+            ('synology_sync_delay_seconds', '3'),
             ('auto_analyze_enabled', '1'),
             ('sync_mode', 'scan');
         """)

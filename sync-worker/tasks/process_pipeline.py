@@ -37,7 +37,11 @@ BATCH_NEW = 50       # Lexicon/file checks are fast
 BATCH_MATCH = 20     # Tidal API calls
 BATCH_DOWNLOAD = 2   # Tidarr one at a time
 BATCH_VERIFY = 20    # ffprobe is fast
-BATCH_ORGANIZE = 20  # Lexicon API
+BATCH_ORGANIZE = 30  # Lexicon API
+
+# In-memory cache for Lexicon playlist/folder IDs to avoid repeated GET /v1/playlists
+_playlist_cache = {}  # (year, month) -> {"folder_id": str, "playlist_id": str}
+_playlist_cache_time = 0
 
 
 async def process_pipeline(db_path: str):
@@ -1000,6 +1004,7 @@ def _organize_track(db_path: str, track: dict):
     playlist_row = _ensure_playlist(db_path, year, month, folder_name, playlist_name)
 
     # Lexicon API operations (uses /v1/ endpoints)
+    global _playlist_cache, _playlist_cache_time
     with httpx.Client(base_url=LEXICON_API_URL, timeout=60) as client:
         # 1. Find or import the track in Lexicon
         # The file is already in the music library (/music/ = NAS /volume1/music/Database/)
@@ -1012,7 +1017,7 @@ def _organize_track(db_path: str, track: dict):
         download_source = track.get("download_source", "")
         match_source = track.get("match_source", "")
         if download_source == "tidarr":
-            sync_delay = int(get_config(db_path, "synology_sync_delay_seconds") or 10)
+            sync_delay = int(get_config(db_path, "synology_sync_delay_seconds") or 3)
             log.info("Waiting %ds for SynologyDrive sync (new download)...", sync_delay)
             time.sleep(sync_delay)
         else:
@@ -1022,9 +1027,26 @@ def _organize_track(db_path: str, track: dict):
         # Search Lexicon for the track by file path
         lexicon_track_id = _lexicon_find_or_import(client, mac_path, track)
 
-        # 2. Ensure folder and playlist exist
-        lexicon_folder_id = playlist_row.get("lexicon_folder_id")
-        lexicon_playlist_id = playlist_row.get("lexicon_playlist_id")
+        if not lexicon_track_id:
+            artist_name = track.get("artist", "unknown")
+            title_name = track.get("title", "unknown")
+            log.error("Lexicon find/import returned None for track %d: %s - %s (mac_path=%s)",
+                      track_id, artist_name, title_name, mac_path)
+            raise RuntimeError(f"Lexicon find/import failed for: {artist_name} - {title_name} at {mac_path}")
+
+        # 2. Ensure folder and playlist exist (use cache to avoid repeated GET /v1/playlists)
+        cache_key = (year, month)
+        lexicon_folder_id = None
+        lexicon_playlist_id = None
+
+        if cache_key in _playlist_cache and time.time() - _playlist_cache_time < 300:
+            lexicon_folder_id = _playlist_cache[cache_key].get("folder_id")
+            lexicon_playlist_id = _playlist_cache[cache_key].get("playlist_id")
+
+        if not lexicon_folder_id:
+            lexicon_folder_id = playlist_row.get("lexicon_folder_id")
+        if not lexicon_playlist_id:
+            lexicon_playlist_id = playlist_row.get("lexicon_playlist_id")
 
         if not lexicon_folder_id:
             lexicon_folder_id = _lexicon_ensure_folder(client, folder_name)
@@ -1040,13 +1062,25 @@ def _organize_track(db_path: str, track: dict):
                     conn.execute("UPDATE playlists SET lexicon_playlist_id = ? WHERE id = ?",
                                  (lexicon_playlist_id, playlist_row["id"]))
 
+        # Update playlist cache after successful lookup/creation
+        if lexicon_folder_id or lexicon_playlist_id:
+            _playlist_cache[cache_key] = {
+                "folder_id": lexicon_folder_id,
+                "playlist_id": lexicon_playlist_id,
+            }
+            _playlist_cache_time = time.time()
+
         # 3. Add track to playlist (only if not already present)
         if lexicon_playlist_id and lexicon_track_id:
             if _lexicon_track_in_playlist(client, lexicon_playlist_id, lexicon_track_id):
                 log.info("Track %d (lexicon_id=%s) already in playlist %s, skipping add",
                          track_id, lexicon_track_id, playlist_name)
             else:
-                _lexicon_add_to_playlist(client, lexicon_playlist_id, lexicon_track_id)
+                try:
+                    _lexicon_add_to_playlist(client, lexicon_playlist_id, lexicon_track_id)
+                except Exception as e:
+                    log.error("Track %d found in Lexicon but playlist add failed: %s", track_id, e)
+                    raise
 
         # 4. Tag with [sls:spotify_id]
         if lexicon_track_id:
@@ -1134,12 +1168,14 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
     """Find a track in Lexicon by artist+title, or import it via file path."""
     spotify_title = (track.get("title") or "").lower().strip()
     spotify_artist = (track.get("artist") or "").lower().split(",")[0].strip()
+    artist_raw = track.get("artist", "")
+    title_raw = track.get("title", "")
 
     # Search by artist + title
     try:
         resp = client.get("/v1/search/tracks", params={
-            "filter[artist]": track.get("artist", ""),
-            "filter[title]": track.get("title", ""),
+            "filter[artist]": artist_raw,
+            "filter[title]": title_raw,
         })
         if resp.status_code == 200:
             data = resp.json()
@@ -1158,8 +1194,42 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
                 first_artist = (results[0].get("artist") or "").lower()
                 if spotify_artist in first_artist:
                     return str(results[0]["id"])
+            if not results:
+                log.info("Lexicon search returned no results for: %s - %s", artist_raw, title_raw)
+        else:
+            log.warning("Lexicon search returned HTTP %d for: %s - %s", resp.status_code, artist_raw, title_raw)
     except Exception as e:
-        log.warning("Lexicon search failed: %s", e)
+        log.warning("Lexicon search failed for %s - %s: %s", artist_raw, title_raw, e)
+
+    # Broader fallback: search by title only (no artist filter)
+    try:
+        resp = client.get("/v1/search/tracks", params={"filter[title]": title_raw})
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("data", {}).get("tracks", [])
+            if results:
+                # Pick the result with the closest artist match
+                best_match = None
+                best_score = 0
+                for t in results:
+                    lex_artist = (t.get("artist") or "").lower().strip()
+                    # Score: how much of the spotify artist appears in the lexicon artist
+                    if spotify_artist in lex_artist:
+                        score = len(spotify_artist) / max(len(lex_artist), 1)
+                        if score > best_score:
+                            best_score = score
+                            best_match = t
+                    elif lex_artist in spotify_artist:
+                        score = len(lex_artist) / max(len(spotify_artist), 1)
+                        if score > best_score:
+                            best_score = score
+                            best_match = t
+                if best_match:
+                    log.info("Lexicon broad search matched: %s - %s (score=%.2f)",
+                             best_match.get("artist"), best_match.get("title"), best_score)
+                    return str(best_match["id"])
+    except Exception as e:
+        log.warning("Lexicon broad search failed for title '%s': %s", title_raw, e)
 
     # Import the track file via POST /v1/tracks (with locations array)
     try:
@@ -1169,8 +1239,13 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
             imported = data.get("data", {}).get("tracks", [])
             if imported:
                 return str(imported[0]["id"])
+            else:
+                log.error("Lexicon import returned empty tracks for file: %s", mac_path)
+        else:
+            log.error("Lexicon import failed for file: %s - HTTP %d: %s",
+                      mac_path, resp.status_code, resp.text[:300])
     except Exception as e:
-        log.warning("Lexicon import via /v1/tracks failed: %s", e)
+        log.error("Lexicon import failed for file: %s - %s", mac_path, e)
 
     return None
 
