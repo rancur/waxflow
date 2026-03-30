@@ -11,8 +11,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fnmatch
 import re
 import unicodedata
+from difflib import SequenceMatcher
 
 import httpx
 
@@ -36,7 +38,7 @@ BATCH_SIZE = 10  # legacy default
 # Per-stage batch sizes
 BATCH_NEW = 50       # Lexicon/file checks are fast
 BATCH_MATCH = 20     # Tidal API calls
-BATCH_DOWNLOAD = 2   # Tidarr one at a time
+BATCH_DOWNLOAD = 5   # Pipeline multiple items to Tidarr
 BATCH_VERIFY = 20    # ffprobe is fast
 BATCH_ORGANIZE = 30  # Lexicon API
 
@@ -646,15 +648,92 @@ def _tidal_search_via_tidarr(query: str) -> list[dict]:
 # Stage: downloading -> verifying (or error)
 # ---------------------------------------------------------------------------
 
+def _get_tidarr_queue_state() -> dict | None:
+    """Fetch current Tidarr queue via SSE/API. Returns dict with item states or None on failure."""
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(f"{TIDARR_URL}/api/queue/status")
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        log.warning("Failed to fetch Tidarr queue state: %s", e)
+    return None
+
+
+def _cleanup_stale_downloads(db_path: str, tidarr_state: dict | None):
+    """Mark stale download_queue entries as failed, and finished ones as complete."""
+    with get_db(db_path) as conn:
+        # Mark entries stuck in 'downloading' for >30 minutes as failed
+        stale = conn.execute(
+            """UPDATE download_queue SET status = 'failed',
+                error = 'Stale: downloading for >30 minutes'
+            WHERE status = 'downloading'
+              AND started_at IS NOT NULL
+              AND started_at < datetime('now', '-30 minutes')"""
+        ).rowcount
+        if stale:
+            log.warning("Marked %d stale download_queue entries as failed (>30min)", stale)
+
+        # Also reset corresponding tracks back to pending for retry
+        conn.execute(
+            """UPDATE tracks SET download_status = 'pending', updated_at = datetime('now')
+            WHERE pipeline_stage = 'downloading'
+              AND download_status = 'downloading'
+              AND updated_at < datetime('now', '-30 minutes')"""
+        )
+
+    # If Tidarr reports items as finished, mark them complete in our queue
+    if tidarr_state and tidarr_state.get("items"):
+        finished_ids = set()
+        for item in tidarr_state.get("items", []):
+            if item.get("status") == "finished" or item.get("status") == "done":
+                tid = str(item.get("id", ""))
+                if tid:
+                    finished_ids.add(tid)
+        if finished_ids:
+            log.info("Tidarr reports %d finished items", len(finished_ids))
+
+
+def _count_tidarr_active_items(tidarr_state: dict | None) -> int:
+    """Count how many items are actively downloading/queued in Tidarr."""
+    if not tidarr_state:
+        return 0
+    items = tidarr_state.get("items", [])
+    active = sum(1 for i in items if i.get("status") in ("queue", "downloading", "loading"))
+    return active
+
+
 def _process_downloading(db_path: str):
     sync_mode = get_config(db_path, "sync_mode") or "scan"
     if sync_mode == "scan":
         return  # Scan mode: no downloads
+
+    # --- Auth/health check before batch ---
+    try:
+        with httpx.Client(timeout=5) as client:
+            resp = client.get(f"{TIDARR_URL}/api/queue/status")
+            if resp.status_code != 200:
+                log.warning("Tidarr not responding (HTTP %d), skipping download batch", resp.status_code)
+                return
+    except Exception as e:
+        log.warning("Tidarr unreachable (%s), skipping download batch", e)
+        return
+
+    # --- Clean up stale queue entries every cycle ---
+    tidarr_state = _get_tidarr_queue_state()
+    _cleanup_stale_downloads(db_path, tidarr_state)
+
+    # --- Concurrency control: only submit if Tidarr has room ---
+    active_in_tidarr = _count_tidarr_active_items(tidarr_state)
+    if active_in_tidarr >= 3:
+        log.info("Tidarr has %d active items, waiting for queue to drain", active_in_tidarr)
+        return
+
+    slots_available = 3 - active_in_tidarr
+
     tracks = get_tracks_by_stage(db_path, "downloading", limit=BATCH_DOWNLOAD)
     tracks = [t for t in tracks if t.get("download_status") in ("pending", "failed")]
-
-    max_concurrent = int(get_config(db_path, "max_concurrent_downloads") or 2)
-    tracks = tracks[:max_concurrent]
+    tracks = tracks[:slots_available]
 
     for track in tracks:
         try:
@@ -664,10 +743,8 @@ def _process_downloading(db_path: str):
             attempts = (track.get("download_attempts") or 0) + 1
             log.error("Download error for track %d (attempt %d): %s", track["id"], attempts, e)
 
-            # "Downloaded file not found" is often transient with Tidarr queue/output lag.
-            # Give it a longer retry runway before moving to hard error.
-            missing_file = "Downloaded file not found" in err
-            fail_limit = 10 if missing_file else 3
+            # Cap at 5 attempts before permanent failure
+            fail_limit = 5
 
             update_track(
                 db_path, track["id"],
@@ -682,17 +759,6 @@ def _process_downloading(db_path: str):
 
 def _download_track(db_path: str, track: dict):
     """Queue a track download via Tidarr's POST /api/save endpoint."""
-    # Pre-flight: verify Tidarr is reachable and not paused
-    try:
-        with httpx.Client(timeout=5) as client:
-            status = client.get(f"{TIDARR_URL}/api/queue/status").json()
-            if status.get("isPaused"):
-                log.warning("Tidarr queue is paused, skipping download for track %d", track["id"])
-                return
-    except Exception as e:
-        log.warning("Tidarr not reachable (%s), skipping download for track %d", e, track["id"])
-        return
-
     track_id = track["id"]
     tidal_id = track.get("tidal_id")
     artist = track.get("artist", "Unknown Artist")
@@ -703,7 +769,7 @@ def _download_track(db_path: str, track: dict):
     if not tidal_id:
         raise ValueError("No tidal_id set for track")
 
-    # Dedup: skip if file_path is already set and file exists on disk
+    # --- Pre-check: maybe a previous attempt succeeded but we didn't detect it ---
     existing_path = track.get("file_path")
     if existing_path and os.path.exists(existing_path):
         log.info("Track %d already has file at %s, skipping download", track_id, existing_path)
@@ -716,6 +782,25 @@ def _download_track(db_path: str, track: dict):
         )
         log_activity(db_path, "download_skipped", track_id,
                      f"File already exists: {existing_path}")
+        return
+
+    # Broader pre-check: search disk for the file before submitting to Tidarr
+    pre_found = _find_downloaded_file_broad(artist, title)
+    if pre_found:
+        log.info("Track %d found on disk before Tidarr submit: %s", track_id, pre_found)
+        file_hash = _sha256(pre_found)
+        update_track(
+            db_path, track_id,
+            download_status="complete",
+            download_source="existing_pre_check",
+            file_path=pre_found,
+            file_hash_sha256=file_hash,
+            pipeline_stage="verifying",
+            verify_status="pending",
+        )
+        log_activity(db_path, "download_skipped", track_id,
+                     f"Found on disk before download: {pre_found}",
+                     {"file_path": pre_found})
         return
 
     # Dedup: skip if this track_id already has a completed download in the queue
@@ -739,20 +824,21 @@ def _download_track(db_path: str, track: dict):
 
     update_track(db_path, track_id, download_status="downloading", download_attempts=attempts)
 
+    # --- On retry, remove old Tidarr queue entries to prevent duplicates ---
     with get_db(db_path) as conn:
-        existing = conn.execute(
-            "SELECT id FROM download_queue WHERE track_id = ? AND status NOT IN ('complete', 'failed')",
-            (track_id,),
-        ).fetchone()
-        if not existing:
+        if attempts > 1:
             conn.execute(
-                """INSERT INTO download_queue (track_id, source, status, attempts)
-                VALUES (?, 'tidarr', 'downloading', ?)""",
-                (track_id, attempts),
+                "DELETE FROM download_queue WHERE track_id = ? AND status IN ('downloading', 'failed')",
+                (track_id,),
             )
+        conn.execute(
+            """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
+            VALUES (?, 'tidarr', 'downloading', ?, datetime('now'), NULL)""",
+            (track_id, attempts),
+        )
 
-    # Queue download in Tidarr using its actual API
-    tidal_url = f"https://tidal.com/browse/track/{tidal_id}"
+    # Queue download in Tidarr
+    tidarr_output = None
     with httpx.Client(timeout=120) as client:
         resp = client.post(
             f"{TIDARR_URL}/api/save",
@@ -769,18 +855,27 @@ def _download_track(db_path: str, track: dict):
             }},
         )
         if resp.status_code not in (200, 201):
-            raise RuntimeError(f"Tidarr save failed: HTTP {resp.status_code} - {resp.text}")
+            error_detail = f"Tidarr save failed: HTTP {resp.status_code} - {resp.text[:500]}"
+            # Store Tidarr output in download_error for debugging
+            with get_db(db_path) as conn:
+                conn.execute(
+                    "UPDATE download_queue SET error = ? WHERE track_id = ? AND status = 'downloading'",
+                    (error_detail, track_id),
+                )
+            raise RuntimeError(error_detail)
+        tidarr_output = resp.text[:500]
 
     # Wait for Tidarr to complete the download
-    _wait_for_tidarr_download(tidal_id)
+    wait_output = _wait_for_tidarr_download(tidal_id)
 
-    # Find the downloaded file in the music library
-    # Tidarr downloads to the configured output directory (/shared/downloads or similar)
-    dest_path = _find_and_move_downloaded_file(db_path, track_id, artist, album, title)
+    # Find the downloaded file — try multiple times with increasing delay
+    dest_path = None
+    for find_attempt in range(3):
+        dest_path = _find_and_move_downloaded_file(db_path, track_id, artist, album, title)
+        if dest_path:
+            break
 
-    # Fallback: if direct search misses, run broader library/download check used in matching stage.
-    # This handles cases where Tidarr template/path differs slightly from expected artist/title layout.
-    if not dest_path:
+        # Fallback: broader library check
         existing = _check_existing_in_library(
             {"artist": artist, "title": title},
             db_path=db_path,
@@ -788,15 +883,35 @@ def _download_track(db_path: str, track: dict):
         if existing and existing.get("file_path") and os.path.exists(existing["file_path"]):
             dest_path = existing["file_path"]
             log.warning(
-                "Track %d fallback-resolved downloaded file after Tidarr wait: %s",
-                track_id,
-                dest_path,
+                "Track %d fallback-resolved downloaded file (attempt %d): %s",
+                track_id, find_attempt + 1, dest_path,
             )
+            break
+
+        if find_attempt < 2:
+            log.info("Track %d file not found (attempt %d/3), waiting 10s...", track_id, find_attempt + 1)
+            time.sleep(10)
 
     if not dest_path:
-        raise FileNotFoundError(f"Downloaded file not found for tidal_id={tidal_id}")
+        # Log the EXACT Tidarr output so we know what happened
+        debug_info = {
+            "tidal_id": tidal_id,
+            "tidarr_save_response": tidarr_output,
+            "tidarr_wait_output": wait_output,
+            "artist": artist,
+            "title": title,
+        }
+        log.error("Track %d: file not found after 3 search attempts. Debug: %s", track_id, json.dumps(debug_info))
+        # Store debug info in download_error
+        with get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE download_queue SET error = ? WHERE track_id = ? AND status = 'downloading'",
+                (json.dumps(debug_info)[:2000], track_id),
+            )
+        raise FileNotFoundError(f"Downloaded file not found for tidal_id={tidal_id} after 3 search attempts")
 
     file_hash = _sha256(dest_path)
+    file_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
 
     update_track(
         db_path, track_id,
@@ -810,102 +925,239 @@ def _download_track(db_path: str, track: dict):
 
     with get_db(db_path) as conn:
         conn.execute(
-            """UPDATE download_queue SET status='complete', completed_at=datetime('now')
+            """UPDATE download_queue SET status='complete', completed_at=datetime('now'), error=NULL
             WHERE track_id = ? AND status = 'downloading'""",
             (track_id,),
         )
 
+    # Log download success with file details to activity_log
     log_activity(
         db_path, "download_complete", track_id,
         f"Downloaded: {artist} - {title}",
-        {"file_path": dest_path, "file_hash": file_hash, "source": "tidarr"},
+        {"file_path": dest_path, "file_hash": file_hash, "file_size_bytes": file_size,
+         "source": "tidarr", "tidal_id": tidal_id, "attempts": attempts},
     )
-    log.info("Track %d downloaded -> %s", track_id, dest_path)
+    log.info("Track %d downloaded -> %s (%d bytes, attempt %d)", track_id, dest_path, file_size, attempts)
 
 
-def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval: int = 5):
-    """Wait for Tidarr to finish downloading a track by polling the item-specific output."""
+def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval: int = 5) -> str | None:
+    """Wait for Tidarr to finish downloading a track by polling the item-specific output.
+    Returns the last Tidarr output text for debugging."""
     start = time.time()
     time.sleep(8)  # Give Tidarr time to start and potentially finish the download
+    last_output = None
 
     while time.time() - start < max_wait:
         try:
             with httpx.Client(timeout=15) as client:
-                # Check the item-specific output stream
                 resp = client.get(f"{TIDARR_URL}/api/stream-item-output/{tidal_id}", timeout=10)
                 if resp.status_code == 200:
                     text = resp.text
+                    last_output = text[:1000]
                     if "Move complete" in text or "Post processing complete" in text:
                         time.sleep(2)
-                        return
+                        return last_output
                     if "Download succeed" in text:
                         time.sleep(3)
-                        return
+                        return last_output
                     if "No file to process" in text:
-                        return  # skip_existing or auth issue
-        except Exception:
-            pass
+                        log.warning("Tidarr reports 'No file to process' for tidal_id=%s — possible auth issue", tidal_id)
+                        return last_output
+                    if "error" in text.lower() or "fail" in text.lower():
+                        log.warning("Tidarr error for tidal_id=%s: %s", tidal_id, text[:300])
+                        return last_output
+        except Exception as e:
+            log.debug("Tidarr poll error for %s: %s", tidal_id, e)
         time.sleep(poll_interval)
-    # Timeout — proceed anyway
+
+    log.warning("Tidarr download timed out after %ds for tidal_id=%s", max_wait, tidal_id)
+    return last_output
+
+
+def _filename_similarity(candidate: str, target: str) -> float:
+    """Score how closely a candidate filename matches the target title (0.0–1.0)."""
+    return SequenceMatcher(None, candidate.lower(), target.lower()).ratio()
+
+
+def _find_downloaded_file_broad(artist: str, title: str) -> str | None:
+    """Broad search across /music and /downloads for a file matching artist+title.
+    Used as a pre-check before submitting to Tidarr."""
+    downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
+    title_norm = _normalize_for_comparison(title)
+    title_stripped = re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
+    title_prefix = title_stripped[:10] if len(title_stripped) >= 10 else title_stripped
+
+    artist_first = artist.split(",")[0].strip()
+    artist_variants = {artist, artist_first, artist.replace(", ", " ")}
+    for a in artist.split(","):
+        artist_variants.add(a.strip())
+
+    search_roots = []
+    for base in [MUSIC_LIBRARY_PATH, downloads_dir]:
+        if not os.path.isdir(base):
+            continue
+        # Search artist subdirectories (including tracks/ subfolder)
+        for av in artist_variants:
+            for prefix in ["", "tracks"]:
+                d = os.path.join(base, prefix, av) if prefix else os.path.join(base, av)
+                if os.path.isdir(d):
+                    search_roots.append(d)
+
+    candidates = []
+    for search_root in search_roots:
+        for root, dirs, files in os.walk(search_root):
+            dirs[:] = [d for d in dirs if not d.startswith("@") and not d.endswith(".old")]
+            for f in files:
+                if not f.lower().endswith((".flac", ".m4a", ".aiff", ".wav")):
+                    continue
+                fname_base = os.path.splitext(f)[0]
+                fname_norm = _normalize_for_comparison(fname_base)
+                fname_lower = f.lower()
+                fname_stripped = re.sub(r"[^a-z0-9 ]", "", fname_base.lower()).strip()
+
+                # Match criteria (case-insensitive):
+                # 1. Exact normalized title in filename
+                # 2. Title without special chars in filename
+                # 3. First 10 chars of title in filename
+                if (title_norm and title_norm in fname_norm) or \
+                   (title_stripped and title_stripped in fname_stripped) or \
+                   (title_prefix and len(title_prefix) >= 5 and title_prefix in fname_stripped):
+                    fpath = os.path.join(root, f)
+                    sim = _filename_similarity(fname_base, title)
+                    candidates.append((sim, fpath))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+    return None
 
 
 def _find_and_move_downloaded_file(db_path: str, track_id: int, artist: str, album: str, title: str) -> str | None:
-    """Find a recently downloaded file.
+    """Find a recently downloaded file using robust multi-directory, case-insensitive search.
 
-    Tidarr downloads to /music (= /volume1/music/Database) using the template:
-    tracks/{artist}/{artist} - {title}.flac
-
-    So files should already be in the right place — no moving needed.
+    Searches:
+    - /music/{artist}/ (any subdirectory)
+    - /music/{first_artist}/ (split by comma)
+    - /downloads/tracks/{artist}/
+    - /music/tracks/{artist}/
+    - Broad fallback across all of /downloads and /music for recent files
     """
-    artist_first = artist.split(",")[0].strip()
-    title_lower = title.lower()
-
-    # Tidarr downloads to /downloads (= /volume1/music/Input) with template:
-    # tracks/{artist}/{artist} - {title}.flac
-    # Also check the main music library for existing files
     downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
-    downloads_tracks = os.path.join(downloads_dir, "tracks")
 
-    search_bases = [downloads_tracks, downloads_dir, MUSIC_LIBRARY_PATH]
+    title_norm = _normalize_for_comparison(title)
+    title_stripped = re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
+    title_prefix = title_stripped[:10] if len(title_stripped) >= 10 else title_stripped
 
-    for base in search_bases:
+    artist_first = artist.split(",")[0].strip()
+    artist_variants = {artist, artist_first, artist.replace(", ", " ")}
+    for a in artist.split(","):
+        artist_variants.add(a.strip())
+
+    # Build all search directories
+    search_roots = []
+    for base in [downloads_dir, MUSIC_LIBRARY_PATH]:
         if not os.path.isdir(base):
             continue
-        # Check artist directories
-        for artist_variant in [artist, artist_first, artist.replace(", ", " ")]:
-            artist_dir = os.path.join(base, artist_variant)
-            if not os.path.isdir(artist_dir):
-                continue
-            for root, dirs, files in os.walk(artist_dir):
-                dirs[:] = [d for d in dirs if not d.startswith("@") and not d.endswith(".old")]
-                for f in files:
-                    if not f.endswith((".flac", ".m4a", ".aiff", ".wav")):
-                        continue
-                    if title_lower[:15] in f.lower():
-                        fpath = os.path.join(root, f)
-                        # If in downloads dir, move to music library
-                        if fpath.startswith(downloads_dir):
-                            return _move_to_library(fpath, artist, album, title, track_id)
-                        return fpath
+        for av in artist_variants:
+            for prefix in ["", "tracks"]:
+                d = os.path.join(base, prefix, av) if prefix else os.path.join(base, av)
+                if os.path.isdir(d):
+                    search_roots.append(d)
 
-    # Fallback: search entire downloads dir for recent files matching title
-    cutoff = time.time() - 600  # last 10 minutes
+    # Also try case-insensitive directory matching
+    for base in [downloads_dir, MUSIC_LIBRARY_PATH]:
+        for prefix in ["", "tracks"]:
+            parent = os.path.join(base, prefix) if prefix else base
+            if not os.path.isdir(parent):
+                continue
+            try:
+                for entry in os.listdir(parent):
+                    entry_lower = entry.lower()
+                    for av in artist_variants:
+                        if entry_lower == av.lower() and os.path.isdir(os.path.join(parent, entry)):
+                            search_roots.append(os.path.join(parent, entry))
+            except OSError:
+                continue
+
+    # Deduplicate search roots
+    search_roots = list(dict.fromkeys(search_roots))
+
+    candidates = []
+    for search_root in search_roots:
+        for root, dirs, files in os.walk(search_root):
+            dirs[:] = [d for d in dirs if not d.startswith("@") and not d.endswith(".old")]
+            for f in files:
+                if not f.lower().endswith((".flac", ".m4a", ".aiff", ".wav")):
+                    continue
+                fname_base = os.path.splitext(f)[0]
+                fname_norm = _normalize_for_comparison(fname_base)
+                fname_stripped = re.sub(r"[^a-z0-9 ]", "", fname_base.lower()).strip()
+
+                matched = False
+                # 1. Exact normalized title match
+                if title_norm and title_norm in fname_norm:
+                    matched = True
+                # 2. Title without special chars
+                elif title_stripped and title_stripped in fname_stripped:
+                    matched = True
+                # 3. First 10 chars of title
+                elif title_prefix and len(title_prefix) >= 5 and title_prefix in fname_stripped:
+                    matched = True
+
+                if matched:
+                    fpath = os.path.join(root, f)
+                    sim = _filename_similarity(fname_base, title)
+                    candidates.append((sim, fpath))
+
+    # Pick best candidate from artist-specific dirs
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_path = candidates[0][1]
+        if best_path.startswith(downloads_dir):
+            return _move_to_library(best_path, artist, album, title, track_id)
+        return best_path
+
+    # Broad fallback: search entire /downloads and /music for files modified in last 30 minutes
+    cutoff = time.time() - 1800  # 30 minutes
+    broad_candidates = []
     for search_dir in [downloads_dir, MUSIC_LIBRARY_PATH]:
         if not os.path.isdir(search_dir):
             continue
         for root, dirs, files in os.walk(search_dir):
             dirs[:] = [d for d in dirs if not d.startswith("@") and not d.endswith(".old")]
             for f in files:
-                if f.endswith((".flac",)) and title_lower[:15] in f.lower():
-                    fpath = os.path.join(root, f)
-                    try:
-                        if os.path.getmtime(fpath) > cutoff:
-                            # If found in downloads, move to music library
-                            if fpath.startswith(downloads_dir):
-                                return _move_to_library(fpath, artist, album, title, track_id)
-                            return fpath
-                    except OSError:
-                        continue
+                if not f.lower().endswith((".flac", ".m4a", ".aiff", ".wav")):
+                    continue
+                fpath = os.path.join(root, f)
+                try:
+                    mtime = os.path.getmtime(fpath)
+                except OSError:
+                    continue
+                if mtime < cutoff:
+                    continue
+
+                fname_base = os.path.splitext(f)[0]
+                fname_norm = _normalize_for_comparison(fname_base)
+                fname_stripped = re.sub(r"[^a-z0-9 ]", "", fname_base.lower()).strip()
+
+                matched = False
+                if title_norm and title_norm in fname_norm:
+                    matched = True
+                elif title_stripped and title_stripped in fname_stripped:
+                    matched = True
+                elif title_prefix and len(title_prefix) >= 5 and title_prefix in fname_stripped:
+                    matched = True
+
+                if matched:
+                    sim = _filename_similarity(fname_base, title)
+                    broad_candidates.append((sim, fpath))
+
+    if broad_candidates:
+        broad_candidates.sort(key=lambda x: x[0], reverse=True)
+        best_path = broad_candidates[0][1]
+        if best_path.startswith(downloads_dir):
+            return _move_to_library(best_path, artist, album, title, track_id)
+        return best_path
 
     return None
 
