@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import re
+import unicodedata
 
 import httpx
 
@@ -188,6 +189,116 @@ def _process_new(db_path: str):
             log.error("Failed to advance track %d: %s", track["id"], e)
 
 
+def _normalize_for_comparison(text: str) -> str:
+    """Normalize text for fuzzy matching: strip special chars, Unicode -> ASCII,
+    remove feat/remix suffixes, lowercase."""
+    if not text:
+        return ""
+    # Lowercase
+    s = text.lower().strip()
+    # Unicode normalize: é->e, ü->u, ö->o, etc.
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    # Strip ALL special characters: apostrophes, quotes, periods, commas, colons,
+    # semicolons, exclamation marks, question marks, ampersands, brackets, parens
+    s = re.sub(r"['\u2019\u2018`\".,;:!?&()\[\]{}/\\|@#$%^*~+=<>]", "", s)
+    # Normalize feat/ft/featuring in both title and artist context
+    s = re.sub(r"\bfeaturing\b\.?", "", s)
+    s = re.sub(r"\bfeat\b\.?", "", s)
+    s = re.sub(r"\bft\b\.?", "", s)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _extract_base_title(title: str) -> str:
+    """Extract the core track title, stripping remix/edit/mix suffixes and indicators."""
+    s = title.lower().strip()
+    # Remove common suffixes in both " - Suffix" and " (Suffix)" formats
+    for suffix_pattern in [
+        r"\s*-\s*(original mix|extended mix|radio edit|vip mix|vip|single version|"
+        r"mix cut|club mix|dub mix|instrumental|acoustic|live|remastered|remaster|"
+        r"deluxe|bonus track)$",
+        r"\s*\((original mix|extended mix|radio edit|vip mix|vip|single version|"
+        r"mix cut|club mix|dub mix|instrumental|acoustic|live|remastered|remaster)\)",
+    ]:
+        s = re.sub(suffix_pattern, "", s, flags=re.IGNORECASE)
+    # Strip " - Remix Artist Remix/Edit/Mix" pattern
+    s = re.sub(r"\s*-\s+.*?(remix|edit|mix|version|re-?flex|bootleg|rework|flip).*$", "", s, flags=re.IGNORECASE)
+    # Strip " (Remix Artist Remix/Edit/Mix)" pattern
+    s = re.sub(r"\s*\(.*?(remix|edit|mix|version|re-?flex|bootleg|rework|flip).*?\)", "", s, flags=re.IGNORECASE)
+    # Strip "[Mix Cut]" and similar bracket annotations
+    s = re.sub(r"\s*\[.*?\]", "", s)
+    # Strip " - Live At ..." or " - Live From ..."
+    s = re.sub(r"\s*-\s+live\s+(at|from|in)\s+.*$", "", s, flags=re.IGNORECASE)
+    return s.strip()
+
+
+def _normalize_artists(artist_str: str) -> set[str]:
+    """Split artist string into a normalized set of individual artist names."""
+    if not artist_str:
+        return set()
+    # Split by comma, &, +, "and", "x", "vs", "vs."
+    parts = re.split(r"[,&+]|\bx\b|\bvs\.?\b|\band\b", artist_str, flags=re.IGNORECASE)
+    result = set()
+    for p in parts:
+        normalized = _normalize_for_comparison(p)
+        if normalized and len(normalized) > 1:
+            result.add(normalized)
+    return result
+
+
+def _artists_match(sp_artist: str, lex_artist: str) -> bool:
+    """Check if artists match with order-independence and normalization."""
+    sp_set = _normalize_artists(sp_artist)
+    lex_set = _normalize_artists(lex_artist)
+    if not sp_set or not lex_set:
+        return False
+    # Any overlap in individual artist names = match
+    if sp_set & lex_set:
+        return True
+    # Substring matching for each artist (handles "Polyakov Ppk" vs "PPK")
+    for sp_a in sp_set:
+        for lex_a in lex_set:
+            if len(sp_a) > 2 and len(lex_a) > 2:
+                if sp_a in lex_a or lex_a in sp_a:
+                    return True
+    return False
+
+
+def _titles_match(sp_title: str, lex_title: str) -> bool:
+    """Check if titles match using multiple strategies."""
+    # Strategy 1: Normalized full title comparison
+    sp_norm = _normalize_for_comparison(sp_title)
+    lex_norm = _normalize_for_comparison(lex_title)
+    if sp_norm == lex_norm:
+        return True
+    # Substring containment (bidirectional)
+    if sp_norm and lex_norm:
+        if sp_norm in lex_norm or lex_norm in sp_norm:
+            return True
+
+    # Strategy 2: Base title comparison (strip remix/edit suffixes)
+    sp_base = _normalize_for_comparison(_extract_base_title(sp_title))
+    lex_base = _normalize_for_comparison(_extract_base_title(lex_title))
+    if sp_base and lex_base and sp_base == lex_base:
+        return True
+    if sp_base and lex_base:
+        if sp_base in lex_base or lex_base in sp_base:
+            return True
+
+    # Strategy 3: Word-level matching (80%+ overlap)
+    sp_words = set(sp_base.split()) if sp_base else set()
+    lex_words = set(lex_base.split()) if lex_base else set()
+    if sp_words and lex_words:
+        overlap = sp_words & lex_words
+        min_len = min(len(sp_words), len(lex_words))
+        if min_len > 0 and len(overlap) / min_len >= 0.80:
+            return True
+
+    return False
+
+
 def _check_existing_in_lexicon(track: dict) -> dict | None:
     """Check if a track already exists in Lexicon's database."""
     artist = track.get("artist", "")
@@ -196,65 +307,47 @@ def _check_existing_in_lexicon(track: dict) -> dict | None:
         return None
 
     lexicon_url = os.environ.get("LEXICON_API_URL", LEXICON_API_URL)
-    spotify_title = title.lower().strip()
-    spotify_artists = [a.strip().lower() for a in artist.split(",")]
 
-    # Clean title for matching
-    title_base = spotify_title
-    for suffix in [" - original mix", " (original mix)", " - extended mix", " (extended mix)",
-                   " - radio edit", " (radio edit)", " - vip", " (vip)"]:
-        title_base = title_base.replace(suffix, "")
-    title_base = title_base.split(" - ")[0].strip()  # Before remix indicator
+    # Build multiple search queries to maximize Lexicon API hit rate.
+    # The Lexicon search is text-based and may miss due to special chars or suffixes.
+    search_queries = [title]
+    # Also search with base title (no remix suffix) to catch "Title (Extended Mix)" etc.
+    base = _extract_base_title(title)
+    if base != title.lower().strip():
+        search_queries.append(base)
+    # Also search with special chars stripped (catches apostrophe mismatches in search)
+    stripped = title.replace("'", "").replace("\u2019", "").replace("!", "").replace("?", "")
+    if stripped != title:
+        search_queries.append(stripped)
 
     try:
         with httpx.Client(base_url=lexicon_url, timeout=15) as client:
-            # Search by TITLE ONLY — more reliable than combined filter
-            resp = client.get("/v1/search/tracks", params={"filter[title]": title})
-            if resp.status_code != 200:
-                return None
-
-            data = resp.json()
-            results = data.get("data", {}).get("tracks", [])
-
-            def _strip_special(s):
-                """Strip apostrophes, quotes, and special chars for comparison."""
-                return s.replace("'", "").replace("'", "").replace("`", "").replace('"', "").replace(".", "").strip()
-
-            for t in results:
-                lex_title = (t.get("title") or "").lower().strip()
-                lex_artist = (t.get("artist") or "").lower().strip()
-
-                # Strip special chars for comparison
-                sp_clean = _strip_special(spotify_title)
-                lex_clean = _strip_special(lex_title)
-                sp_base_clean = _strip_special(title_base)
-
-                # Check if ANY spotify artist appears in the lexicon artist
-                sp_artists_clean = [_strip_special(a) for a in spotify_artists]
-                lex_artist_clean = _strip_special(lex_artist)
-                artist_match = any(a in lex_artist_clean for a in sp_artists_clean)
-                if not artist_match:
-                    lex_artists = [_strip_special(a.strip()) for a in lex_artist.split(",")]
-                    artist_match = any(la in " ".join(sp_artists_clean) for la in lex_artists if len(la) > 2)
-
-                if not artist_match:
+            seen_ids: set[int] = set()
+            for query in search_queries:
+                resp = client.get("/v1/search/tracks", params={"filter[title]": query})
+                if resp.status_code != 200:
                     continue
 
-                # Title matching: fuzzy bidirectional with special chars stripped
-                title_match = (
-                    sp_clean in lex_clean or
-                    lex_clean in sp_clean or
-                    sp_base_clean in lex_clean or
-                    _strip_special(lex_title.split(" (")[0].strip()) in sp_clean or
-                    spotify_title in lex_title or
-                    lex_title in spotify_title
-                )
+                data = resp.json()
+                results = data.get("data", {}).get("tracks", [])
 
-                if title_match:
-                    return {
-                        "lexicon_track_id": str(t["id"]),
-                        "file_path": t.get("location", ""),
-                    }
+                for t in results:
+                    tid = t.get("id")
+                    if tid in seen_ids:
+                        continue
+                    seen_ids.add(tid)
+
+                    lex_title = t.get("title") or ""
+                    lex_artist = t.get("artist") or ""
+
+                    if not _artists_match(artist, lex_artist):
+                        continue
+
+                    if _titles_match(title, lex_title):
+                        return {
+                            "lexicon_track_id": str(tid),
+                            "file_path": t.get("location", ""),
+                        }
     except Exception as e:
         log.warning("Lexicon check failed: %s", e)
 
@@ -297,11 +390,11 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
     for a in artist.split(","):
         artist_names.add(a.strip())                        # Each: "G Jones", "Eprom"
 
-    # Title variations for matching
+    # Title variations for matching (using normalized comparison)
     title_lower = title.lower()
-    # Strip common suffixes for broader matching
-    title_clean = title_lower.replace(" - original mix", "").replace(" (original mix)", "")
-    title_words = title_clean.split(" - ")[0].strip()  # Before any " - " suffix
+    title_base = _extract_base_title(title)
+    title_norm = _normalize_for_comparison(title)
+    title_base_norm = _normalize_for_comparison(title_base)
 
     # Search both music library and downloads directory
     search_dirs = [MUSIC_LIBRARY_PATH, downloads_dir]
@@ -321,11 +414,12 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
                     for f in files:
                         if not f.endswith((".flac", ".aiff", ".m4a", ".wav")):
                             continue
+                        fname_norm = _normalize_for_comparison(os.path.splitext(f)[0])
                         fname_lower = f.lower()
-                        # Match if title (or cleaned title) appears in filename
-                        if (title_words[:15] in fname_lower or
-                                title_lower[:20] in fname_lower or
-                                title_clean[:20] in fname_lower):
+                        # Match if normalized title appears in normalized filename
+                        if (title_base_norm and title_base_norm in fname_norm or
+                                title_norm and title_norm[:15] in fname_norm or
+                                title_lower[:20] in fname_lower):
                             return {"file_path": os.path.join(root, f)}
 
     return None
@@ -581,6 +675,17 @@ def _process_downloading(db_path: str):
 
 def _download_track(db_path: str, track: dict):
     """Queue a track download via Tidarr's POST /api/save endpoint."""
+    # Pre-flight: verify Tidarr is reachable and not paused
+    try:
+        with httpx.Client(timeout=5) as client:
+            status = client.get(f"{TIDARR_URL}/api/queue/status").json()
+            if status.get("isPaused"):
+                log.warning("Tidarr queue is paused, skipping download for track %d", track["id"])
+                return
+    except Exception as e:
+        log.warning("Tidarr not reachable (%s), skipping download for track %d", e, track["id"])
+        return
+
     track_id = track["id"]
     tidal_id = track.get("tidal_id")
     artist = track.get("artist", "Unknown Artist")
