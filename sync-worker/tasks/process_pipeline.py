@@ -46,6 +46,65 @@ BATCH_ORGANIZE = 30  # Lexicon API
 _playlist_cache = {}  # (year, month) -> {"folder_id": str, "playlist_id": str}
 _playlist_cache_time = 0
 
+# tiddl CLI setup: convert Tidarr auth.json to tiddl 2.8.0 config format
+_TIDDL_AVAILABLE = shutil.which("tiddl") is not None
+if _TIDDL_AVAILABLE:
+    _tiddl_auth_source = "/tiddl-auth/auth.json"
+    _tiddl_config_dir = "/tmp/tiddl-home"
+    _tiddl_config_path = os.path.join(_tiddl_config_dir, "tiddl.json")
+    os.makedirs(_tiddl_config_dir, exist_ok=True)
+    os.environ["TIDDL_PATH"] = _tiddl_config_dir  # tiddl 2.8.0 reads this
+
+    try:
+        if os.path.exists(_tiddl_auth_source):
+            with open(_tiddl_auth_source) as f:
+                _auth = json.load(f)
+            # Build tiddl 2.8.0 config with auth from Tidarr
+            _tiddl_config = {
+                "template": {
+                    "track": "{artist} - {title}",
+                    "video": "{artist} - {title}",
+                    "album": "{album_artist}/{album}/{number:02d}. {title}",
+                    "playlist": "{playlist}/{playlist_number:02d}. {artist} - {title}",
+                },
+                "download": {
+                    "quality": "master",
+                    "path": str(MUSIC_LIBRARY_PATH),
+                    "threads": 1,
+                    "singles_filter": "none",
+                    "embed_lyrics": False,
+                    "download_video": False,
+                    "scan_path": str(MUSIC_LIBRARY_PATH),
+                    "save_playlist_m3u": False,
+                },
+                "cover": {"save": False, "size": 1280, "filename": "cover.jpg"},
+                "auth": {
+                    "token": _auth.get("token", ""),
+                    "refresh_token": _auth.get("refresh_token", ""),
+                    "expires": _auth.get("expires_at", 0),
+                    "user_id": str(_auth.get("user_id", "")),
+                    "country_code": _auth.get("country_code", "US"),
+                },
+                "omit_cache": True,
+                "update_mtime": False,
+            }
+            with open(_tiddl_config_path, "w") as f:
+                json.dump(_tiddl_config, f, indent=2)
+            logging.getLogger("worker.pipeline").info(
+                "tiddl CLI configured from Tidarr auth (user_id=%s) — direct downloads enabled",
+                _auth.get("user_id"),
+            )
+        else:
+            logging.getLogger("worker.pipeline").warning(
+                "tiddl CLI found but no auth at %s — tiddl disabled", _tiddl_auth_source
+            )
+            _TIDDL_AVAILABLE = False
+    except Exception as _e:
+        logging.getLogger("worker.pipeline").warning("tiddl config setup failed: %s — tiddl disabled", _e)
+        _TIDDL_AVAILABLE = False
+else:
+    logging.getLogger("worker.pipeline").info("tiddl CLI not found — using Tidarr for downloads")
+
 
 async def process_pipeline(db_path: str):
     """Run one cycle of the pipeline processor."""
@@ -703,12 +762,104 @@ def _count_tidarr_active_items(tidarr_state: dict | None) -> int:
     return active
 
 
+def _download_track_via_tiddl(db_path: str, track: dict) -> str:
+    """Download a track using tiddl CLI directly, bypassing Tidarr's queue."""
+    tidal_id = track.get("tidal_id")
+    artist = track.get("artist", "Unknown Artist")
+    title = track.get("title", "Unknown Track")
+
+    if not tidal_id:
+        raise ValueError("No tidal_id for tiddl download")
+
+    download_dir = f"/tmp/tiddl-downloads/{tidal_id}"
+    os.makedirs(download_dir, exist_ok=True)
+
+    try:
+        env = {**os.environ, "TIDDL_PATH": _tiddl_config_dir}
+
+        result = subprocess.run(
+            ["tiddl", "--no-cache", "url", f"track/{tidal_id}", "download", "--path", download_dir, "-q", "master"],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+
+        if result.returncode != 0:
+            stderr_snippet = (result.stderr or "")[:500]
+            stdout_snippet = (result.stdout or "")[:500]
+            raise RuntimeError(
+                f"tiddl exit code {result.returncode}: {stderr_snippet} | stdout: {stdout_snippet}"
+            )
+
+        # Find the downloaded audio file
+        downloaded = None
+        for root, dirs, files in os.walk(download_dir):
+            for f in files:
+                if f.lower().endswith((".flac", ".m4a", ".mp3", ".aiff", ".wav")):
+                    downloaded = os.path.join(root, f)
+                    break
+            if downloaded:
+                break
+
+        if not downloaded:
+            stdout_snippet = (result.stdout or "")[:500]
+            raise FileNotFoundError(
+                f"tiddl succeeded but no audio file in {download_dir}. stdout: {stdout_snippet}"
+            )
+
+        # Move to music library
+        safe_artist = sanitize_filename(artist.split(",")[0].strip())
+        safe_title = sanitize_filename(title)
+        dest_dir = os.path.join(MUSIC_LIBRARY_PATH, safe_artist)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        ext = os.path.splitext(downloaded)[1]
+        dest = os.path.join(dest_dir, f"{safe_artist} - {safe_title}{ext}")
+
+        # Avoid overwriting existing files
+        if os.path.exists(dest):
+            base, extension = os.path.splitext(dest)
+            dest = f"{base}_{tidal_id}{extension}"
+
+        shutil.move(downloaded, dest)
+        log.info("tiddl download complete: %s -> %s", tidal_id, dest)
+        return dest
+
+    finally:
+        shutil.rmtree(download_dir, ignore_errors=True)
+
+
 def _process_downloading(db_path: str):
     sync_mode = get_config(db_path, "sync_mode") or "scan"
     if sync_mode == "scan":
         return  # Scan mode: no downloads
 
-    # --- Auth/health check before batch ---
+    # When tiddl is available, skip Tidarr health/queue checks entirely
+    if _TIDDL_AVAILABLE:
+        _cleanup_stale_downloads(db_path, None)
+        tracks = get_tracks_by_stage(db_path, "downloading", limit=BATCH_DOWNLOAD)
+        tracks = [t for t in tracks if t.get("download_status") in ("pending", "failed")]
+        tracks = tracks[:5]  # tiddl is sequential, cap batch
+        for track in tracks:
+            try:
+                _download_track(db_path, track)
+            except Exception as e:
+                err = str(e)
+                attempts = (track.get("download_attempts") or 0) + 1
+                log.error("Download error for track %d (attempt %d): %s", track["id"], attempts, e)
+                fail_limit = 5
+                update_track(
+                    db_path, track["id"],
+                    download_status="failed" if attempts >= fail_limit else "pending",
+                    download_attempts=attempts,
+                    download_error=err,
+                    pipeline_stage="error" if attempts >= fail_limit else "downloading",
+                    pipeline_error=f"Download failed after {attempts} attempts: {e}" if attempts >= fail_limit else None,
+                )
+                log_activity(db_path, "download_error", track["id"], f"Download attempt {attempts} failed: {e}")
+        return
+
+    # --- Tidarr fallback path (when tiddl is not available) ---
+
+    # Auth/health check before batch
     try:
         with httpx.Client(timeout=5) as client:
             resp = client.get(f"{TIDARR_URL}/api/queue/status")
@@ -719,11 +870,11 @@ def _process_downloading(db_path: str):
         log.warning("Tidarr unreachable (%s), skipping download batch", e)
         return
 
-    # --- Clean up stale queue entries every cycle ---
+    # Clean up stale queue entries every cycle
     tidarr_state = _get_tidarr_queue_state()
     _cleanup_stale_downloads(db_path, tidarr_state)
 
-    # --- Concurrency control: only submit if Tidarr has room ---
+    # Concurrency control: only submit if Tidarr has room
     active_in_tidarr = _count_tidarr_active_items(tidarr_state)
     if active_in_tidarr >= 3:
         log.info("Tidarr has %d active items, waiting for queue to drain", active_in_tidarr)
@@ -742,10 +893,7 @@ def _process_downloading(db_path: str):
             err = str(e)
             attempts = (track.get("download_attempts") or 0) + 1
             log.error("Download error for track %d (attempt %d): %s", track["id"], attempts, e)
-
-            # Cap at 5 attempts before permanent failure
             fail_limit = 5
-
             update_track(
                 db_path, track["id"],
                 download_status="failed" if attempts >= fail_limit else "pending",
@@ -758,7 +906,7 @@ def _process_downloading(db_path: str):
 
 
 def _download_track(db_path: str, track: dict):
-    """Queue a track download via Tidarr's POST /api/save endpoint."""
+    """Download a track — tries tiddl CLI first, falls back to Tidarr API."""
     track_id = track["id"]
     tidal_id = track.get("tidal_id")
     artist = track.get("artist", "Unknown Artist")
@@ -784,10 +932,10 @@ def _download_track(db_path: str, track: dict):
                      f"File already exists: {existing_path}")
         return
 
-    # Broader pre-check: search disk for the file before submitting to Tidarr
+    # Broader pre-check: search disk for the file before downloading
     pre_found = _find_downloaded_file_broad(artist, title)
     if pre_found:
-        log.info("Track %d found on disk before Tidarr submit: %s", track_id, pre_found)
+        log.info("Track %d found on disk before download: %s", track_id, pre_found)
         file_hash = _sha256(pre_found)
         update_track(
             db_path, track_id,
@@ -824,91 +972,113 @@ def _download_track(db_path: str, track: dict):
 
     update_track(db_path, track_id, download_status="downloading", download_attempts=attempts)
 
-    # --- On retry, remove old Tidarr queue entries to prevent duplicates ---
+    # --- On retry, remove old queue entries to prevent duplicates ---
     with get_db(db_path) as conn:
         if attempts > 1:
             conn.execute(
                 "DELETE FROM download_queue WHERE track_id = ? AND status IN ('downloading', 'failed')",
                 (track_id,),
             )
-        conn.execute(
-            """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
-            VALUES (?, 'tidarr', 'downloading', ?, datetime('now'), NULL)""",
-            (track_id, attempts),
-        )
 
-    # Queue download in Tidarr
-    tidarr_output = None
-    with httpx.Client(timeout=120) as client:
-        resp = client.post(
-            f"{TIDARR_URL}/api/save",
-            json={"item": {
-                "id": int(tidal_id),
+    download_source = "tidarr"  # default
+    dest_path = None
+
+    # === PRIMARY: tiddl CLI (direct, fast, no queue issues) ===
+    if _TIDDL_AVAILABLE:
+        try:
+            log.info("Track %d: downloading via tiddl (tidal_id=%s)", track_id, tidal_id)
+            with get_db(db_path) as conn:
+                conn.execute(
+                    """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
+                    VALUES (?, 'tiddl', 'downloading', ?, datetime('now'), NULL)""",
+                    (track_id, attempts),
+                )
+            dest_path = _download_track_via_tiddl(db_path, track)
+            download_source = "tiddl"
+        except Exception as tiddl_err:
+            log.warning("Track %d: tiddl failed (%s), falling back to Tidarr", track_id, tiddl_err)
+            with get_db(db_path) as conn:
+                conn.execute(
+                    "UPDATE download_queue SET status='failed', error=? WHERE track_id=? AND source='tiddl' AND status='downloading'",
+                    (str(tiddl_err)[:500], track_id),
+                )
+
+    # === FALLBACK: Tidarr API ===
+    if not dest_path:
+        with get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
+                VALUES (?, 'tidarr', 'downloading', ?, datetime('now'), NULL)""",
+                (track_id, attempts),
+            )
+
+        tidarr_output = None
+        with httpx.Client(timeout=120) as client:
+            resp = client.post(
+                f"{TIDARR_URL}/api/save",
+                json={"item": {
+                    "id": int(tidal_id),
+                    "artist": artist,
+                    "title": title,
+                    "type": "track",
+                    "quality": "master",
+                    "status": "queue",
+                    "loading": False,
+                    "error": False,
+                    "url": f"/track/{tidal_id}",
+                }},
+            )
+            if resp.status_code not in (200, 201):
+                error_detail = f"Tidarr save failed: HTTP {resp.status_code} - {resp.text[:500]}"
+                with get_db(db_path) as conn:
+                    conn.execute(
+                        "UPDATE download_queue SET error = ? WHERE track_id = ? AND status = 'downloading'",
+                        (error_detail, track_id),
+                    )
+                raise RuntimeError(error_detail)
+            tidarr_output = resp.text[:500]
+
+        wait_output = _wait_for_tidarr_download(tidal_id)
+
+        # Find the downloaded file — try multiple times with increasing delay
+        for find_attempt in range(3):
+            dest_path = _find_and_move_downloaded_file(db_path, track_id, artist, album, title)
+            if dest_path:
+                break
+
+            existing = _check_existing_in_library(
+                {"artist": artist, "title": title},
+                db_path=db_path,
+            )
+            if existing and existing.get("file_path") and os.path.exists(existing["file_path"]):
+                dest_path = existing["file_path"]
+                log.warning(
+                    "Track %d fallback-resolved downloaded file (attempt %d): %s",
+                    track_id, find_attempt + 1, dest_path,
+                )
+                break
+
+            if find_attempt < 2:
+                log.info("Track %d file not found (attempt %d/3), waiting 10s...", track_id, find_attempt + 1)
+                time.sleep(10)
+
+        if not dest_path:
+            debug_info = {
+                "tidal_id": tidal_id,
+                "tidarr_save_response": tidarr_output,
+                "tidarr_wait_output": wait_output,
                 "artist": artist,
                 "title": title,
-                "type": "track",
-                "quality": "max",
-                "status": "queue",
-                "loading": False,
-                "error": False,
-                "url": f"/track/{tidal_id}",
-            }},
-        )
-        if resp.status_code not in (200, 201):
-            error_detail = f"Tidarr save failed: HTTP {resp.status_code} - {resp.text[:500]}"
-            # Store Tidarr output in download_error for debugging
+            }
+            log.error("Track %d: file not found after 3 search attempts. Debug: %s", track_id, json.dumps(debug_info))
             with get_db(db_path) as conn:
                 conn.execute(
                     "UPDATE download_queue SET error = ? WHERE track_id = ? AND status = 'downloading'",
-                    (error_detail, track_id),
+                    (json.dumps(debug_info)[:2000], track_id),
                 )
-            raise RuntimeError(error_detail)
-        tidarr_output = resp.text[:500]
+            raise FileNotFoundError(f"Downloaded file not found for tidal_id={tidal_id} after 3 search attempts")
 
-    # Wait for Tidarr to complete the download
-    wait_output = _wait_for_tidarr_download(tidal_id)
-
-    # Find the downloaded file — try multiple times with increasing delay
-    dest_path = None
-    for find_attempt in range(3):
-        dest_path = _find_and_move_downloaded_file(db_path, track_id, artist, album, title)
-        if dest_path:
-            break
-
-        # Fallback: broader library check
-        existing = _check_existing_in_library(
-            {"artist": artist, "title": title},
-            db_path=db_path,
-        )
-        if existing and existing.get("file_path") and os.path.exists(existing["file_path"]):
-            dest_path = existing["file_path"]
-            log.warning(
-                "Track %d fallback-resolved downloaded file (attempt %d): %s",
-                track_id, find_attempt + 1, dest_path,
-            )
-            break
-
-        if find_attempt < 2:
-            log.info("Track %d file not found (attempt %d/3), waiting 10s...", track_id, find_attempt + 1)
-            time.sleep(10)
-
-    if not dest_path:
-        # Log the EXACT Tidarr output so we know what happened
-        debug_info = {
-            "tidal_id": tidal_id,
-            "tidarr_save_response": tidarr_output,
-            "tidarr_wait_output": wait_output,
-            "artist": artist,
-            "title": title,
-        }
-        log.error("Track %d: file not found after 3 search attempts. Debug: %s", track_id, json.dumps(debug_info))
-        # Store debug info in download_error
-        with get_db(db_path) as conn:
-            conn.execute(
-                "UPDATE download_queue SET error = ? WHERE track_id = ? AND status = 'downloading'",
-                (json.dumps(debug_info)[:2000], track_id),
-            )
-        raise FileNotFoundError(f"Downloaded file not found for tidal_id={tidal_id} after 3 search attempts")
+        download_source = "tidarr"
 
     file_hash = _sha256(dest_path)
     file_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
@@ -916,7 +1086,7 @@ def _download_track(db_path: str, track: dict):
     update_track(
         db_path, track_id,
         download_status="complete",
-        download_source="tidarr",
+        download_source=download_source,
         file_path=dest_path,
         file_hash_sha256=file_hash,
         pipeline_stage="verifying",
@@ -933,11 +1103,11 @@ def _download_track(db_path: str, track: dict):
     # Log download success with file details to activity_log
     log_activity(
         db_path, "download_complete", track_id,
-        f"Downloaded: {artist} - {title}",
+        f"Downloaded via {download_source}: {artist} - {title}",
         {"file_path": dest_path, "file_hash": file_hash, "file_size_bytes": file_size,
-         "source": "tidarr", "tidal_id": tidal_id, "attempts": attempts},
+         "source": download_source, "tidal_id": tidal_id, "attempts": attempts},
     )
-    log.info("Track %d downloaded -> %s (%d bytes, attempt %d)", track_id, dest_path, file_size, attempts)
+    log.info("Track %d downloaded via %s -> %s (%d bytes, attempt %d)", track_id, download_source, dest_path, file_size, attempts)
 
 
 def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval: int = 5) -> str | None:
@@ -1407,9 +1577,9 @@ def _organize_track(db_path: str, track: dict):
         # Wait for SynologyDrive to sync — only needed for freshly downloaded files
         download_source = track.get("download_source", "")
         match_source = track.get("match_source", "")
-        if download_source == "tidarr":
+        if download_source in ("tidarr", "tiddl"):
             sync_delay = int(get_config(db_path, "synology_sync_delay_seconds") or 3)
-            log.info("Waiting %ds for SynologyDrive sync (new download)...", sync_delay)
+            log.info("Waiting %ds for SynologyDrive sync (new download via %s)...", sync_delay, download_source)
             time.sleep(sync_delay)
         else:
             log.debug("Skipping SynologyDrive delay for existing file (source=%s/%s)",

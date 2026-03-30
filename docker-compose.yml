@@ -38,6 +38,7 @@ services:
       - sync-data:/app/data
       - /volume1/music/Database:/music
       - /volume1/music/Input:/downloads
+      - /volume1/PlexMediaServer/tidarr/config/.tiddl/auth.json:/tiddl-auth/auth.json:ro
     environment:
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
@@ -46,6 +47,7 @@ services:
       - LEXICON_API_URL=${LEXICON_API_URL:-http://192.168.1.116:48624}
       - MUSIC_LIBRARY_PATH=/music
       - SLS_DB_PATH=/app/data/sync.db
+      - TIDDL_PATH=/tiddl-config
     depends_on:
       sync-api:
         condition: service_healthy
