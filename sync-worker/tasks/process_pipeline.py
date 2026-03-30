@@ -660,15 +660,22 @@ def _process_downloading(db_path: str):
         try:
             _download_track(db_path, track)
         except Exception as e:
+            err = str(e)
             attempts = (track.get("download_attempts") or 0) + 1
             log.error("Download error for track %d (attempt %d): %s", track["id"], attempts, e)
+
+            # "Downloaded file not found" is often transient with Tidarr queue/output lag.
+            # Give it a longer retry runway before moving to hard error.
+            missing_file = "Downloaded file not found" in err
+            fail_limit = 10 if missing_file else 3
+
             update_track(
                 db_path, track["id"],
-                download_status="failed" if attempts >= 3 else "pending",
+                download_status="failed" if attempts >= fail_limit else "pending",
                 download_attempts=attempts,
-                download_error=str(e),
-                pipeline_stage="error" if attempts >= 3 else "downloading",
-                pipeline_error=f"Download failed after {attempts} attempts: {e}" if attempts >= 3 else None,
+                download_error=err,
+                pipeline_stage="error" if attempts >= fail_limit else "downloading",
+                pipeline_error=f"Download failed after {attempts} attempts: {e}" if attempts >= fail_limit else None,
             )
             log_activity(db_path, "download_error", track["id"], f"Download attempt {attempts} failed: {e}")
 
@@ -771,6 +778,21 @@ def _download_track(db_path: str, track: dict):
     # Tidarr downloads to the configured output directory (/shared/downloads or similar)
     dest_path = _find_and_move_downloaded_file(db_path, track_id, artist, album, title)
 
+    # Fallback: if direct search misses, run broader library/download check used in matching stage.
+    # This handles cases where Tidarr template/path differs slightly from expected artist/title layout.
+    if not dest_path:
+        existing = _check_existing_in_library(
+            {"artist": artist, "title": title},
+            db_path=db_path,
+        )
+        if existing and existing.get("file_path") and os.path.exists(existing["file_path"]):
+            dest_path = existing["file_path"]
+            log.warning(
+                "Track %d fallback-resolved downloaded file after Tidarr wait: %s",
+                track_id,
+                dest_path,
+            )
+
     if not dest_path:
         raise FileNotFoundError(f"Downloaded file not found for tidal_id={tidal_id}")
 
@@ -801,7 +823,7 @@ def _download_track(db_path: str, track: dict):
     log.info("Track %d downloaded -> %s", track_id, dest_path)
 
 
-def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 60, poll_interval: int = 5):
+def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval: int = 5):
     """Wait for Tidarr to finish downloading a track by polling the item-specific output."""
     start = time.time()
     time.sleep(8)  # Give Tidarr time to start and potentially finish the download
