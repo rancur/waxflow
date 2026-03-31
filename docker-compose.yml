@@ -7,6 +7,7 @@ services:
       dockerfile: sync-api/Dockerfile
       args:
         - GIT_SHA=${GIT_SHA:-unknown}
+    image: spotify-lexicon-sync-api:${VERSION:-latest}
     container_name: sync-api
     ports:
       - "8402:8402"
@@ -32,7 +33,11 @@ services:
       start_period: 10s
 
   sync-worker:
-    build: ./sync-worker
+    build:
+      context: ./sync-worker
+      args:
+        - GIT_SHA=${GIT_SHA:-unknown}
+    image: spotify-lexicon-sync-worker:${VERSION:-latest}
     container_name: sync-worker
     volumes:
       - sync-data:/app/data
@@ -57,8 +62,10 @@ services:
     build:
       context: ./sync-web
       args:
+        - GIT_SHA=${GIT_SHA:-unknown}
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.221:8402}
         - INTERNAL_API_URL=http://sync-api:8402
+    image: spotify-lexicon-sync-web:${VERSION:-latest}
     container_name: sync-web
     ports:
       - "8400:3000"

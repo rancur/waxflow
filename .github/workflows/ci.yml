@@ -1,0 +1,47 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check API syntax
+        run: |
+          cd sync-api
+          python -m py_compile main.py
+          python -m py_compile db.py
+          python -m py_compile init_db.py
+          python -m py_compile models.py
+          for f in routes/*.py; do python -m py_compile "$f"; done
+          for f in services/*.py; do python -m py_compile "$f"; done
+
+      - name: Check Worker syntax
+        run: |
+          cd sync-worker
+          python -m py_compile worker.py
+          for f in tasks/*.py; do python -m py_compile "$f"; done
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        run: |
+          cd sync-web
+          npm ci
+          npm run build
+
+      - name: Docker Compose config check
+        run: docker compose config --quiet
