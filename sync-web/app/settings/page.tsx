@@ -18,15 +18,20 @@ export default function SettingsPage() {
     error?: string
     interval?: number
   }>({ state: 'idle' })
-  const [analyzeStats, setAnalyzeStats] = useState<any>(null)
+  const [lexiconTest, setLexiconTest] = useState<{
+    state: 'idle' | 'testing' | 'success' | 'error'
+    latency?: number
+    error?: string
+  }>({ state: 'idle' })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [showAllBackups, setShowAllBackups] = useState(false)
 
   const fetchAll = useCallback(async () => {
     try {
-      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes, analyzeRes] = await Promise.allSettled([
+      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes] = await Promise.allSettled([
         apiFetch<any>('/settings'),
         apiFetch<any>('/lexicon/backups'),
         apiFetch<any>('/admin/version'),
@@ -34,7 +39,6 @@ export default function SettingsPage() {
         apiFetch<any>('/admin/health'),
         apiFetch<any>('/dashboard'),
         apiFetch<any>('/tidal/status'),
-        apiFetch<any>('/admin/analyze-stats'),
       ])
 
       if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value.settings || {})
@@ -44,7 +48,6 @@ export default function SettingsPage() {
       if (healthRes.status === 'fulfilled') setHealth(healthRes.value)
       if (dashboardRes.status === 'fulfilled') setDashboard(dashboardRes.value)
       if (tidalRes.status === 'fulfilled') setTidalStatus(tidalRes.value)
-      if (analyzeRes.status === 'fulfilled') setAnalyzeStats(analyzeRes.value)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings')
@@ -90,7 +93,6 @@ export default function SettingsPage() {
         user_code: data.user_code,
         interval: data.interval || 5,
       })
-      // Start polling
       const pollInterval = (data.interval || 5) * 1000
       const maxAttempts = Math.ceil((data.expires_in || 300) / (data.interval || 5))
       let attempts = 0
@@ -108,7 +110,6 @@ export default function SettingsPage() {
             setTidalAuth({ state: 'success' })
             setSuccess(`Tidal connected (user ${result.user_id})`)
             setTimeout(() => setSuccess(null), 5000)
-            // Refresh tidal status
             const fresh = await apiFetch<any>('/tidal/status')
             setTidalStatus(fresh)
             setTimeout(() => setTidalAuth({ state: 'idle' }), 5000)
@@ -116,7 +117,6 @@ export default function SettingsPage() {
             clearInterval(poll)
             setTidalAuth({ state: 'error', error: result.error })
           }
-          // 'pending' -> keep polling
         } catch {
           clearInterval(poll)
           setTidalAuth({ state: 'error', error: 'Polling failed' })
@@ -124,6 +124,27 @@ export default function SettingsPage() {
       }, pollInterval)
     } catch (err) {
       setTidalAuth({ state: 'error', error: err instanceof Error ? err.message : 'Failed to start auth' })
+    }
+  }
+
+  const handleTestLexicon = async () => {
+    setLexiconTest({ state: 'testing' })
+    const start = Date.now()
+    try {
+      // Save current settings first so the backend uses the updated URL
+      await apiFetch('/settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ settings }),
+      })
+      const data = await apiFetch<any>('/lexicon/status')
+      const latency = Date.now() - start
+      if (data.connected) {
+        setLexiconTest({ state: 'success', latency })
+      } else {
+        setLexiconTest({ state: 'error', error: 'Lexicon API unreachable at ' + (data.base_url || 'configured URL') })
+      }
+    } catch (err) {
+      setLexiconTest({ state: 'error', error: err instanceof Error ? err.message : 'Connection failed' })
     }
   }
 
@@ -142,6 +163,10 @@ export default function SettingsPage() {
     setSettings(prev => ({ ...prev, [key]: value }))
   }
 
+  // Helpers
+  const lexiconService = dashboard?.services?.find((s: any) => s.name === 'lexicon')
+  const visibleBackups = showAllBackups ? backups : backups.slice(0, 3)
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -159,7 +184,7 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-100">Settings</h1>
-        <p className="text-sm text-slate-500 mt-1">Configuration and maintenance</p>
+        <p className="text-sm text-slate-500 mt-1">Connections, sync configuration, and maintenance</p>
       </div>
 
       {error && (
@@ -174,375 +199,211 @@ export default function SettingsPage() {
       )}
 
       {/* ================================================================ */}
-      {/* CONNECTIONS                                                       */}
+      {/* CONNECTION CARDS (grid of 3)                                      */}
       {/* ================================================================ */}
 
-      {/* Spotify Connection */}
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Spotify Connection</h2>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className={`w-3 h-3 rounded-full ${spotifyStatus?.authenticated ? 'bg-emerald-400' : 'bg-red-400'}`} />
-            <span className="text-sm text-slate-300">
-              {spotifyStatus?.authenticated ? 'Connected' : 'Not connected'}
-            </span>
-            {spotifyStatus?.last_poll && (
-              <span className="text-xs text-slate-500">
-                Last poll: {new Date(spotifyStatus.last_poll).toLocaleString()}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Spotify Connection */}
+        <div className="card">
+          <h2 className="text-sm font-semibold text-slate-300 mb-3">Spotify</h2>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <div className={`w-2.5 h-2.5 rounded-full ${spotifyStatus?.authenticated ? 'bg-emerald-400' : 'bg-red-400'}`} />
+              <span className="text-sm text-slate-300">
+                {spotifyStatus?.authenticated ? 'Connected' : 'Not connected'}
               </span>
+            </div>
+            {spotifyStatus?.last_poll && (
+              <p className="text-xs text-slate-500">
+                Last poll: {new Date(spotifyStatus.last_poll).toLocaleString()}
+              </p>
             )}
+            <button className="btn-primary text-sm w-full" onClick={handleConnectSpotify}>
+              {spotifyStatus?.authenticated ? 'Reconnect' : 'Connect'}
+            </button>
           </div>
-          <button className="btn-primary text-sm" onClick={handleConnectSpotify}>
-            {spotifyStatus?.authenticated ? 'Reconnect' : 'Connect Spotify'}
-          </button>
         </div>
-      </div>
 
-      {/* Tidal Connection */}
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Tidal Connection</h2>
-        <div className="space-y-4">
-          {/* Status row */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-3 h-3 rounded-full ${
+        {/* Tidal Connection */}
+        <div className="card">
+          <h2 className="text-sm font-semibold text-slate-300 mb-3">Tidal</h2>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <div className={`w-2.5 h-2.5 rounded-full ${
                 tidalStatus?.connected
                   ? tidalStatus?.expired ? 'bg-amber-400' : 'bg-emerald-400'
                   : 'bg-red-400'
               }`} />
               <span className="text-sm text-slate-300">
                 {tidalStatus?.connected
-                  ? tidalStatus?.expired
-                    ? 'Token expired'
-                    : `Connected (user ${tidalStatus.user_id})`
+                  ? tidalStatus?.expired ? 'Token expired' : 'Connected'
                   : 'Not connected'}
               </span>
-              {tidalStatus?.connected && !tidalStatus?.expired && (
-                <span className="text-xs text-slate-500">
-                  Expires in {tidalStatus.hours_left}h
-                </span>
-              )}
+            </div>
+            {tidalStatus?.connected && !tidalStatus?.expired && (
+              <p className="text-xs text-slate-500">
+                Expires in {tidalStatus.hours_left}h
+              </p>
+            )}
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Download Quality</label>
+              <select
+                className="select-field w-full"
+                value={settings.tidal_download_quality || 'max'}
+                onChange={(e) => updateSetting('tidal_download_quality', e.target.value)}
+              >
+                <option value="low">Low</option>
+                <option value="normal">Normal</option>
+                <option value="high">High</option>
+                <option value="max">Max (Master/FLAC)</option>
+              </select>
             </div>
             <button
-              className="btn-primary text-sm"
+              className="btn-primary text-sm w-full"
               onClick={handleConnectTidal}
               disabled={tidalAuth.state === 'waiting_for_code' || tidalAuth.state === 'polling' || tidalAuth.state === 'showing_code'}
             >
               {tidalAuth.state === 'waiting_for_code' ? 'Starting...'
                 : tidalAuth.state === 'showing_code' || tidalAuth.state === 'polling' ? 'Waiting...'
-                : tidalStatus?.connected && !tidalStatus?.expired ? 'Reconnect' : 'Connect Tidal'}
+                : tidalStatus?.connected && !tidalStatus?.expired ? 'Reconnect' : 'Connect'}
             </button>
+
+            {/* Device code flow UI */}
+            {(tidalAuth.state === 'showing_code' || tidalAuth.state === 'polling') && (
+              <div className="bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 space-y-2">
+                <p className="text-xs text-slate-300">
+                  Go to{' '}
+                  <a
+                    href={tidalAuth.verification_uri?.startsWith('http') ? tidalAuth.verification_uri : `https://${tidalAuth.verification_uri}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-400 underline hover:text-blue-300"
+                  >
+                    {tidalAuth.verification_uri}
+                  </a>
+                </p>
+                {tidalAuth.user_code && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-400">Code:</span>
+                    <code className="text-sm font-bold text-slate-100 bg-slate-700 px-2 py-0.5 rounded tracking-wider">
+                      {tidalAuth.user_code}
+                    </code>
+                  </div>
+                )}
+                <p className="text-xs text-slate-500 animate-pulse">Waiting for authorization...</p>
+              </div>
+            )}
+            {tidalAuth.state === 'success' && (
+              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-4 py-2">
+                <p className="text-xs text-emerald-400">Authorized.</p>
+              </div>
+            )}
+            {tidalAuth.state === 'error' && (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2">
+                <p className="text-xs text-red-400">{tidalAuth.error}</p>
+              </div>
+            )}
           </div>
-
-          {/* Device code flow UI */}
-          {(tidalAuth.state === 'showing_code' || tidalAuth.state === 'polling') && (
-            <div className="bg-slate-800/50 border border-slate-700 rounded-lg px-5 py-4 space-y-3">
-              <p className="text-sm text-slate-300">
-                Go to{' '}
-                <a
-                  href={tidalAuth.verification_uri?.startsWith('http') ? tidalAuth.verification_uri : `https://${tidalAuth.verification_uri}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-400 underline hover:text-blue-300"
-                >
-                  {tidalAuth.verification_uri}
-                </a>
-              </p>
-              {tidalAuth.user_code && (
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-slate-400">Enter code:</span>
-                  <code className="text-lg font-bold text-slate-100 bg-slate-700 px-3 py-1 rounded tracking-wider">
-                    {tidalAuth.user_code}
-                  </code>
-                </div>
-              )}
-              <p className="text-xs text-slate-500 animate-pulse">
-                Waiting for authorization...
-              </p>
-            </div>
-          )}
-
-          {/* Success */}
-          {tidalAuth.state === 'success' && (
-            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-5 py-3">
-              <p className="text-sm text-emerald-400">Tidal authorized successfully.</p>
-            </div>
-          )}
-
-          {/* Error */}
-          {tidalAuth.state === 'error' && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-5 py-3">
-              <p className="text-sm text-red-400">{tidalAuth.error}</p>
-            </div>
-          )}
         </div>
-      </div>
 
-      {/* ================================================================ */}
-      {/* SERVICE HEALTH                                                    */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Service Health</h2>
-        <div className="space-y-3">
-          {/* Spotify */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-2.5 h-2.5 rounded-full ${spotifyStatus?.authenticated ? 'bg-emerald-400' : 'bg-red-400'}`} />
-              <span className="text-sm text-slate-300">Spotify</span>
-            </div>
-            <span className="text-xs text-slate-500">
-              {spotifyStatus?.authenticated ? 'Connected' : 'Disconnected'}
-            </span>
-          </div>
-
-          {/* Tidal */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
+        {/* Lexicon Connection */}
+        <div className="card">
+          <h2 className="text-sm font-semibold text-slate-300 mb-3">Lexicon</h2>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
               <div className={`w-2.5 h-2.5 rounded-full ${
-                tidalStatus?.connected && !tidalStatus?.expired ? 'bg-emerald-400'
-                : tidalStatus?.connected && tidalStatus?.expired ? 'bg-amber-400'
-                : 'bg-red-400'
+                lexiconTest.state === 'success' ? 'bg-emerald-400'
+                : lexiconTest.state === 'error' ? 'bg-red-400'
+                : lexiconService?.status === 'ok' ? 'bg-emerald-400'
+                : 'bg-slate-500'
               }`} />
-              <span className="text-sm text-slate-300">Tidal</span>
-            </div>
-            <span className="text-xs text-slate-500">
-              {tidalStatus?.connected
-                ? tidalStatus?.expired ? 'Token expired' : `Connected (${tidalStatus.hours_left}h left)`
-                : 'Disconnected'}
-            </span>
-          </div>
-
-          {/* Tidarr */}
-          {(() => {
-            const tidarr = dashboard?.services?.find((s: any) => s.name === 'tidarr')
-            const tidarrUrl = settings.tidarr_url || 'http://192.168.1.221:8484'
-            return (
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={`w-2.5 h-2.5 rounded-full ${tidarr?.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                  <span className="text-sm text-slate-300">Tidarr</span>
-                  <span className="text-xs text-slate-600 font-mono">{tidarrUrl}</span>
-                </div>
-                <span className="text-xs text-slate-500">
-                  {tidarr?.status === 'ok'
-                    ? `Connected (${tidarr.latency_ms}ms)`
-                    : tidarr?.error || 'Unknown'}
-                </span>
-              </div>
-            )
-          })()}
-
-          {/* Lexicon */}
-          {(() => {
-            const lexicon = dashboard?.services?.find((s: any) => s.name === 'lexicon')
-            const lexiconUrl = settings.lexicon_api_url || 'http://192.168.1.116:48624'
-            return (
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={`w-2.5 h-2.5 rounded-full ${lexicon?.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                  <span className="text-sm text-slate-300">Lexicon</span>
-                  <span className="text-xs text-slate-600 font-mono">{lexiconUrl}</span>
-                </div>
-                <span className="text-xs text-slate-500">
-                  {lexicon?.status === 'ok'
-                    ? `Connected (${lexicon.latency_ms}ms)`
-                    : lexicon?.error || 'Unknown'}
-                </span>
-              </div>
-            )
-          })()}
-
-          {/* Database */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-2.5 h-2.5 rounded-full ${health?.database === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
-              <span className="text-sm text-slate-300">Database</span>
-            </div>
-            <span className="text-xs text-slate-500">
-              {health?.database === 'ok' ? 'OK' : health?.database || 'Unknown'}
-            </span>
-          </div>
-
-          {/* Uptime */}
-          {health?.uptime_seconds != null && (
-            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-              <span className="text-xs text-slate-500">Uptime</span>
-              <span className="text-xs text-slate-400 font-mono">
-                {(() => {
-                  const s = health.uptime_seconds
-                  const d = Math.floor(s / 86400)
-                  const h = Math.floor((s % 86400) / 3600)
-                  const m = Math.floor((s % 3600) / 60)
-                  return d > 0 ? `${d}d ${h}h ${m}m` : h > 0 ? `${h}h ${m}m` : `${m}m`
-                })()}
+              <span className="text-sm text-slate-300">
+                {lexiconTest.state === 'success'
+                  ? `Connected (${lexiconTest.latency}ms)`
+                  : lexiconTest.state === 'error'
+                    ? 'Connection failed'
+                    : lexiconService?.status === 'ok'
+                      ? `Connected (${lexiconService.latency_ms}ms)`
+                      : 'Unknown'}
               </span>
             </div>
-          )}
-        </div>
-      </div>
-
-      {/* ================================================================ */}
-      {/* SYNC MODE                                                         */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Sync Mode</h2>
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm text-slate-300">
-              {settings.sync_mode === 'full' ? 'Full Sync' : 'Scan Only'}
-            </p>
-            <p className="text-xs text-slate-500 mt-1">
-              {settings.sync_mode === 'full'
-                ? 'Matching, downloading, verifying, and organizing tracks.'
-                : 'Only matching against existing library. No downloads.'}
-            </p>
-          </div>
-          <select
-            className="select-field"
-            value={settings.sync_mode || 'scan'}
-            onChange={(e) => updateSetting('sync_mode', e.target.value)}
-          >
-            <option value="scan">Scan Only</option>
-            <option value="full">Full Sync</option>
-          </select>
-        </div>
-      </div>
-
-      {/* ================================================================ */}
-      {/* LIBRARY PATHS                                                     */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Library Paths</h2>
-        <p className="text-xs text-slate-500 mb-4">
-          Paths that map between the Docker container and the Lexicon host machine.
-        </p>
-        <div className="space-y-4">
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Lexicon Library Path</label>
-            <input
-              type="text"
-              className="input-field w-full"
-              placeholder="/Volumes/music/Database"
-              value={settings.lexicon_library_path || '/Volumes/music/Database'}
-              onChange={(e) => updateSetting('lexicon_library_path', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              The path where Lexicon sees the main music library (e.g. NAS SMB mount on the Mac).
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Lexicon Input Path</label>
-            <input
-              type="text"
-              className="input-field w-full"
-              placeholder="/Volumes/music/Input"
-              value={settings.lexicon_input_path || '/Volumes/music/Input'}
-              onChange={(e) => updateSetting('lexicon_input_path', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              The path where Lexicon sees the downloads/input folder.
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Music Library Path (container)</label>
-            <input
-              type="text"
-              className="input-field w-full"
-              placeholder="/music"
-              value={settings.music_library_path || '/music'}
-              onChange={(e) => updateSetting('music_library_path', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              Path to the music library inside the Docker container.
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Downloads Path (container)</label>
-            <input
-              type="text"
-              className="input-field w-full"
-              placeholder="/downloads"
-              value={settings.downloads_path || '/downloads'}
-              onChange={(e) => updateSetting('downloads_path', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              Path to the downloads folder inside the Docker container.
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Legacy Path Prefixes</label>
-            <input
-              type="text"
-              className="input-field w-full"
-              placeholder="/Volumes/Macintosh HD/Users/user/Music/Database/,/Users/user/Music/Database/"
-              value={settings.lexicon_legacy_path_prefixes || ''}
-              onChange={(e) => updateSetting('lexicon_legacy_path_prefixes', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              Comma-separated list of old path prefixes Lexicon may have stored. Used for matching tracks imported under a previous path layout.
-            </p>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">API URL</label>
+              <input
+                type="text"
+                className="input-field w-full"
+                placeholder="http://192.168.1.116:48624"
+                value={settings.lexicon_api_url || ''}
+                onChange={(e) => updateSetting('lexicon_api_url', e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Library Path</label>
+              <input
+                type="text"
+                className="input-field w-full"
+                placeholder="/Volumes/music/Database"
+                value={settings.lexicon_library_path || ''}
+                onChange={(e) => updateSetting('lexicon_library_path', e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Input Path</label>
+              <input
+                type="text"
+                className="input-field w-full"
+                placeholder="/Volumes/music/Input"
+                value={settings.lexicon_input_path || ''}
+                onChange={(e) => updateSetting('lexicon_input_path', e.target.value)}
+              />
+            </div>
+            <p className="text-xs text-slate-600">For local setups, use http://localhost:48624</p>
+            <button
+              className="btn-secondary text-sm w-full"
+              onClick={handleTestLexicon}
+              disabled={lexiconTest.state === 'testing'}
+            >
+              {lexiconTest.state === 'testing' ? 'Testing...' : 'Test Connection'}
+            </button>
+            {lexiconTest.state === 'error' && (
+              <p className="text-xs text-red-400">{lexiconTest.error}</p>
+            )}
           </div>
         </div>
       </div>
 
       {/* ================================================================ */}
-      {/* SERVICE URLS                                                      */}
+      {/* SYNC SETTINGS                                                     */}
       {/* ================================================================ */}
 
       <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Service URLs</h2>
-        <p className="text-xs text-slate-500 mb-4">
-          Override the default service endpoints. Leave empty to use the environment variable or built-in default.
-        </p>
-        <div className="grid md:grid-cols-2 gap-4">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Sync Settings</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Lexicon API URL</label>
-            <input
-              type="text"
-              className="input-field w-full"
-              placeholder="http://192.168.1.116:48624"
-              value={settings.lexicon_api_url || ''}
-              onChange={(e) => updateSetting('lexicon_api_url', e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Tidarr URL</label>
-            <input
-              type="text"
-              className="input-field w-full"
-              placeholder="http://tidarr:8484"
-              value={settings.tidarr_url || ''}
-              onChange={(e) => updateSetting('tidarr_url', e.target.value)}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* ================================================================ */}
-      {/* DOWNLOAD SETTINGS                                                 */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Download Settings</h2>
-        <div className="grid md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Tidal Download Quality</label>
+            <label className="block text-xs text-slate-500 mb-1">Sync Mode</label>
             <select
               className="select-field w-full"
-              value={settings.tidal_download_quality || 'max'}
-              onChange={(e) => updateSetting('tidal_download_quality', e.target.value)}
+              value={settings.sync_mode || 'scan'}
+              onChange={(e) => updateSetting('sync_mode', e.target.value)}
             >
-              <option value="low">Low</option>
-              <option value="normal">Normal</option>
-              <option value="high">High</option>
-              <option value="max">Max (Master/FLAC)</option>
+              <option value="scan">Scan Only</option>
+              <option value="full">Full Sync</option>
             </select>
             <p className="text-xs text-slate-600 mt-1">
-              Audio quality for Tidal downloads via tiddl.
+              {settings.sync_mode === 'full'
+                ? 'Match, download, verify, and organize.'
+                : 'Match against existing library only.'}
             </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Spotify Poll Interval (sec)</label>
+            <input
+              type="number"
+              min="30"
+              className="input-field w-full"
+              value={settings.spotify_poll_interval_seconds || '300'}
+              onChange={(e) => updateSetting('spotify_poll_interval_seconds', e.target.value)}
+            />
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Max Concurrent Downloads</label>
@@ -554,92 +415,6 @@ export default function SettingsPage() {
               value={settings.max_concurrent_downloads || '2'}
               onChange={(e) => updateSetting('max_concurrent_downloads', e.target.value)}
             />
-            <p className="text-xs text-slate-600 mt-1">
-              How many tracks to download in parallel.
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Plex UID</label>
-            <input
-              type="number"
-              className="input-field w-full"
-              placeholder="297536"
-              value={settings.plex_uid || '297536'}
-              onChange={(e) => updateSetting('plex_uid', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              UID to chown downloaded files to (for NAS/Plex compatibility).
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Plex GID</label>
-            <input
-              type="number"
-              className="input-field w-full"
-              placeholder="297536"
-              value={settings.plex_gid || '297536'}
-              onChange={(e) => updateSetting('plex_gid', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              GID to chown downloaded files to (for NAS/Plex compatibility).
-            </p>
-          </div>
-        </div>
-        <div className="mt-4 flex items-center justify-between">
-          <div>
-            <p className="text-sm text-slate-300">Auto-Analyze After Sync</p>
-            <p className="text-xs text-slate-600">
-              Automatically run Lexicon post-processing after each track is organized.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => updateSetting('auto_analyze_enabled', settings.auto_analyze_enabled === '0' ? '1' : '0')}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              settings.auto_analyze_enabled === '0' ? 'bg-slate-700' : 'bg-emerald-500'
-            }`}
-          >
-            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-              settings.auto_analyze_enabled === '0' ? 'translate-x-1' : 'translate-x-6'
-            }`} />
-          </button>
-        </div>
-      </div>
-
-      {/* ================================================================ */}
-      {/* MATCHING & VERIFICATION                                           */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Matching &amp; Verification</h2>
-        <div className="grid md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">Fingerprint Match Threshold</label>
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              max="1"
-              className="input-field w-full"
-              value={settings.fingerprint_min_score || '0.85'}
-              onChange={(e) => updateSetting('fingerprint_min_score', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              Minimum Chromaprint similarity score (0.0 &ndash; 1.0) to consider a match valid.
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">SynologyDrive Sync Delay (seconds)</label>
-            <input
-              type="number"
-              min="0"
-              className="input-field w-full"
-              value={settings.synology_sync_delay_seconds || '3'}
-              onChange={(e) => updateSetting('synology_sync_delay_seconds', e.target.value)}
-            />
-            <p className="text-xs text-slate-600 mt-1">
-              Wait time after file write before Lexicon import, allowing SynologyDrive to finish syncing.
-            </p>
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Retry Search Interval (hours)</label>
@@ -650,24 +425,101 @@ export default function SettingsPage() {
               value={String(Math.round(Number(settings.retry_search_interval_seconds || '43200') / 3600))}
               onChange={(e) => updateSetting('retry_search_interval_seconds', String(Number(e.target.value) * 3600))}
             />
-            <p className="text-xs text-slate-600 mt-1">
-              How often to retry matching for unmatched tracks.
-            </p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Spotify Poll Interval (seconds)</label>
+            <label className="block text-xs text-slate-500 mb-1">Fingerprint Threshold (0-1)</label>
             <input
               type="number"
-              min="30"
+              step="0.01"
+              min="0"
+              max="1"
               className="input-field w-full"
-              value={settings.spotify_poll_interval_seconds || '300'}
-              onChange={(e) => updateSetting('spotify_poll_interval_seconds', e.target.value)}
+              value={settings.fingerprint_min_score || '0.85'}
+              onChange={(e) => updateSetting('fingerprint_min_score', e.target.value)}
             />
-            <p className="text-xs text-slate-600 mt-1">
-              How often to check Spotify for new liked songs.
-            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">SynologyDrive Sync Delay (sec)</label>
+            <input
+              type="number"
+              min="0"
+              className="input-field w-full"
+              value={settings.synology_sync_delay_seconds || '3'}
+              onChange={(e) => updateSetting('synology_sync_delay_seconds', e.target.value)}
+            />
           </div>
         </div>
+
+        {/* Advanced path settings (collapsible) */}
+        <details className="mt-4 pt-4 border-t border-slate-800">
+          <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-400">
+            Advanced: Container paths &amp; legacy prefixes
+          </summary>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Music Library Path (container)</label>
+              <input
+                type="text"
+                className="input-field w-full"
+                placeholder="/music"
+                value={settings.music_library_path || '/music'}
+                onChange={(e) => updateSetting('music_library_path', e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Downloads Path (container)</label>
+              <input
+                type="text"
+                className="input-field w-full"
+                placeholder="/downloads"
+                value={settings.downloads_path || '/downloads'}
+                onChange={(e) => updateSetting('downloads_path', e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Tidarr URL</label>
+              <input
+                type="text"
+                className="input-field w-full"
+                placeholder="http://tidarr:8484"
+                value={settings.tidarr_url || ''}
+                onChange={(e) => updateSetting('tidarr_url', e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Plex UID / GID</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  className="input-field w-full"
+                  placeholder="UID"
+                  value={settings.plex_uid || '297536'}
+                  onChange={(e) => updateSetting('plex_uid', e.target.value)}
+                />
+                <input
+                  type="number"
+                  className="input-field w-full"
+                  placeholder="GID"
+                  value={settings.plex_gid || '297536'}
+                  onChange={(e) => updateSetting('plex_gid', e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-xs text-slate-500 mb-1">Legacy Path Prefixes</label>
+              <input
+                type="text"
+                className="input-field w-full"
+                placeholder="/Volumes/Macintosh HD/Users/user/Music/Database/,/Users/user/Music/Database/"
+                value={settings.lexicon_legacy_path_prefixes || ''}
+                onChange={(e) => updateSetting('lexicon_legacy_path_prefixes', e.target.value)}
+              />
+              <p className="text-xs text-slate-600 mt-1">
+                Comma-separated old path prefixes for matching tracks imported under a previous layout.
+              </p>
+            </div>
+          </div>
+        </details>
       </div>
 
       {/* ================================================================ */}
@@ -677,19 +529,15 @@ export default function SettingsPage() {
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-2">Lexicon Post-Processing</h2>
         <p className="text-xs text-slate-500 mb-4">
-          After each batch of tracks syncs to Lexicon, the system navigates to
-          Incoming tracks and triggers these actions once for the whole batch.
-          Synced tracks are also added to a &ldquo;Recently Added (Sync)&rdquo; playlist
-          in Lexicon for easy manual selection. For best results, keep Lexicon open.
+          Triggers after each sync batch. Keep Lexicon open for best results.
         </p>
         <div className="space-y-3">
           {([
-            { key: 'analyze', label: 'Analyze (BPM / Key)', desc: 'Detect BPM, key, and waveform via TrackBrowser_Analyze', disabled: false },
-            { key: 'cues', label: 'Cue Point Generator', desc: 'Auto-generate cue points via TrackBrowser_CuePointGenerator', disabled: false },
-            { key: 'tags', label: 'Tag Lookup', desc: 'Look up genre/energy tags via TrackBrowser_TagLookup', disabled: false },
-            { key: 'cloud', label: 'Cloud Backup Upload', desc: 'Upload to Lexicon Cloud via CloudFileBackup_UploadSelected', disabled: false },
-            { key: 'artwork', label: 'Album Art', desc: 'Not yet available via API — must be done manually in Lexicon UI', disabled: true },
-          ] as { key: string; label: string; desc: string; disabled: boolean }[]).map(action => {
+            { key: 'analyze', label: 'Analyze (BPM / Key)', disabled: false },
+            { key: 'cues', label: 'Cue Point Generator', disabled: false },
+            { key: 'tags', label: 'Tag Lookup', disabled: false },
+            { key: 'cloud', label: 'Cloud Backup Upload', disabled: false },
+          ] as { key: string; label: string; disabled: boolean }[]).map(action => {
             const current = (settings.lexicon_post_processing || 'analyze,cues,tags,cloud').split(',').map(s => s.trim())
             const isEnabled = !action.disabled && current.includes(action.key)
             const toggle = () => {
@@ -701,10 +549,7 @@ export default function SettingsPage() {
             }
             return (
               <div key={action.key} className="flex items-center justify-between">
-                <div>
-                  <p className={`text-sm ${action.disabled ? 'text-slate-600' : 'text-slate-300'}`}>{action.label}</p>
-                  <p className="text-xs text-slate-600">{action.desc}</p>
-                </div>
+                <span className={`text-sm ${action.disabled ? 'text-slate-600' : 'text-slate-300'}`}>{action.label}</span>
                 <button
                   type="button"
                   disabled={action.disabled}
@@ -727,81 +572,104 @@ export default function SettingsPage() {
             <p className="text-sm text-slate-300">Backup Before Sync</p>
             <p className="text-xs text-slate-600">Create a Lexicon backup before each sync run</p>
           </div>
-          <select
-            className="select-field"
-            value={settings.lexicon_backup_before_sync || '1'}
-            onChange={(e) => updateSetting('lexicon_backup_before_sync', e.target.value)}
+          <button
+            type="button"
+            onClick={() => updateSetting('lexicon_backup_before_sync', settings.lexicon_backup_before_sync === '0' ? '1' : '0')}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              settings.lexicon_backup_before_sync === '0' ? 'bg-slate-700' : 'bg-emerald-500'
+            }`}
           >
-            <option value="1">Enabled</option>
-            <option value="0">Disabled</option>
-          </select>
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+              settings.lexicon_backup_before_sync === '0' ? 'translate-x-1' : 'translate-x-6'
+            }`} />
+          </button>
+        </div>
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-800">
+          <div>
+            <p className="text-sm text-slate-300">Auto-Analyze After Sync</p>
+            <p className="text-xs text-slate-600">Run BPM/key detection after each track is organized</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => updateSetting('auto_analyze_enabled', settings.auto_analyze_enabled === '0' ? '1' : '0')}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              settings.auto_analyze_enabled === '0' ? 'bg-slate-700' : 'bg-emerald-500'
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+              settings.auto_analyze_enabled === '0' ? 'translate-x-1' : 'translate-x-6'
+            }`} />
+          </button>
         </div>
       </div>
 
       {/* ================================================================ */}
-      {/* AUTO-ANALYSIS (BPM / KEY DETECTION)                               */}
+      {/* DATABASE & BACKUP                                                 */}
       {/* ================================================================ */}
 
       <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-2">Auto-Analysis (BPM / Key Detection)</h2>
-        <p className="text-xs text-slate-500 mb-4">
-          Automatically detect BPM and musical key for synced tracks using aubio,
-          then write metadata directly to Lexicon via PATCH API.
-          Runs inline after each sync and periodically for any missed tracks.
-        </p>
-
-        {/* Stats row */}
-        {analyzeStats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center mb-4">
-            <div>
-              <p className="text-2xl font-bold text-emerald-400">{analyzeStats.total_processed}</p>
-              <p className="text-xs text-slate-500">Total Analyzed</p>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-slate-300">Database &amp; Backup</h2>
+          <button className="btn-secondary text-sm" onClick={handleCreateBackup}>Create Backup</button>
+        </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-500">Database Status</span>
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${health?.database === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
+              <span className="text-xs text-slate-400">{health?.database === 'ok' ? 'OK' : health?.database || 'Unknown'}</span>
             </div>
-            <div>
-              <p className="text-2xl font-bold text-blue-400">{analyzeStats.events_last_24h}</p>
-              <p className="text-xs text-slate-500">Last 24h Events</p>
+          </div>
+          {backups.length > 0 && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-500">Last Backup</span>
+              <span className="text-xs text-slate-400">{backups[0]?.created_at || 'N/A'}</span>
             </div>
-            <div>
-              <p className="text-lg font-bold text-slate-300">{Math.round(analyzeStats.interval_seconds / 60)}m</p>
-              <p className="text-xs text-slate-500">Scan Interval</p>
+          )}
+        </div>
+        {Array.isArray(backups) && backups.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-slate-800">
+            <p className="text-xs text-slate-500 mb-2">Recent Backups</p>
+            <div className="space-y-2">
+              {visibleBackups.map((backup: any, i: number) => (
+                <div key={backup.id || i} className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400 font-mono truncate max-w-[70%]">
+                    {backup.backup_path || backup.filename}
+                  </span>
+                  <span className="text-xs text-slate-600">{backup.created_at}</span>
+                </div>
+              ))}
             </div>
-            <div>
-              <p className="text-lg font-bold text-slate-300">{analyzeStats.batch_size}</p>
-              <p className="text-xs text-slate-500">Batch Size</p>
-            </div>
+            {backups.length > 3 && (
+              <button
+                className="text-xs text-blue-400 hover:text-blue-300 mt-2"
+                onClick={() => setShowAllBackups(!showAllBackups)}
+              >
+                {showAllBackups ? 'Show fewer' : `View all ${backups.length} backups`}
+              </button>
+            )}
           </div>
         )}
+      </div>
 
-        <div className="space-y-4">
-          <div className="grid md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs text-slate-500 mb-1">Scan Interval (minutes)</label>
-              <input
-                type="number"
-                min="5"
-                className="input-field w-full"
-                value={String(Math.round(Number(settings.analyze_interval_seconds || '3600') / 60))}
-                onChange={(e) => updateSetting('analyze_interval_seconds', String(Number(e.target.value) * 60))}
-              />
-              <p className="text-xs text-slate-600 mt-1">
-                How often to scan Lexicon for unanalyzed tracks.
-              </p>
-            </div>
-            <div>
-              <label className="block text-xs text-slate-500 mb-1">Batch Size</label>
-              <input
-                type="number"
-                min="1"
-                max="100"
-                className="input-field w-full"
-                value={settings.analyze_batch_size || '20'}
-                onChange={(e) => updateSetting('analyze_batch_size', e.target.value)}
-              />
-              <p className="text-xs text-slate-600 mt-1">
-                Max tracks to analyze per scan cycle.
-              </p>
-            </div>
-          </div>
+      {/* ================================================================ */}
+      {/* NOTIFICATIONS                                                     */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Notifications</h2>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Webhook URL</label>
+          <input
+            type="url"
+            className="input-field w-full"
+            placeholder="https://example.com/webhook"
+            value={settings.webhook_url || ''}
+            onChange={(e) => updateSetting('webhook_url', e.target.value)}
+          />
+          <p className="text-xs text-slate-600 mt-1">
+            Receives POST with track sync events. Leave empty to disable.
+          </p>
         </div>
       </div>
 
@@ -816,123 +684,44 @@ export default function SettingsPage() {
       </div>
 
       {/* ================================================================ */}
-      {/* NOTIFICATIONS                                                     */}
+      {/* EXPORT & VERSION                                                  */}
       {/* ================================================================ */}
 
       <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Webhook Notifications</h2>
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Webhook URL (leave empty to disable)</label>
-          <input
-            type="url"
-            className="input-field w-full"
-            placeholder="https://example.com/webhook"
-            value={settings.webhook_url || ''}
-            onChange={(e) => updateSetting('webhook_url', e.target.value)}
-          />
-          <p className="text-xs text-slate-600 mt-1">
-            Receives POST with track sync events and parity milestones.
-          </p>
-        </div>
-      </div>
-
-      {/* ================================================================ */}
-      {/* PARITY STATS                                                      */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Parity Stats</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-          <div>
-            <p className="text-2xl font-bold text-slate-200">{settings.parity_total_tracks || '0'}</p>
-            <p className="text-xs text-slate-500">Total Tracks</p>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <a
+              href="/api/admin/export?format=csv"
+              download="sync-report.csv"
+              className="btn-secondary text-sm inline-block"
+            >
+              Export CSV
+            </a>
+            <a
+              href="/api/admin/export?format=json"
+              download="sync-report.json"
+              className="btn-secondary text-sm inline-block"
+            >
+              Export JSON
+            </a>
+            {dashboard?.total_tracks && (
+              <span className="text-xs text-slate-500">{dashboard.total_tracks} tracks</span>
+            )}
           </div>
-          <div>
-            <p className="text-2xl font-bold text-emerald-400">{settings.parity_synced || '0'}</p>
-            <p className="text-xs text-slate-500">Synced</p>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-500 font-mono">
+              {version?.version || '?'}{version?.git_sha ? ` (${version.git_sha})` : ''}
+            </span>
+            <button
+              className="btn-secondary text-sm"
+              onClick={() => apiFetch('/admin/update', { method: 'POST' }).then(() => {
+                setSuccess('Update requested')
+                setTimeout(() => setSuccess(null), 3000)
+              }).catch(() => setError('Update request failed'))}
+            >
+              Check for Updates
+            </button>
           </div>
-          <div>
-            <p className="text-2xl font-bold text-amber-400">{settings.parity_in_progress || '0'}</p>
-            <p className="text-xs text-slate-500">In Progress</p>
-          </div>
-          <div>
-            <p className="text-2xl font-bold text-red-400">{settings.parity_errors || '0'}</p>
-            <p className="text-xs text-slate-500">Errors</p>
-          </div>
-        </div>
-      </div>
-
-      {/* ================================================================ */}
-      {/* LEXICON BACKUPS                                                    */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-slate-300">Lexicon Backups</h2>
-          <button className="btn-secondary text-sm" onClick={handleCreateBackup}>Create Backup</button>
-        </div>
-        {Array.isArray(backups) && backups.length > 0 ? (
-          <div className="divide-y divide-slate-800">
-            {backups.map((backup: any, i: number) => (
-              <div key={backup.id || i} className="flex items-center justify-between py-3">
-                <div>
-                  <p className="text-sm text-slate-300">{backup.backup_path || backup.filename}</p>
-                  <p className="text-xs text-slate-500">{backup.created_at}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-slate-500 text-center py-6">No backups yet</p>
-        )}
-      </div>
-
-      {/* ================================================================ */}
-      {/* EXPORT                                                            */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Export Sync Report</h2>
-        <div className="flex items-center gap-3">
-          <a
-            href="/api/admin/export?format=csv"
-            download="sync-report.csv"
-            className="btn-secondary text-sm inline-block"
-          >
-            Export CSV
-          </a>
-          <a
-            href="/api/admin/export?format=json"
-            download="sync-report.json"
-            className="btn-secondary text-sm inline-block"
-          >
-            Export JSON
-          </a>
-          <span className="text-xs text-slate-500 ml-auto">
-            {dashboard?.total_tracks ? `${dashboard.total_tracks} tracks` : ''}
-          </span>
-        </div>
-      </div>
-
-      {/* ================================================================ */}
-      {/* VERSION                                                           */}
-      {/* ================================================================ */}
-
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Version</h2>
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-slate-400">
-            <span className="font-mono text-xs">{version?.version || '?'}{version?.git_sha ? ` (${version.git_sha})` : ''}</span>
-          </div>
-          <button
-            className="btn-secondary text-sm"
-            onClick={() => apiFetch('/admin/update', { method: 'POST' }).then(() => {
-              setSuccess('Update requested')
-              setTimeout(() => setSuccess(null), 3000)
-            }).catch(() => setError('Update request failed'))}
-          >
-            Request Update
-          </button>
         </div>
       </div>
     </div>

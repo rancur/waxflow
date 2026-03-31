@@ -4,4 +4,3 @@ aiofiles>=24.1.0
 aiosqlite>=0.20.0
 pyacoustid>=1.3.0
 mutagen>=1.47.0
-aubio>=0.4.9

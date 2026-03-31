@@ -61,6 +61,7 @@ interface DownloadStats {
   downloading: number
   complete: number
   failed: number
+  skipped: number
   avg_download_time_seconds: number | null
   estimated_remaining_seconds: number | null
   method: string
@@ -236,10 +237,10 @@ export default function DownloadsPage() {
     setPage(1)
   }
 
-  // Compute progress percentage
+  // Compute progress percentage (complete + skipped = done)
   const progressPct = stats
     ? stats.total > 0
-      ? Math.round((stats.complete / stats.total) * 100)
+      ? Math.round(((stats.complete + stats.skipped) / stats.total) * 100)
       : 0
     : 0
 
@@ -327,7 +328,8 @@ export default function DownloadsPage() {
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs text-slate-400 font-medium">Overall Progress</span>
               <span className="text-xs text-slate-400 tabular-nums">
-                {stats.complete.toLocaleString()} / {stats.total.toLocaleString()} ({progressPct}%)
+                {(stats.complete + stats.skipped).toLocaleString()} / {stats.total.toLocaleString()} ({progressPct}%)
+                {stats.skipped > 0 && <span className="text-slate-500"> ({stats.skipped.toLocaleString()} skipped)</span>}
               </span>
             </div>
             <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">

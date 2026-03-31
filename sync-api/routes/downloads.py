@@ -228,12 +228,14 @@ async def retry_download(track_id: int):
 async def download_stats():
     try:
         with get_db() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM download_queue").fetchone()[0]
-            pending = conn.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'pending'").fetchone()[0]
-            queued = conn.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'queued'").fetchone()[0]
-            downloading = conn.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'downloading'").fetchone()[0]
-            complete = conn.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'complete'").fetchone()[0]
-            failed = conn.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'failed'").fetchone()[0]
+            # Use tracks table as source of truth (download_queue has stale legacy entries)
+            total = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+            pending = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'pending'").fetchone()[0]
+            queued = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'queued'").fetchone()[0]
+            downloading = conn.execute("SELECT COUNT(*) FROM tracks WHERE pipeline_stage = 'downloading'").fetchone()[0]
+            complete = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'complete'").fetchone()[0]
+            failed = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'failed'").fetchone()[0]
+            skipped = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'skipped'").fetchone()[0]
 
             avg_row = conn.execute(
                 """SELECT AVG(
@@ -283,6 +285,7 @@ async def download_stats():
             downloading=downloading,
             complete=complete,
             failed=failed,
+            skipped=skipped,
             avg_download_time_seconds=avg_time,
             estimated_remaining_seconds=estimated_remaining,
             method=method,

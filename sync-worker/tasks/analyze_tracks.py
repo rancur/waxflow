@@ -69,37 +69,75 @@ _OPENKEY_MAP = {
 
 
 def _detect_bpm_aubio(file_path: str) -> float | None:
-    """Detect BPM using aubio CLI tool."""
+    """Detect BPM using aubio CLI tool (aubio-tools package)."""
     try:
-        result = subprocess.run(
-            ["aubio", "tempo", "-i", file_path],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            log.warning("aubio tempo failed: %s", result.stderr.strip())
-            return None
+        # First try: convert to WAV via ffmpeg (aubio CLI handles WAV best)
+        # Use a temp file to avoid issues with FLAC/other formats
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+            tmp_path = tmp.name
 
-        # aubio outputs lines of beat timestamps, last line is BPM
-        # or use aubio tempo which outputs bpm at the end
-        # Actually aubio tempo outputs beat positions; we need to parse differently
-        # Let's try aubio tempo -i file which prints beats, and the summary
-        lines = result.stdout.strip().split("\n")
-        # The output format varies; try to find BPM in stderr or use beat count
-        # Better approach: use aubio with specific flags
+        # Decode to 16-bit mono WAV for aubio
+        dec = subprocess.run(
+            ["ffmpeg", "-y", "-i", file_path, "-ac", "1", "-ar", "44100",
+             "-sample_fmt", "s16", "-t", "180", tmp_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        if dec.returncode != 0:
+            log.debug("ffmpeg decode failed for aubio: %s", dec.stderr[:200])
+            # Try aubio directly on the file
+            tmp_path = file_path
+
+        try:
+            result = subprocess.run(
+                ["aubio", "tempo", tmp_path],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                log.debug("aubio tempo failed: %s", result.stderr.strip()[:200])
+                return None
+
+            # aubio tempo outputs beat timestamps, one per line.
+            # The BPM can be inferred from beat intervals, or we can
+            # look at stderr which sometimes contains the BPM summary.
+            # With newer aubio, use "aubio tempo -i file" which prints BPM.
+            lines = result.stdout.strip().split("\n")
+            beats = []
+            for line in lines:
+                line = line.strip()
+                if line:
+                    try:
+                        beats.append(float(line))
+                    except ValueError:
+                        # Could be "bpm: 128.0" style output
+                        m = re.search(r"(\d+\.?\d*)", line)
+                        if m:
+                            val = float(m.group(1))
+                            if 20 < val < 300:
+                                return round(val, 1)
+
+            # Calculate BPM from beat timestamps
+            if len(beats) >= 4:
+                intervals = [beats[i + 1] - beats[i] for i in range(len(beats) - 1)]
+                # Filter outliers (> 2x or < 0.5x median)
+                intervals.sort()
+                median = intervals[len(intervals) // 2]
+                filtered = [iv for iv in intervals if 0.5 * median <= iv <= 2.0 * median]
+                if filtered:
+                    avg_interval = sum(filtered) / len(filtered)
+                    if avg_interval > 0:
+                        bpm = 60.0 / avg_interval
+                        if 20 < bpm < 300:
+                            return round(bpm, 1)
+        finally:
+            if tmp_path != file_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
         return None
     except FileNotFoundError:
         return None
     except Exception as e:
         log.warning("aubio BPM detection failed for %s: %s", file_path, e)
         return None
-
-
-def _detect_bpm_sox(file_path: str) -> float | None:
-    """Detect BPM using sox stat + simple beat analysis.
-    Fallback method using ffprobe to get duration and sox for onset detection.
-    """
-    # This is a very rough fallback; aubio is preferred
-    return None
 
 
 def _detect_bpm_ffprobe(file_path: str) -> float | None:
@@ -168,67 +206,59 @@ def _detect_key_ffprobe(file_path: str) -> str | None:
         return None
 
 
-def _detect_bpm_aubio_precise(file_path: str) -> float | None:
-    """Detect BPM using aubio Python bindings (more reliable than CLI)."""
+def _detect_bpm_mutagen(file_path: str) -> float | None:
+    """Read BPM from file metadata using mutagen (handles FLAC, MP3, etc.)."""
     try:
-        import aubio as aubio_lib
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(file_path)
+        if audio is None:
+            return None
 
-        win_s = 1024
-        hop_s = 512
-        samplerate = 0  # auto
+        # Check various tag formats
+        tag_keys = ["bpm", "BPM", "TBPM", "tempo", "TEMPO"]
+        for key in tag_keys:
+            val = audio.get(key)
+            if val:
+                try:
+                    bpm = float(str(val[0]) if isinstance(val, list) else str(val))
+                    if 20 < bpm < 300:
+                        return round(bpm, 1)
+                except (ValueError, TypeError, IndexError):
+                    pass
 
-        src = aubio_lib.source(file_path, samplerate, hop_s)
-        actual_sr = src.samplerate
-        tempo = aubio_lib.tempo("default", win_s, hop_s, actual_sr)
-
-        beats = []
-        total_frames = 0
-        while True:
-            samples, read = src()
-            is_beat = tempo(samples)
-            if is_beat:
-                beats.append(tempo.get_last_s())
-            total_frames += read
-            if read < hop_s:
-                break
-
-        bpm = tempo.get_bpm()
-        if bpm and 20 < bpm < 300:
-            return round(bpm, 1)
-
-        # Fallback: calculate from beat intervals
-        if len(beats) > 2:
-            intervals = [beats[i + 1] - beats[i] for i in range(len(beats) - 1)]
-            avg_interval = sum(intervals) / len(intervals)
-            if avg_interval > 0:
-                calculated_bpm = 60.0 / avg_interval
-                if 20 < calculated_bpm < 300:
-                    return round(calculated_bpm, 1)
+        # For FLAC / Vorbis comments
+        if hasattr(audio, "tags") and audio.tags:
+            for key in tag_keys:
+                vals = audio.tags.get(key) or audio.tags.get(key.upper()) or []
+                if isinstance(vals, list):
+                    for v in vals:
+                        try:
+                            bpm = float(str(v))
+                            if 20 < bpm < 300:
+                                return round(bpm, 1)
+                        except (ValueError, TypeError):
+                            pass
 
         return None
-    except ImportError:
-        log.debug("aubio Python package not available, falling back to CLI")
-        return None
-    except Exception as e:
-        log.warning("aubio Python BPM detection failed for %s: %s", file_path, e)
+    except Exception:
         return None
 
 
 def detect_bpm(file_path: str) -> float | None:
     """Detect BPM using best available method."""
-    # 1. Try reading from existing metadata first (instant)
+    # 1. Try reading from existing metadata via mutagen (instant, handles FLAC/MP3/etc)
+    bpm = _detect_bpm_mutagen(file_path)
+    if bpm:
+        log.debug("BPM from mutagen: %.1f for %s", bpm, file_path)
+        return bpm
+
+    # 2. Try reading from metadata via ffprobe
     bpm = _detect_bpm_ffprobe(file_path)
     if bpm:
-        log.debug("BPM from metadata: %.1f for %s", bpm, file_path)
+        log.debug("BPM from ffprobe: %.1f for %s", bpm, file_path)
         return bpm
 
-    # 2. Try aubio Python bindings (most accurate)
-    bpm = _detect_bpm_aubio_precise(file_path)
-    if bpm:
-        log.debug("BPM from aubio: %.1f for %s", bpm, file_path)
-        return bpm
-
-    # 3. Try aubio CLI
+    # 3. Try aubio CLI (actual audio analysis)
     bpm = _detect_bpm_aubio(file_path)
     if bpm:
         log.debug("BPM from aubio CLI: %.1f for %s", bpm, file_path)
@@ -237,15 +267,51 @@ def detect_bpm(file_path: str) -> float | None:
     return None
 
 
+def _detect_key_mutagen(file_path: str) -> str | None:
+    """Read musical key from file metadata using mutagen."""
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(file_path)
+        if audio is None:
+            return None
+
+        tag_keys = ["initialkey", "INITIALKEY", "key", "KEY", "initial_key"]
+        for key in tag_keys:
+            val = audio.get(key)
+            if val:
+                s = str(val[0]) if isinstance(val, list) else str(val)
+                if s.strip() and len(s.strip()) < 10:
+                    return s.strip()
+
+        if hasattr(audio, "tags") and audio.tags:
+            for key in tag_keys:
+                vals = audio.tags.get(key) or audio.tags.get(key.upper()) or []
+                if isinstance(vals, list):
+                    for v in vals:
+                        s = str(v).strip()
+                        if s and len(s) < 10:
+                            return s
+
+        return None
+    except Exception:
+        return None
+
+
 def detect_key(file_path: str) -> str | None:
     """Detect musical key using best available method."""
-    # 1. Try reading from existing metadata first
-    key = _detect_key_ffprobe(file_path)
+    # 1. Try mutagen (handles FLAC/MP3/etc natively)
+    key = _detect_key_mutagen(file_path)
     if key:
-        log.debug("Key from metadata: %s for %s", key, file_path)
+        log.debug("Key from mutagen: %s for %s", key, file_path)
         return key
 
-    # 2. Try keyfinder-cli
+    # 2. Try ffprobe metadata
+    key = _detect_key_ffprobe(file_path)
+    if key:
+        log.debug("Key from ffprobe: %s for %s", key, file_path)
+        return key
+
+    # 3. Try keyfinder-cli (actual audio analysis)
     key = _detect_key_keyfinder(file_path)
     if key:
         log.debug("Key from keyfinder: %s for %s", key, file_path)
