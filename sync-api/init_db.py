@@ -132,7 +132,9 @@ def init():
             ('activity_log_retention_days', '365'),
             ('synology_sync_delay_seconds', '3'),
             ('auto_analyze_enabled', '1'),
-            ('sync_mode', 'scan');
+            ('lexicon_post_processing', 'analyze,cues,tags,cloud'),
+            ('sync_mode', 'scan'),
+            ('webhook_url', '');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed

@@ -102,6 +102,41 @@ async def trigger_update():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/admin/export")
+async def export_sync_report(format: str = "json"):
+    """Export full sync report as CSV or JSON."""
+    with get_db() as conn:
+        tracks = conn.execute("""
+            SELECT spotify_id, title, artist, album, spotify_added_at,
+                   pipeline_stage, match_status, download_status, verify_status,
+                   lexicon_status, verify_codec, verify_sample_rate, verify_bit_depth,
+                   file_path, pipeline_error
+            FROM tracks ORDER BY spotify_added_at DESC
+        """).fetchall()
+
+        if format == "csv":
+            import csv
+            import io
+
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow([
+                "spotify_id", "title", "artist", "album", "added",
+                "pipeline", "match", "download", "verify", "lexicon",
+                "codec", "sample_rate", "bit_depth", "file_path", "error",
+            ])
+            for t in tracks:
+                writer.writerow(list(t))
+            from fastapi.responses import Response
+            return Response(
+                content=output.getvalue(),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=sync-report.csv"},
+            )
+        else:
+            return {"tracks": [dict(t) for t in tracks], "total": len(tracks)}
+
+
 @router.get("/admin/version", response_model=VersionResponse)
 async def get_version():
     # Read version from VERSION file (baked into image at build time)

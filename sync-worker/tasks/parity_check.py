@@ -3,7 +3,9 @@
 import asyncio
 import logging
 
-from tasks.helpers import get_db, get_spotify_client, log_activity, set_config
+import httpx
+
+from tasks.helpers import get_config, get_db, get_spotify_client, log_activity, set_config
 
 log = logging.getLogger("worker.parity")
 
@@ -70,6 +72,42 @@ def _check(db_path: str):
                 "spotify_total": spotify_total,
             },
         )
+
+    # Milestone detection
+    prev_pct_str = get_config(db_path, "parity_last_milestone_pct")
+    prev_pct = float(prev_pct_str) if prev_pct_str else 0.0
+    milestones = [90, 95, 99, 100]
+    for milestone in milestones:
+        if parity_pct >= milestone and prev_pct < milestone:
+            msg = f"Parity milestone reached: {milestone}% ({synced}/{total} synced)"
+            log.info(msg)
+            log_activity(
+                db_path, "parity_milestone", None, msg,
+                {"milestone": milestone, "synced": synced, "total": total, "parity_pct": parity_pct},
+            )
+            set_config(db_path, "parity_last_milestone_pct", f"{parity_pct:.1f}")
+            _notify_parity_milestone(db_path, milestone, synced, total, parity_pct)
+            break  # only fire highest new milestone per check
+
+
+def _notify_parity_milestone(db_path: str, milestone: int, synced: int, total: int, parity_pct: float):
+    """Send webhook notification when a parity milestone is crossed."""
+    webhook_url = get_config(db_path, "webhook_url")
+    if not webhook_url:
+        return
+
+    try:
+        payload = {
+            "event": "parity_milestone",
+            "milestone": milestone,
+            "synced": synced,
+            "total": total,
+            "parity_pct": round(parity_pct, 1),
+        }
+        with httpx.Client(timeout=5) as client:
+            client.post(webhook_url, json=payload)
+    except Exception:
+        pass  # Don't fail parity check on notification error
 
 
 async def parity_check(db_path: str):

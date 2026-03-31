@@ -847,6 +847,34 @@ def _download_track_via_tiddl(db_path: str, track: dict) -> str:
         shutil.rmtree(download_dir, ignore_errors=True)
 
 
+def _ensure_tidal_auth():
+    """Check tidal auth token and refresh if expiring soon."""
+    auth_paths = ["/app/data/tiddl-auth.json", "/tiddl-auth/auth.json"]
+    for path in auth_paths:
+        try:
+            with open(path) as f:
+                auth = json.load(f)
+            expires_at = auth.get("expires_at", 0)
+            if expires_at < time.time() + 1800:  # 30 min buffer
+                log.info("Tidal token expiring soon (expires_at=%s), triggering refresh via tiddl", expires_at)
+                result = subprocess.run(
+                    ["tiddl", "auth", "refresh"],
+                    capture_output=True, timeout=30,
+                    env={**os.environ, "TIDDL_PATH": os.environ.get("TIDDL_PATH", "/tiddl-config")},
+                )
+                if result.returncode == 0:
+                    log.info("Tidal token refresh succeeded")
+                else:
+                    log.warning("Tidal token refresh failed: %s", result.stderr.decode(errors="replace"))
+            return True
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            log.warning("Failed to check tidal auth at %s: %s", path, e)
+            continue
+    return False
+
+
 def _process_downloading(db_path: str):
     sync_mode = get_config(db_path, "sync_mode") or "scan"
     if sync_mode == "scan":
@@ -854,6 +882,7 @@ def _process_downloading(db_path: str):
 
     # When tiddl is available, skip Tidarr health/queue checks entirely
     if _TIDDL_AVAILABLE:
+        _ensure_tidal_auth()
         _cleanup_stale_downloads(db_path, None)
         tracks = get_tracks_by_stage(db_path, "downloading", limit=BATCH_DOWNLOAD)
         tracks = [t for t in tracks if t.get("download_status") in ("pending", "failed")]
@@ -1672,9 +1701,9 @@ def _organize_track(db_path: str, track: dict):
         pipeline_stage="complete",
     )
 
-    # Auto-trigger Lexicon analysis (BPM/key detection + genre tagging)
+    # Auto-trigger Lexicon post-processing (analysis, cues, tags, artwork, cloud)
     if lexicon_track_id and get_config(db_path, "auto_analyze_enabled") != "0":
-        _trigger_lexicon_analysis(db_path, lexicon_track_id, track_id)
+        _trigger_lexicon_post_processing(db_path, lexicon_track_id, track_id)
 
     if playlist_row:
         with get_db(db_path) as conn:
@@ -1687,43 +1716,88 @@ def _organize_track(db_path: str, track: dict):
         f"Synced to Lexicon: {track.get('artist')} - {track.get('title')} -> {playlist_name}",
         {"lexicon_track_id": lexicon_track_id, "playlist": playlist_name},
     )
+
+    _notify_sync_complete(db_path, track, playlist_name)
     log.info("Track %d synced to Lexicon -> %s", track_id, playlist_name)
 
 
-def _trigger_lexicon_analysis(db_path: str, lexicon_track_id: str, track_id: int):
-    """Trigger Lexicon's BPM/key analysis and genre tagging for a synced track.
+def _notify_sync_complete(db_path: str, track: dict, playlist_name: str):
+    """Send webhook notification when a track is synced to Lexicon."""
+    webhook_url = get_config(db_path, "webhook_url")
+    if not webhook_url:
+        return
 
-    Non-fatal: logs errors but never fails the pipeline.
+    try:
+        payload = {
+            "event": "track_synced",
+            "track": {
+                "title": track.get("title"),
+                "artist": track.get("artist"),
+                "album": track.get("album"),
+                "playlist": playlist_name,
+            },
+        }
+        with httpx.Client(timeout=5) as client:
+            client.post(webhook_url, json=payload)
+    except Exception:
+        pass  # Don't fail pipeline on notification error
+
+
+def _trigger_lexicon_post_processing(db_path: str, lexicon_track_id: str, track_id: int):
+    """Trigger Lexicon post-processing for a newly synced track.
+
+    Uses the /v1/control endpoint to fire UI-level actions in Lexicon.
+    These control actions operate on the currently selected tracks in the
+    Lexicon UI -- there is no API to target specific track IDs.  When
+    Lexicon is open and the track browser is visible, the most-recently-
+    imported track is typically still selected, so firing these immediately
+    after import has a reasonable chance of hitting the right track.
+
+    Supported actions (each individually toggleable via config):
+      - analyze:  BPM/key detection   (TrackBrowser_Analyze)
+      - cues:     cue-point generator  (TrackBrowser_CuePointGenerator)
+      - tags:     genre/tag lookup     (TrackBrowser_TagLookup)
+      - cloud:    cloud backup upload  (CloudFileBackup_UploadSelected)
+
+    Album-art lookup has no API or control-action equivalent; it must be
+    done manually inside the Lexicon UI.
+
+    Non-fatal: logs warnings but never fails the pipeline.
     """
-    track_ids_payload = [int(lexicon_track_id)]
+    actions_csv = get_config(db_path, "lexicon_post_processing") or "analyze,cues,tags,cloud"
+    enabled_actions = {a.strip() for a in actions_csv.split(",") if a.strip()}
+
+    # Map our config keys -> Lexicon /v1/control action names
+    ACTION_MAP = {
+        "analyze": "TrackBrowser_Analyze",
+        "cues":    "TrackBrowser_CuePointGenerator",
+        "tags":    "TrackBrowser_TagLookup",
+        "cloud":   "CloudFileBackup_UploadSelected",
+    }
+
+    triggered = []
 
     with httpx.Client(base_url=LEXICON_API_URL, timeout=60) as client:
-        # 1. BPM / key analysis
-        try:
-            resp = client.post("/v1/analyze", json={"trackIds": track_ids_payload})
-            if resp.status_code in (200, 201, 202, 204):
-                log.info("Track %d: Lexicon analysis triggered (lexicon_id=%s)", track_id, lexicon_track_id)
-            else:
-                log.warning("Track %d: Lexicon /v1/analyze returned HTTP %d: %s",
-                            track_id, resp.status_code, resp.text[:200])
-        except Exception as e:
-            log.warning("Track %d: Lexicon /v1/analyze failed: %s", track_id, e)
+        for key, control_action in ACTION_MAP.items():
+            if key not in enabled_actions:
+                continue
+            try:
+                resp = client.post("/v1/control", json={"action": control_action})
+                if resp.status_code in (200, 201, 202, 204):
+                    log.info("Track %d: Lexicon %s triggered (lexicon_id=%s)",
+                             track_id, key, lexicon_track_id)
+                    triggered.append(key)
+                else:
+                    log.warning("Track %d: Lexicon /v1/control %s returned HTTP %d: %s",
+                                track_id, control_action, resp.status_code, resp.text[:200])
+            except Exception as e:
+                log.warning("Track %d: Lexicon %s post-processing failed: %s", track_id, key, e)
 
-        # 2. Tag / genre finder
-        try:
-            resp = client.post("/v1/find-tags", json={"trackIds": track_ids_payload})
-            if resp.status_code in (200, 201, 202, 204):
-                log.info("Track %d: Lexicon find-tags triggered (lexicon_id=%s)", track_id, lexicon_track_id)
-            else:
-                log.warning("Track %d: Lexicon /v1/find-tags returned HTTP %d: %s",
-                            track_id, resp.status_code, resp.text[:200])
-        except Exception as e:
-            log.warning("Track %d: Lexicon /v1/find-tags failed: %s", track_id, e)
-
-    log_activity(
-        db_path, "lexicon_analysis_triggered", track_id,
-        f"Triggered Lexicon analysis for lexicon_track_id={lexicon_track_id}",
-    )
+    if triggered:
+        log_activity(
+            db_path, "lexicon_post_processing", track_id,
+            f"Triggered Lexicon post-processing [{', '.join(triggered)}] for lexicon_track_id={lexicon_track_id}",
+        )
 
 
 def _ensure_playlist(db_path: str, year: int, month: int, folder_name: str, playlist_name: str) -> dict:

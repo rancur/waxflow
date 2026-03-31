@@ -79,7 +79,20 @@ LEXICON_OK=$(curl -s --connect-timeout 5 "$LEXICON_URL/v1/playlists" 2>/dev/null
 TIDARR_OK=$(curl -s --connect-timeout 5 "$TIDARR_URL/api/queue/status" 2>/dev/null | python3 -c "import json,sys; json.loads(sys.stdin.read()); print('ok')" 2>/dev/null || echo "error")
 WORKER_STATUS=$(ssh -o ConnectTimeout=3 nas "/usr/local/bin/docker ps --filter name=sync-worker --format '{{.Status}}'" 2>/dev/null || echo "unknown")
 
-log "SERVICES: lexicon=$LEXICON_OK tidarr=$TIDARR_OK worker=$WORKER_STATUS"
+# ===== CHECK: Worker health endpoint =====
+WORKER_HEALTH=$(curl -s --connect-timeout 5 http://192.168.1.221:8403/health 2>/dev/null)
+WORKER_HEALTH_STATUS=$(echo "$WORKER_HEALTH" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('status','unknown'))" 2>/dev/null || echo "unreachable")
+
+log "SERVICES: lexicon=$LEXICON_OK tidarr=$TIDARR_OK worker=$WORKER_STATUS worker_health=$WORKER_HEALTH_STATUS"
+
+# ===== FIX: Worker stalled or unreachable =====
+if [ "$WORKER_HEALTH_STATUS" = "stalled" ] || [ "$WORKER_HEALTH_STATUS" = "unreachable" ]; then
+    if check_cooldown "restart_worker_health"; then
+        log "ACTION: Worker stalled/unreachable (health=$WORKER_HEALTH_STATUS), restarting"
+        ssh -o ConnectTimeout=5 nas "cd /volume1/homes/willcurran/spotify-lexicon-sync && /usr/local/bin/docker compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+        set_cooldown "restart_worker_health"
+    fi
+fi
 
 # ===== FIX: Worker container down =====
 if echo "$WORKER_STATUS" | grep -qiE "exited|dead|created" || [ "$WORKER_STATUS" = "unknown" ]; then

@@ -233,7 +233,7 @@ export default function SettingsPage() {
               <p className="text-sm text-slate-300">
                 Go to{' '}
                 <a
-                  href={tidalAuth.verification_uri}
+                  href={tidalAuth.verification_uri?.startsWith('http') ? tidalAuth.verification_uri : `https://${tidalAuth.verification_uri}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-blue-400 underline hover:text-blue-300"
@@ -448,6 +448,73 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* Lexicon Post-Processing */}
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-2">Lexicon Post-Processing</h2>
+        <p className="text-xs text-slate-500 mb-4">
+          Actions triggered automatically after a track is synced to Lexicon.
+          These use Lexicon&apos;s control API and operate on the UI-selected tracks &mdash;
+          they work best when Lexicon is open.
+        </p>
+        <div className="space-y-3">
+          {([
+            { key: 'analyze', label: 'Analyze (BPM / Key)', desc: 'Detect BPM, key, and waveform via TrackBrowser_Analyze', disabled: false },
+            { key: 'cues', label: 'Cue Point Generator', desc: 'Auto-generate cue points via TrackBrowser_CuePointGenerator', disabled: false },
+            { key: 'tags', label: 'Tag Lookup', desc: 'Look up genre/energy tags via TrackBrowser_TagLookup', disabled: false },
+            { key: 'cloud', label: 'Cloud Backup Upload', desc: 'Upload to Lexicon Cloud via CloudFileBackup_UploadSelected', disabled: false },
+            { key: 'artwork', label: 'Album Art', desc: 'Not yet available via API — must be done manually in Lexicon UI', disabled: true },
+          ] as { key: string; label: string; desc: string; disabled: boolean }[]).map(action => {
+            const current = (settings.lexicon_post_processing || 'analyze,cues,tags,cloud').split(',').map(s => s.trim())
+            const isEnabled = !action.disabled && current.includes(action.key)
+            const toggle = () => {
+              if (action.disabled) return
+              const next = isEnabled
+                ? current.filter(a => a !== action.key)
+                : [...current, action.key]
+              updateSetting('lexicon_post_processing', next.filter(Boolean).join(','))
+            }
+            return (
+              <div key={action.key} className="flex items-center justify-between">
+                <div>
+                  <p className={`text-sm ${action.disabled ? 'text-slate-600' : 'text-slate-300'}`}>{action.label}</p>
+                  <p className="text-xs text-slate-600">{action.desc}</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={action.disabled}
+                  onClick={toggle}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    action.disabled ? 'bg-slate-800 cursor-not-allowed opacity-40'
+                    : isEnabled ? 'bg-emerald-500' : 'bg-slate-700'
+                  }`}
+                >
+                  <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                    isEnabled ? 'translate-x-6' : 'translate-x-1'
+                  }`} />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-800">
+          <div>
+            <p className="text-sm text-slate-300">Enable Post-Processing</p>
+            <p className="text-xs text-slate-600">Master toggle &mdash; disabling turns off all actions above</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => updateSetting('auto_analyze_enabled', settings.auto_analyze_enabled === '0' ? '1' : '0')}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              settings.auto_analyze_enabled === '0' ? 'bg-slate-700' : 'bg-emerald-500'
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+              settings.auto_analyze_enabled === '0' ? 'translate-x-1' : 'translate-x-6'
+            }`} />
+          </button>
+        </div>
+      </div>
+
       {/* Parity Stats */}
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Parity Stats</h2>
@@ -509,6 +576,48 @@ export default function SettingsPage() {
           >
             Request Update
           </button>
+        </div>
+      </div>
+
+      {/* Webhook */}
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Webhook Notifications</h2>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Webhook URL (leave empty to disable)</label>
+          <input
+            type="url"
+            className="input-field w-full"
+            placeholder="https://example.com/webhook"
+            value={settings.webhook_url || ''}
+            onChange={(e) => updateSetting('webhook_url', e.target.value)}
+          />
+          <p className="text-xs text-slate-600 mt-1">
+            Receives POST with track sync events and parity milestones.
+          </p>
+        </div>
+      </div>
+
+      {/* Export */}
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Export Sync Report</h2>
+        <div className="flex items-center gap-3">
+          <a
+            href="/api/admin/export?format=csv"
+            download="sync-report.csv"
+            className="btn-secondary text-sm inline-block"
+          >
+            Export CSV
+          </a>
+          <a
+            href="/api/admin/export?format=json"
+            download="sync-report.json"
+            className="btn-secondary text-sm inline-block"
+          >
+            Export JSON
+          </a>
+          <span className="text-xs text-slate-500 ml-auto">
+            {dashboard?.total_tracks ? `${dashboard.total_tracks} tracks` : ''}
+          </span>
         </div>
       </div>
     </div>
