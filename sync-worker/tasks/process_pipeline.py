@@ -1591,8 +1591,16 @@ def _organize_track(db_path: str, track: dict):
         # The file is already in the music library (/music/ = NAS /volume1/music/Database/)
         # The NAS 'music' share is mounted on the Lexicon Mac at /Volumes/music/
         # This gives Lexicon direct access to NAS files without SynologyDrive sync delay
-        relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
-        mac_path = f"/Volumes/music/Database/{relative_path}"
+        # Map container paths to the NAS SMB share mounted on the Lexicon Mac:
+        #   /music/...      -> /Volumes/music/Database/...   (NAS /volume1/music/Database)
+        #   /downloads/...  -> /Volumes/music/Input/...      (NAS /volume1/music/Input)
+        downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
+        if file_path.startswith(downloads_dir):
+            relative_path = os.path.relpath(file_path, downloads_dir)
+            mac_path = f"/Volumes/music/Input/{relative_path}"
+        else:
+            relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
+            mac_path = f"/Volumes/music/Database/{relative_path}"
 
         # Search Lexicon for the track by file path
         lexicon_track_id = _lexicon_find_or_import(client, mac_path, track)
