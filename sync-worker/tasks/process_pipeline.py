@@ -30,6 +30,18 @@ from tasks.helpers import (
 
 log = logging.getLogger("worker.pipeline")
 
+# Lossless audio extensions — used to break the lossy retry loop (bug #25)
+_LOSSLESS_EXTENSIONS = {'.flac', '.aiff', '.aif', '.wav', '.alac'}
+
+
+def _is_likely_lossless(file_path: str) -> bool:
+    """Check if a file extension suggests lossless audio."""
+    if not file_path:
+        return False
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in _LOSSLESS_EXTENSIONS
+
+
 BATCH_SIZE = 10  # legacy default
 
 # Per-stage batch sizes
@@ -180,7 +192,7 @@ def _process_new(db_path: str):
         try:
             # Check ISRC index first (fastest, most reliable)
             isrc_match = _check_existing_by_isrc(db_path, track)
-            if isrc_match:
+            if isrc_match and _is_likely_lossless(isrc_match.get("file_path", "")):
                 log.info(
                     "Track %d (%s - %s) found via %s in file index: %s",
                     track["id"], track["artist"], track["title"],
@@ -202,10 +214,15 @@ def _process_new(db_path: str):
                     {"file_path": isrc_match["file_path"], "match_type": isrc_match["match_type"]},
                 )
                 continue
+            elif isrc_match:
+                log.info(
+                    "Track %d (%s - %s): found lossy file via ISRC (%s), skipping to Tidal for lossless",
+                    track["id"], track["artist"], track["title"], isrc_match["file_path"],
+                )
 
             # Check if track already exists in Lexicon's database
             lexicon_existing = _check_existing_in_lexicon(track)
-            if lexicon_existing:
+            if lexicon_existing and _is_likely_lossless(lexicon_existing.get("file_path", "")):
                 log.info(
                     "Track %d (%s - %s) already in Lexicon (track_id=%s): %s",
                     track["id"], track["artist"], track["title"],
@@ -227,10 +244,15 @@ def _process_new(db_path: str):
                     {"lexicon_track_id": lexicon_existing["lexicon_track_id"], "file_path": lexicon_existing["file_path"]},
                 )
                 continue
+            elif lexicon_existing:
+                log.info(
+                    "Track %d (%s - %s): found lossy file in Lexicon (%s), skipping to Tidal for lossless",
+                    track["id"], track["artist"], track["title"], lexicon_existing["file_path"],
+                )
 
             # Check if track already exists in the music library on disk
             existing = _check_existing_in_library(track, db_path)
-            if existing:
+            if existing and _is_likely_lossless(existing.get("file_path", "")):
                 log.info("Track %d (%s - %s) already exists: %s", track["id"], track["artist"], track["title"], existing["file_path"])
                 update_track(
                     db_path, track["id"],
@@ -248,6 +270,11 @@ def _process_new(db_path: str):
                     {"file_path": existing["file_path"]},
                 )
                 continue
+            elif existing:
+                log.info(
+                    "Track %d (%s - %s): found lossy file in library (%s), skipping to Tidal for lossless",
+                    track["id"], track["artist"], track["title"], existing["file_path"],
+                )
 
             update_track(db_path, track["id"], pipeline_stage="matching")
             log.info("Track %d (%s - %s) -> matching", track["id"], track["artist"], track["title"])
@@ -575,12 +602,29 @@ def _match_track(db_path: str, track: dict):
 
     # Strategy 2: Search by artist + title with smarter matching
     if not matched:
-        query = f"{artist} {title}".strip()
-        if query:
+        # Try multiple query formats to improve match rate for multi-artist tracks
+        spotify_artists_set = _normalize_artists(artist)
+        first_artist = next(iter(spotify_artists_set), artist.strip()) if spotify_artists_set else artist.strip()
+        base_title = re.sub(r"\s*[\(\[]\s*(?:feat|ft)\.?\s+[^\)\]]+[\)\]]", "", title, flags=re.IGNORECASE).strip()
+
+        queries_to_try = []
+        full_query = f"{artist} {title}".strip()
+        if full_query:
+            queries_to_try.append(full_query)
+        first_artist_query = f"{first_artist} {title}".strip()
+        if first_artist_query and first_artist_query.lower() != full_query.lower():
+            queries_to_try.append(first_artist_query)
+        if base_title and base_title.lower() != title.lower():
+            base_query = f"{first_artist} {base_title}".strip()
+            if base_query.lower() not in [q.lower() for q in queries_to_try]:
+                queries_to_try.append(base_query)
+
+        for query in queries_to_try:
+            if matched:
+                break
             try:
                 results = _tidal_search(query)
                 spotify_norm = _normalize_title(title)
-                spotify_artists = [a.strip().lower() for a in artist.split(",")]
 
                 best_candidate = None
                 best_confidence = 0.0
@@ -591,17 +635,16 @@ def _match_track(db_path: str, track: dict):
                     item_title_lower = item_title.lower()
 
                     # Build full artist string from Tidal response
-                    item_artist = ""
+                    tidal_artist_name = ""
                     if item.get("artist", {}).get("name"):
-                        item_artist = item["artist"]["name"].lower()
+                        tidal_artist_name = item["artist"]["name"]
                     elif item.get("artists"):
-                        item_artist = " ".join(
+                        tidal_artist_name = " ".join(
                             a.get("name", "") for a in item["artists"]
-                        ).lower()
+                        )
 
-                    # Check if ANY Spotify artist appears in the Tidal artist name
-                    artist_match = any(sa in item_artist for sa in spotify_artists)
-                    if not artist_match:
+                    # Use _artists_match for proper &/+/and/vs splitting
+                    if not _artists_match(artist, tidal_artist_name):
                         continue
 
                     item_duration = (item.get("duration") or 0) * 1000
@@ -982,13 +1025,27 @@ def _process_downloading(db_path: str):
             attempts = (track.get("download_attempts") or 0) + 1
             log.error("Download error for track %d (attempt %d): %s", track["id"], attempts, e)
             fail_limit = 5
+
+            # Bug #28: After max attempts with a valid tidal_id, the track is likely
+            # geo-restricted or removed from Tidal — mark with a specific permanent error
+            # so it doesn't keep retrying.
+            is_tiddl_error = "tiddl" in err.lower() or "tidal_id" in err.lower() or "RuntimeError" in type(e).__name__
+            has_tidal_id = bool(track.get("tidal_id"))
+
+            if attempts >= fail_limit and has_tidal_id and is_tiddl_error:
+                pipeline_error = "Track unavailable on Tidal (may be geo-restricted)"
+            elif attempts >= fail_limit:
+                pipeline_error = f"Download failed after {attempts} attempts: {e}"
+            else:
+                pipeline_error = None
+
             update_track(
                 db_path, track["id"],
                 download_status="failed" if attempts >= fail_limit else "pending",
                 download_attempts=attempts,
                 download_error=err,
                 pipeline_stage="error" if attempts >= fail_limit else "downloading",
-                pipeline_error=f"Download failed after {attempts} attempts: {e}" if attempts >= fail_limit else None,
+                pipeline_error=pipeline_error,
             )
             log_activity(db_path, "download_error", track["id"], f"Download attempt {attempts} failed: {e}")
 
@@ -1561,8 +1618,16 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         reasons.append(f"not lossless: codec={codec}, sr={sample_rate}")
 
     if fp_match_score is not None and fp_match_score < min_fp_score:
-        verify_pass = False
-        reasons.append(f"fingerprint score low: {fp_match_score:.2f}")
+        if fp_match_score < 0.70:
+            # Below 0.70: definite mismatch — fail
+            verify_pass = False
+            is_mismatched = True
+            reasons.append(f"fingerprint score too low: {fp_match_score:.2f} (mismatched)")
+        else:
+            # Between min_fp_score (0.70) and 0.85: auto-pass but flag as low confidence
+            log.warning("Track %d: low confidence fingerprint match (score=%.2f), auto-approving",
+                        track_id, fp_match_score)
+            reasons.append(f"low confidence fingerprint match: {fp_match_score:.2f} (auto-approved)")
 
     # Stricter duration-based mismatch detection (only for untrusted search matches)
     if not trusted_match:
