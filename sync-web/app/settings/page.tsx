@@ -303,21 +303,21 @@ export default function SettingsPage() {
             </span>
           </div>
 
-          {/* Tidarr */}
+          {/* Tidal Downloader (optional) */}
           {(() => {
-            const tidarr = dashboard?.services?.find((s: any) => s.name === 'tidarr')
-            const tidarrUrl = settings.tidarr_url || 'http://192.168.1.221:8484'
+            const tidal = dashboard?.services?.find((s: any) => s.name === 'tidal')
+            const tidalUrl = settings.tidarr_url || 'http://192.168.1.221:8484'
             return (
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className={`w-2.5 h-2.5 rounded-full ${tidarr?.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                  <span className="text-sm text-slate-300">Tidarr</span>
-                  <span className="text-xs text-slate-600 font-mono">{tidarrUrl}</span>
+                  <div className={`w-2.5 h-2.5 rounded-full ${tidal?.status === 'ok' ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+                  <span className="text-sm text-slate-300">Tidal Downloader</span>
+                  <span className="text-xs text-slate-600 font-mono">{tidalUrl}</span>
                 </div>
                 <span className="text-xs text-slate-500">
-                  {tidarr?.status === 'ok'
-                    ? `Connected (${tidarr.latency_ms}ms)`
-                    : tidarr?.error || 'Unknown'}
+                  {tidal?.status === 'ok'
+                    ? `Connected (${tidal.latency_ms}ms)`
+                    : 'Optional'}
                 </span>
               </div>
             )

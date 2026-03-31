@@ -10,7 +10,7 @@ from models import DashboardResponse, ServiceHealth
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
 LEXICON_API = os.environ.get("LEXICON_API_URL", "http://192.168.1.116:48624")
-TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")
+TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")  # optional legacy fallback
 
 
 @router.get("/dashboard", response_model=DashboardResponse)
@@ -94,20 +94,20 @@ async def get_dashboard():
         except Exception as e:
             services.append(ServiceHealth(name="lexicon", status="error", error=str(e)))
 
-        # Tidarr
+        # Tidal Downloader (optional legacy Tidarr check)
         try:
             t0 = time.monotonic()
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{TIDARR_API}")
             latency = round((time.monotonic() - t0) * 1000, 1)
             services.append(ServiceHealth(
-                name="tidarr",
+                name="tidal",
                 status="ok" if resp.status_code < 500 else "error",
                 latency_ms=latency,
                 error=None if resp.status_code < 500 else f"HTTP {resp.status_code}",
             ))
         except Exception as e:
-            services.append(ServiceHealth(name="tidarr", status="error", error=str(e)))
+            services.append(ServiceHealth(name="tidal", status="error", error=str(e)))
 
         return DashboardResponse(
             spotify_total=spotify_total,

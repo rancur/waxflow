@@ -264,7 +264,7 @@ async def download_stats():
                     pass
                 break
 
-        # Check Tidarr reachability (quick timeout)
+        # Check Tidarr reachability (optional legacy fallback, quick timeout)
         tidarr_url = os.environ.get("TIDARR_URL", "http://tidarr:8484")
         tidarr_reachable = False
         try:
@@ -273,7 +273,7 @@ async def download_stats():
         except Exception:
             pass
 
-        # Determine active method
+        # Determine active method — tiddl is primary, Tidarr is legacy fallback
         method = "tiddl" if (tiddl_available and tidal_authed) else ("tidarr" if tidarr_reachable else "none")
 
         return DownloadStatsResponse(

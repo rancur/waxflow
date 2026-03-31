@@ -7,7 +7,7 @@ set -euo pipefail
 
 API_URL="http://192.168.1.221:8402"
 LEXICON_URL="http://192.168.1.116:48624"
-TIDARR_URL="http://192.168.1.221:8484"
+TIDARR_URL="http://192.168.1.221:8484"  # optional: legacy Tidarr service check
 LOG_FILE="${HOME}/.openclaw/logs/sls-monitor.log"
 STATE_FILE="${HOME}/.openclaw/logs/sls-monitor-state.json"
 COOLDOWN_FILE="${HOME}/.openclaw/logs/sls-monitor-cooldown.json"
@@ -76,14 +76,15 @@ log "CHECK: parity=$SYNCED/$TOTAL ($PCT%) errors=$ERRORS downloading=$DOWNLOADIN
 
 # ===== CHECK SERVICES =====
 LEXICON_OK=$(curl -s --connect-timeout 5 "$LEXICON_URL/v1/playlists" 2>/dev/null | python3 -c "import json,sys; print('ok' if 'data' in json.loads(sys.stdin.read()) else 'error')" 2>/dev/null || echo "error")
-TIDARR_OK=$(curl -s --connect-timeout 5 "$TIDARR_URL/api/queue/status" 2>/dev/null | python3 -c "import json,sys; json.loads(sys.stdin.read()); print('ok')" 2>/dev/null || echo "error")
+# Tidarr check is optional — downloads now use tiddl CLI directly
+TIDARR_OK=$(curl -s --connect-timeout 5 "$TIDARR_URL/api/queue/status" 2>/dev/null | python3 -c "import json,sys; json.loads(sys.stdin.read()); print('ok')" 2>/dev/null || echo "unavailable")
 WORKER_STATUS=$(ssh -o ConnectTimeout=3 nas "/usr/local/bin/docker ps --filter name=sync-worker --format '{{.Status}}'" 2>/dev/null || echo "unknown")
 
 # ===== CHECK: Worker health endpoint =====
 WORKER_HEALTH=$(curl -s --connect-timeout 5 http://192.168.1.221:8403/health 2>/dev/null)
 WORKER_HEALTH_STATUS=$(echo "$WORKER_HEALTH" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('status','unknown'))" 2>/dev/null || echo "unreachable")
 
-log "SERVICES: lexicon=$LEXICON_OK tidarr=$TIDARR_OK worker=$WORKER_STATUS worker_health=$WORKER_HEALTH_STATUS"
+log "SERVICES: lexicon=$LEXICON_OK tidal_legacy=$TIDARR_OK worker=$WORKER_STATUS worker_health=$WORKER_HEALTH_STATUS"
 
 # ===== FIX: Worker stalled or unreachable =====
 if [ "$WORKER_HEALTH_STATUS" = "stalled" ] || [ "$WORKER_HEALTH_STATUS" = "unreachable" ]; then
@@ -103,7 +104,7 @@ if echo "$WORKER_STATUS" | grep -qiE "exited|dead|created" || [ "$WORKER_STATUS"
     fi
 fi
 
-# ===== FIX: Tidarr auth expired =====
+# ===== CHECK: Tidal auth status (reads from legacy Tidarr config path) =====
 TIDARR_AUTH=$(ssh -o ConnectTimeout=3 nas "/usr/local/bin/docker exec tidarr cat /shared/.tiddl/auth.json 2>/dev/null" 2>/dev/null | python3 -c "
 import json,sys,time
 try:
@@ -116,7 +117,7 @@ except: print('unknown')
 " 2>/dev/null || echo "unknown")
 
 if [ "$TIDARR_AUTH" = "expired" ] || [ "$TIDARR_AUTH" = "expiring_soon" ]; then
-    log "WARNING: Tidarr auth $TIDARR_AUTH"
+    log "WARNING: Tidal auth $TIDARR_AUTH"
 fi
 
 # ===== FIX: Download-failed tracks stuck in error =====
@@ -172,10 +173,10 @@ else:
 conn.close()
 \"" >> "$LOG_FILE" 2>&1 || true
 
-# ===== FIX: Tidarr /music symlink lost after restart =====
+# ===== CHECK: Tidarr /music symlink (legacy — only relevant if Tidarr still running) =====
 SYMLINK_OK=$(ssh -o ConnectTimeout=3 nas "/usr/local/bin/docker exec tidarr ls /music/tracks 2>/dev/null && echo ok || echo missing" 2>/dev/null || echo "unknown")
 if [ "$SYMLINK_OK" = "missing" ] && check_cooldown "fix_tidarr_mount"; then
-    log "ACTION: Tidarr /music mount check"
+    log "INFO: Tidarr /music mount missing (legacy check, non-critical)"
     set_cooldown "fix_tidarr_mount"
 fi
 
@@ -200,7 +201,7 @@ state = {
     'total': $TOTAL, 'synced': $SYNCED, 'pct': $PCT,
     'errors': $ERRORS, 'downloading': $DOWNLOADING, 'new': $NEW,
     'organizing': $ORGANIZING, 'complete': $COMPLETE,
-    'services': {'lexicon': '$LEXICON_OK', 'tidarr': '$TIDARR_OK', 'tidarr_auth': '$TIDARR_AUTH'},
+    'services': {'lexicon': '$LEXICON_OK', 'tidal_legacy': '$TIDARR_OK', 'tidal_auth': '$TIDARR_AUTH'},
 }
 with open('$STATE_FILE', 'w') as f:
     json.dump(state, f, indent=2)

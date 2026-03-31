@@ -20,7 +20,7 @@ services:
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://192.168.1.221:8402/api/spotify/callback}
-      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}
+      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}  # optional: only for legacy Tidarr fallback
       - LEXICON_API_URL=${LEXICON_API_URL:-http://192.168.1.116:48624}
       - MUSIC_LIBRARY_PATH=/music
       - SLS_DB_PATH=/app/data/sync.db
@@ -45,12 +45,12 @@ services:
       - sync-data:/app/data
       - /volume1/music/Database:/music
       - /volume1/music/Input:/downloads
-      - /volume1/PlexMediaServer/tidarr/config/.tiddl/auth.json:/tiddl-auth/auth.json:ro
+      - /volume1/PlexMediaServer/tidarr/config/.tiddl/auth.json:/tiddl-auth/auth.json:ro  # Tidal auth (legacy path from Tidarr config)
     environment:
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://192.168.1.221:8402/api/spotify/callback}
-      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}
+      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}  # optional: only for legacy Tidarr fallback
       - LEXICON_API_URL=${LEXICON_API_URL:-http://192.168.1.116:48624}
       - MUSIC_LIBRARY_PATH=/music
       - SLS_DB_PATH=/app/data/sync.db

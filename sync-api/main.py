@@ -15,7 +15,7 @@ from routes.tidal import router as tidal_router
 app = FastAPI(
     title="Spotify-Lexicon Sync API",
     description="Music library sync: Spotify Liked Songs to Lexicon DJ",
-    version="1.0.0",
+    version="1.3.0",
 )
 
 app.add_middleware(

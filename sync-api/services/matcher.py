@@ -4,11 +4,15 @@ import httpx
 
 from db import get_db
 
-TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")
+TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")  # optional legacy fallback
 
 
 class MatcherService:
-    """Matches Spotify tracks to Tidal equivalents for lossless download."""
+    """Matches Spotify tracks to Tidal equivalents for lossless download.
+
+    NOTE: This legacy matcher uses the Tidarr API for search.
+    Primary matching now uses Tidal API directly in the sync-worker.
+    """
 
     def __init__(self):
         self.tidarr_url = TIDARR_API
@@ -50,7 +54,7 @@ class MatcherService:
         }
 
     async def _match_by_isrc(self, isrc: str) -> dict | None:
-        """Search Tidarr/Tidal by ISRC."""
+        """Search Tidal by ISRC (via legacy Tidarr API)."""
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(
@@ -98,7 +102,7 @@ class MatcherService:
                         conn.execute(
                             """INSERT INTO fallback_attempts
                                (track_id, source, status, search_query, result_count)
-                               VALUES (?, 'tidarr_metadata', 'no_match', ?, ?)""",
+                               VALUES (?, 'tidal_metadata', 'no_match', ?, ?)""",
                             (track.get("id", 0), query, len(tracks)),
                         )
         except Exception:

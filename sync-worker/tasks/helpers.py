@@ -13,7 +13,7 @@ from spotipy.oauth2 import SpotifyOAuth
 
 log = logging.getLogger("worker.helpers")
 
-TIDARR_URL = os.environ.get("TIDARR_URL", "http://tidarr:8484")
+TIDARR_URL = os.environ.get("TIDARR_URL", "http://tidarr:8484")  # optional legacy fallback
 LEXICON_API_URL = os.environ.get("LEXICON_API_URL", "http://192.168.1.116:48624")
 MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/music")
 

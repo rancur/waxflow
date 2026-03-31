@@ -108,7 +108,7 @@ function formatDate(iso: string | null): string {
 function sourceLabel(source: string): string {
   const labels: Record<string, string> = {
     tiddl: 'Tidal (FLAC)',
-    tidarr: 'Tidarr (fallback)',
+    tidarr: 'Tidal (legacy fallback)',
     beatport: 'Beatport',
     bandcamp: 'Bandcamp',
   }
@@ -257,7 +257,7 @@ export default function DownloadsPage() {
           <p className="text-sm text-slate-500 mt-1">
             {totalItems.toLocaleString()} items total
             {stats?.avg_download_time_seconds ? ` \u00b7 avg ${stats.avg_download_time_seconds}s per track` : ''}
-            {stats ? ` \u00b7 via ${stats.method === 'tiddl' ? 'tiddl (direct)' : stats.method === 'tidarr' ? 'Tidarr (fallback)' : 'no downloader'}` : ''}
+            {stats ? ` \u00b7 via ${stats.method === 'tiddl' ? 'tiddl (direct)' : stats.method === 'tidarr' ? 'Tidal (legacy fallback)' : 'no downloader'}` : ''}
           </p>
         </div>
         {tidalStatus && (

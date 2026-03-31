@@ -5,12 +5,12 @@ from datetime import datetime, timezone
 
 from db import get_db
 
-TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")
+TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")  # optional legacy fallback
 MUSIC_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/music")
 
 
 class DownloaderService:
-    """Manages track downloads via Tidarr and fallback sources."""
+    """Manages track downloads via tiddl CLI (primary) with optional Tidarr fallback."""
 
     def __init__(self):
         self.tidarr_url = TIDARR_API
@@ -18,7 +18,9 @@ class DownloaderService:
 
     async def download_track(self, track: dict, tidal_id: str) -> dict:
         """
-        Queue a download via Tidarr. Returns status dict.
+        Queue a download via Tidal. Returns status dict.
+        NOTE: This legacy code path uses the Tidarr API as fallback.
+        Primary downloads now go through tiddl CLI in the sync-worker.
         """
         track_id = track["id"]
         now = datetime.now(timezone.utc).isoformat()
@@ -51,7 +53,7 @@ class DownloaderService:
                 (track_id,),
             )
 
-        # Submit to Tidarr
+        # Submit to Tidarr (legacy fallback — primary path uses tiddl CLI in worker)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
@@ -74,13 +76,13 @@ class DownloaderService:
                         conn.execute(
                             "INSERT INTO activity_log (event_type, track_id, message, details) VALUES (?, ?, ?, ?)",
                             ("download_queued", track_id,
-                             f"Download queued via Tidarr for tidal_id {tidal_id}",
+                             f"Download queued via Tidal for tidal_id {tidal_id}",
                              json.dumps(data)),
                         )
 
-                    return {"status": "queued", "track_id": track_id, "tidarr_response": data}
+                    return {"status": "queued", "track_id": track_id, "tidal_response": data}
                 else:
-                    error = f"Tidarr returned HTTP {resp.status_code}: {resp.text}"
+                    error = f"Tidal download returned HTTP {resp.status_code}: {resp.text}"
                     await self._mark_failed(track_id, error)
                     return {"status": "failed", "track_id": track_id, "error": error}
 
@@ -96,7 +98,7 @@ class DownloaderService:
         title = track.get("title", "Unknown")
         album = track.get("album", "Unknown")
 
-        # Check common Tidarr output paths
+        # Check common download output paths
         possible_paths = [
             os.path.join(self.music_path, artist, album, f"{title}.flac"),
             os.path.join(self.music_path, artist, f"{title}.flac"),

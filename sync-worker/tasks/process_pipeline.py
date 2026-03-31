@@ -9,9 +9,6 @@ import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
-from pathlib import Path
-
-import fnmatch
 import re
 import unicodedata
 from difflib import SequenceMatcher
@@ -785,8 +782,13 @@ def _download_track_via_tiddl(db_path: str, track: dict) -> str:
     try:
         env = {**os.environ, "TIDDL_PATH": _tiddl_config_dir}
 
+        # Read download quality from app_config (default: max -> tiddl "master")
+        _quality_map = {"low": "low", "normal": "normal", "high": "high", "max": "master", "master": "master"}
+        _cfg_quality = get_config(db_path, "tidal_download_quality") or "max"
+        _tiddl_quality = _quality_map.get(_cfg_quality.lower(), "master")
+
         result = subprocess.run(
-            ["tiddl", "--no-cache", "url", f"track/{tidal_id}", "download", "--path", download_dir, "-q", "master"],
+            ["tiddl", "--no-cache", "url", f"track/{tidal_id}", "download", "--path", download_dir, "-q", _tiddl_quality],
             capture_output=True, text=True, timeout=120, env=env,
         )
 
@@ -829,9 +831,9 @@ def _download_track_via_tiddl(db_path: str, track: dict) -> str:
 
         shutil.move(downloaded, dest)
 
-        # Fix ownership so SynologyDrive syncs the file (must match PlexMediaServer UID/GID)
-        _PLEX_UID = 297536
-        _PLEX_GID = 297536
+        # Fix ownership to match PlexMediaServer UID/GID on NAS (configurable via Settings)
+        _PLEX_UID = int(get_config(db_path, "plex_uid") or "297536")
+        _PLEX_GID = int(get_config(db_path, "plex_gid") or "297536")
         try:
             os.chown(dest_dir, _PLEX_UID, _PLEX_GID)
             os.chown(dest, _PLEX_UID, _PLEX_GID)
@@ -1615,24 +1617,26 @@ def _organize_track(db_path: str, track: dict):
 
     # Lexicon API operations (uses /v1/ endpoints)
     global _playlist_cache, _playlist_cache_time
-    with httpx.Client(base_url=LEXICON_API_URL, timeout=60) as client:
-        # 1. Find or import the track in Lexicon
-        # The file is already in the music library (/music/ = NAS /volume1/music/Database/)
-        # The NAS 'music' share is mounted on the Lexicon Mac at /Volumes/music/
-        # This gives Lexicon direct access to NAS files without SynologyDrive sync delay
-        # Map container paths to the NAS SMB share mounted on the Lexicon Mac:
-        #   /music/...      -> /Volumes/music/Database/...   (NAS /volume1/music/Database)
-        #   /downloads/...  -> /Volumes/music/Input/...      (NAS /volume1/music/Input)
-        downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
+
+    # Read configurable paths from app_config (fall back to env/defaults)
+    lexicon_library_path = get_config(db_path, "lexicon_library_path") or "/Volumes/music/Database"
+    lexicon_input_path = get_config(db_path, "lexicon_input_path") or "/Volumes/music/Input"
+    lexicon_api = get_config(db_path, "lexicon_api_url") or LEXICON_API_URL
+    downloads_dir = get_config(db_path, "downloads_path") or os.environ.get("DOWNLOADS_PATH", "/downloads")
+
+    with httpx.Client(base_url=lexicon_api, timeout=60) as client:
+        # Map container paths to the path prefix Lexicon sees on the host Mac:
+        #   /music/...      -> <lexicon_library_path>/...   (e.g. /Volumes/music/Database)
+        #   /downloads/...  -> <lexicon_input_path>/...     (e.g. /Volumes/music/Input)
         if file_path.startswith(downloads_dir):
             relative_path = os.path.relpath(file_path, downloads_dir)
-            mac_path = f"/Volumes/music/Input/{relative_path}"
+            mac_path = f"{lexicon_input_path}/{relative_path}"
         else:
             relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
-            mac_path = f"/Volumes/music/Database/{relative_path}"
+            mac_path = f"{lexicon_library_path}/{relative_path}"
 
         # Search Lexicon for the track by file path
-        lexicon_track_id = _lexicon_find_or_import(client, mac_path, track)
+        lexicon_track_id = _lexicon_find_or_import(client, mac_path, track, db_path=db_path)
 
         if not lexicon_track_id:
             artist_name = track.get("artist", "unknown")
@@ -1816,12 +1820,24 @@ def _ensure_playlist(db_path: str, year: int, month: int, folder_name: str, play
 # Lexicon API helpers (using /v1/ endpoints)
 # ---------------------------------------------------------------------------
 
-def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) -> str | None:
+def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db_path: str | None = None) -> str | None:
     """Find a track in Lexicon by artist+title, or import it via file path."""
     spotify_title = (track.get("title") or "").lower().strip()
     spotify_artist = (track.get("artist") or "").lower().split(",")[0].strip()
     artist_raw = track.get("artist", "")
     title_raw = track.get("title", "")
+
+    # Build path prefixes to check (configurable + current library path)
+    lexicon_library_path = "/Volumes/music/Database/"
+    legacy_prefixes_str = ""
+    if db_path:
+        lexicon_library_path = (get_config(db_path, "lexicon_library_path") or "/Volumes/music/Database").rstrip("/") + "/"
+        legacy_prefixes_str = get_config(db_path, "lexicon_legacy_path_prefixes") or ""
+    path_prefixes = [lexicon_library_path]
+    for p in legacy_prefixes_str.split(","):
+        p = p.strip()
+        if p and p not in path_prefixes:
+            path_prefixes.append(p if p.endswith("/") else p + "/")
 
     # Search by artist + title
     try:
@@ -1833,13 +1849,12 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
             data = resp.json()
             results = data.get("data", {}).get("tracks", [])
             for t in results:
-                # Path match (check both new /Volumes/music/ and legacy /Volumes/Macintosh HD/Users/willcurran/Music/ paths)
+                # Path match (check current and legacy path prefixes)
                 lex_loc = t.get("location", "")
                 if lex_loc == mac_path:
                     return str(t["id"])
                 # Extract relative path from both and compare
-                for prefix in ("/Volumes/music/Database/", "/Volumes/Macintosh HD/Users/willcurran/Music/Database/",
-                               "/Users/willcurran/Music/Database/"):
+                for prefix in path_prefixes:
                     if lex_loc.startswith(prefix) and mac_path.endswith(lex_loc[len(prefix):]):
                         return str(t["id"])
                 # Fuzzy title match: Spotify "Hot One" matches Lexicon "Hot One (Original Mix)"

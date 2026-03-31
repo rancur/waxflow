@@ -5,7 +5,7 @@ Self-hosted tool that syncs Spotify Liked Songs to Lexicon DJ with lossless FLAC
 ## What it does
 
 1. Monitors your Spotify Liked Songs
-2. Downloads lossless FLAC via Tidarr (Tidal)
+2. Downloads lossless FLAC from Tidal via tiddl CLI
 3. Verifies files are genuinely lossless (spectral analysis + fingerprinting)
 4. Organizes into Lexicon DJ playlists by month/year
 5. Tracks parity between Spotify and Lexicon libraries
@@ -20,9 +20,12 @@ Self-hosted tool that syncs Spotify Liked Songs to Lexicon DJ with lossless FLAC
 
 ```bash
 cp .env.example .env
-# Edit .env with your Spotify credentials
+# Edit .env with your Spotify credentials (no Tidarr dependency needed)
 docker compose up -d
 ```
+
+Downloads use tiddl CLI directly — no external downloader service required.
+Connect your Tidal account from the Settings page after first launch.
 
 Then visit `http://your-nas-ip:8400` and connect your Spotify account.
 

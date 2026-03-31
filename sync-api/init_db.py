@@ -134,7 +134,17 @@ def init():
             ('auto_analyze_enabled', '1'),
             ('lexicon_post_processing', 'analyze,cues,tags,cloud'),
             ('sync_mode', 'scan'),
-            ('webhook_url', '');
+            ('webhook_url', ''),
+            ('lexicon_library_path', '/Volumes/music/Database'),
+            ('lexicon_input_path', '/Volumes/music/Input'),
+            ('tidal_download_quality', 'max'),
+            ('downloads_path', '/downloads'),
+            ('lexicon_api_url', ''),
+            ('tidarr_url', ''),
+            ('plex_uid', '297536'),
+            ('plex_gid', '297536'),
+            ('retry_search_interval_seconds', '43200'),
+            ('lexicon_legacy_path_prefixes', '/Volumes/Macintosh HD/Users/willcurran/Music/Database/,/Users/willcurran/Music/Database/');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed

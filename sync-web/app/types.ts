@@ -69,7 +69,7 @@ export interface ActivityEvent {
 
 export interface ServiceHealth {
   spotify: ServiceStatus
-  tidarr: ServiceStatus
+  tidal: ServiceStatus
   lexicon: ServiceStatus
 }
 

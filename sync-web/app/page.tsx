@@ -293,7 +293,7 @@ export default function DashboardPage() {
         <div className="card">
           <h2 className="text-sm font-semibold text-slate-300 mb-4">Service Health</h2>
           <div className="space-y-4">
-            {(['spotify', 'tidarr', 'lexicon'] as const).map((name) => {
+            {(['spotify', 'tidal', 'lexicon'] as const).map((name) => {
               const svc = getService(name)
               const spotifyOk = name === 'spotify' ? data !== null : undefined
               const isOk = svc ? svc.status === 'ok' : spotifyOk

@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api", tags=["tidal"])
 _TIDAL_CLIENT_ID = "zU4XHVVkc2tDPo4t"  # tiddl's client ID
 
 _AUTH_PATHS = [
-    "/tiddl-auth/auth.json",       # mounted from Tidarr
+    "/tiddl-auth/auth.json",       # mounted Tidal auth (legacy path from Tidarr config dir)
     "/app/data/tiddl-auth.json",   # our own auth file from web UI flow
 ]
 
