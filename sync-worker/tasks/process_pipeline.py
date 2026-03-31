@@ -1611,9 +1611,11 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
 
 def _process_organizing(db_path: str):
     tracks = get_tracks_by_stage(db_path, "organizing", limit=BATCH_ORGANIZE)
+    synced_count = 0
     for track in tracks:
         try:
             _organize_track(db_path, track)
+            synced_count += 1
         except Exception as e:
             log.error("Organize error for track %d: %s", track["id"], e, exc_info=True)
             update_track(
@@ -1623,6 +1625,10 @@ def _process_organizing(db_path: str):
                 pipeline_error=f"Lexicon sync error: {e}",
             )
             log_activity(db_path, "organize_error", track["id"], f"Lexicon sync failed: {e}")
+
+    # Batch post-processing: fire control actions once for the whole batch
+    if synced_count > 0:
+        _trigger_lexicon_post_processing_batch(db_path, synced_count)
 
 
 def _organize_track(db_path: str, track: dict):
@@ -1747,9 +1753,20 @@ def _organize_track(db_path: str, track: dict):
         pipeline_stage="complete",
     )
 
-    # Auto-trigger Lexicon post-processing (analysis, cues, tags, artwork, cloud)
-    if lexicon_track_id and get_config(db_path, "auto_analyze_enabled") != "0":
-        _trigger_lexicon_post_processing(db_path, lexicon_track_id, track_id)
+    # Add to "Recently Added (Sync)" playlist so user can easily select new tracks
+    _add_to_recent_sync_playlist(db_path, lexicon_track_id, track_id)
+
+    # Inline BPM/key analysis: detect from the audio file and PATCH to Lexicon
+    if lexicon_track_id and file_path and os.path.exists(file_path):
+        if get_config(db_path, "auto_analyze_enabled") != "0":
+            try:
+                from tasks.analyze_tracks import analyze_single_track
+                analysis = analyze_single_track(db_path, file_path, lexicon_track_id, track_id)
+                if analysis["patched"]:
+                    log.info("Track %d inline analysis: BPM=%.1f key=%s",
+                             track_id, analysis["bpm"] or 0, analysis["key"] or "?")
+            except Exception as e:
+                log.warning("Track %d inline analysis failed (non-fatal): %s", track_id, e)
 
     if playlist_row:
         with get_db(db_path) as conn:
@@ -1789,27 +1806,77 @@ def _notify_sync_complete(db_path: str, track: dict, playlist_name: str):
         pass  # Don't fail pipeline on notification error
 
 
-def _trigger_lexicon_post_processing(db_path: str, lexicon_track_id: str, track_id: int):
-    """Trigger Lexicon post-processing for a newly synced track.
+def _ensure_recent_sync_playlist(db_path: str):
+    """Create the 'Recently Added (Sync)' playlist in Lexicon if it doesn't exist.
 
-    Uses the /v1/control endpoint to fire UI-level actions in Lexicon.
-    These control actions operate on the currently selected tracks in the
-    Lexicon UI -- there is no API to target specific track IDs.  When
-    Lexicon is open and the track browser is visible, the most-recently-
-    imported track is typically still selected, so firing these immediately
-    after import has a reasonable chance of hitting the right track.
+    Stores the Lexicon playlist ID in app_config under _recent_sync_playlist_id.
+    """
+    playlist_id = get_config(db_path, "_recent_sync_playlist_id")
+    if playlist_id:
+        return
 
-    Supported actions (each individually toggleable via config):
-      - analyze:  BPM/key detection   (TrackBrowser_Analyze)
-      - cues:     cue-point generator  (TrackBrowser_CuePointGenerator)
-      - tags:     genre/tag lookup     (TrackBrowser_TagLookup)
-      - cloud:    cloud backup upload  (CloudFileBackup_UploadSelected)
+    lexicon_url = get_config(db_path, "lexicon_api_url") or os.environ.get("LEXICON_API_URL", LEXICON_API_URL)
 
-    Album-art lookup has no API or control-action equivalent; it must be
-    done manually inside the Lexicon UI.
+    try:
+        with httpx.Client(base_url=lexicon_url, timeout=10) as client:
+            resp = client.post("/v1/playlist", json={
+                "name": "Recently Added (Sync)",
+                "type": "2",
+                "parentId": 1,
+            })
+            if resp.status_code == 200:
+                data = resp.json()
+                new_id = data.get("data", {}).get("id")
+                if new_id:
+                    set_config(db_path, "_recent_sync_playlist_id", str(new_id))
+                    log.info("Created 'Recently Added (Sync)' playlist in Lexicon: id=%s", new_id)
+                else:
+                    log.warning("Lexicon playlist creation returned 200 but no id: %s", data)
+            else:
+                log.warning("Failed to create 'Recently Added (Sync)' playlist: HTTP %d: %s",
+                            resp.status_code, resp.text[:200])
+    except Exception as e:
+        log.debug("Could not create 'Recently Added (Sync)' playlist: %s", e)
+
+
+def _add_to_recent_sync_playlist(db_path: str, lexicon_track_id: str | None, track_id: int):
+    """Add a synced track to the 'Recently Added (Sync)' playlist.
+
+    Non-fatal: silently skips if playlist doesn't exist or API fails.
+    """
+    if not lexicon_track_id:
+        return
+
+    _ensure_recent_sync_playlist(db_path)
+
+    recent_playlist_id = get_config(db_path, "_recent_sync_playlist_id")
+    if not recent_playlist_id:
+        return
+
+    lexicon_url = get_config(db_path, "lexicon_api_url") or os.environ.get("LEXICON_API_URL", LEXICON_API_URL)
+
+    try:
+        with httpx.Client(base_url=lexicon_url, timeout=10) as client:
+            client.patch("/v1/playlist-tracks", json={
+                "id": int(recent_playlist_id),
+                "trackIds": [int(lexicon_track_id)],
+            })
+    except Exception:
+        pass  # Non-fatal
+
+
+def _trigger_lexicon_post_processing_batch(db_path: str, synced_count: int):
+    """Fire Lexicon control actions after a batch of tracks sync.
+
+    Navigates to Incoming tracks first (where newly imported tracks appear),
+    then fires each enabled action once for the whole batch.  This avoids
+    spamming the control API per-track.
 
     Non-fatal: logs warnings but never fails the pipeline.
     """
+    if get_config(db_path, "auto_analyze_enabled") == "0":
+        return
+
     actions_csv = get_config(db_path, "lexicon_post_processing") or "analyze,cues,tags,cloud"
     enabled_actions = {a.strip() for a in actions_csv.split(",") if a.strip()}
 
@@ -1821,28 +1888,41 @@ def _trigger_lexicon_post_processing(db_path: str, lexicon_track_id: str, track_
         "cloud":   "CloudFileBackup_UploadSelected",
     }
 
+    lexicon_url = get_config(db_path, "lexicon_api_url") or os.environ.get("LEXICON_API_URL", LEXICON_API_URL)
     triggered = []
 
-    with httpx.Client(base_url=LEXICON_API_URL, timeout=60) as client:
-        for key, control_action in ACTION_MAP.items():
-            if key not in enabled_actions:
-                continue
+    try:
+        with httpx.Client(base_url=lexicon_url, timeout=60) as client:
+            # Navigate to Incoming tracks where newly imported tracks appear
             try:
-                resp = client.post("/v1/control", json={"action": control_action})
-                if resp.status_code in (200, 201, 202, 204):
-                    log.info("Track %d: Lexicon %s triggered (lexicon_id=%s)",
-                             track_id, key, lexicon_track_id)
-                    triggered.append(key)
-                else:
-                    log.warning("Track %d: Lexicon /v1/control %s returned HTTP %d: %s",
-                                track_id, control_action, resp.status_code, resp.text[:200])
+                client.post("/v1/control", json={"action": "Navigation_SidebarTracksIncoming"})
+                time.sleep(1)
             except Exception as e:
-                log.warning("Track %d: Lexicon %s post-processing failed: %s", track_id, key, e)
+                log.debug("Lexicon navigate to Incoming failed: %s", e)
+
+            # Fire each enabled action once for the batch
+            for key, control_action in ACTION_MAP.items():
+                if key not in enabled_actions:
+                    continue
+                try:
+                    resp = client.post("/v1/control", json={"action": control_action})
+                    if resp.status_code in (200, 201, 202, 204):
+                        log.info("Lexicon batch post-processing: %s -> HTTP %d (%d tracks)",
+                                 key, resp.status_code, synced_count)
+                        triggered.append(key)
+                    else:
+                        log.warning("Lexicon /v1/control %s returned HTTP %d: %s",
+                                    control_action, resp.status_code, resp.text[:200])
+                except Exception as e:
+                    log.warning("Lexicon batch %s post-processing failed: %s", key, e)
+                time.sleep(2)  # Give Lexicon a moment between actions
+    except Exception as e:
+        log.debug("Lexicon batch post-processing failed: %s", e)
 
     if triggered:
         log_activity(
-            db_path, "lexicon_post_processing", track_id,
-            f"Triggered Lexicon post-processing [{', '.join(triggered)}] for lexicon_track_id={lexicon_track_id}",
+            db_path, "lexicon_post_processing", None,
+            f"Batch post-processing [{', '.join(triggered)}] for {synced_count} tracks",
         )
 
 

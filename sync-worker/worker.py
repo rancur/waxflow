@@ -20,6 +20,7 @@ from tasks.retry_unmatched import retry_unmatched
 from tasks.cleanup_activity import cleanup_activity
 from tasks.backup_lexicon import backup_lexicon
 from tasks.index_library import index_library
+from tasks.analyze_tracks import analyze_tracks
 from tasks.helpers import get_config, get_db
 
 DB_PATH = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
@@ -196,6 +197,9 @@ async def main():
         ),
         asyncio.create_task(
             run_task("index_library", index_library, interval_key="library_index_interval_seconds", default_interval=3600)
+        ),
+        asyncio.create_task(
+            run_task("analyze_tracks", analyze_tracks, interval_key="analyze_interval_seconds", default_interval=3600)
         ),
     ]
 

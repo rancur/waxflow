@@ -137,6 +137,40 @@ async def export_sync_report(format: str = "json"):
             return {"tracks": [dict(t) for t in tracks], "total": len(tracks)}
 
 
+@router.get("/admin/analyze-stats")
+async def get_analyze_stats():
+    """Return stats about the auto-analysis system."""
+    try:
+        with get_db() as conn:
+            total_processed = conn.execute(
+                "SELECT value FROM app_config WHERE key = 'analyze_total_processed'"
+            ).fetchone()
+            analyze_interval = conn.execute(
+                "SELECT value FROM app_config WHERE key = 'analyze_interval_seconds'"
+            ).fetchone()
+            batch_size = conn.execute(
+                "SELECT value FROM app_config WHERE key = 'analyze_batch_size'"
+            ).fetchone()
+            enabled = conn.execute(
+                "SELECT value FROM app_config WHERE key = 'auto_analyze_enabled'"
+            ).fetchone()
+
+            # Count recent analysis events
+            recent_events = conn.execute(
+                "SELECT COUNT(*) FROM activity_log WHERE event_type IN ('track_analyzed', 'analyze_batch') AND created_at > datetime('now', '-24 hours')"
+            ).fetchone()[0]
+
+            return {
+                "enabled": (enabled[0] if enabled else "1") != "0",
+                "total_processed": int(total_processed[0]) if total_processed else 0,
+                "interval_seconds": int(analyze_interval[0]) if analyze_interval else 3600,
+                "batch_size": int(batch_size[0]) if batch_size else 20,
+                "events_last_24h": recent_events,
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/admin/version", response_model=VersionResponse)
 async def get_version():
     # Read version from VERSION file (baked into image at build time)

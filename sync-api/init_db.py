@@ -144,7 +144,10 @@ def init():
             ('plex_uid', '297536'),
             ('plex_gid', '297536'),
             ('retry_search_interval_seconds', '43200'),
-            ('lexicon_legacy_path_prefixes', '/Volumes/Macintosh HD/Users/willcurran/Music/Database/,/Users/willcurran/Music/Database/');
+            ('lexicon_legacy_path_prefixes', '/Volumes/Macintosh HD/Users/willcurran/Music/Database/,/Users/willcurran/Music/Database/'),
+            ('analyze_interval_seconds', '3600'),
+            ('analyze_batch_size', '20'),
+            ('analyze_total_processed', '0');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed
