@@ -171,6 +171,7 @@ async def approve_match(track_id: int):
                 """UPDATE tracks SET
                     match_status = 'matched',
                     pipeline_stage = ?,
+                    pipeline_error = NULL,
                     updated_at = datetime('now')
                 WHERE id = ?""",
                 (next_stage, track_id),

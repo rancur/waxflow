@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import time
 
 import httpx
@@ -255,10 +254,8 @@ async def download_stats():
             else:
                 estimated_remaining = None
 
-        # Check tiddl availability
-        tiddl_available = shutil.which("tiddl") is not None
-
-        # Check Tidal auth file exists (same paths as tidal.py)
+        # tiddl runs in the worker container, not the API container.
+        # Check if Tidal auth is available (shared volume) as a proxy for tiddl readiness.
         tidal_auth_paths = ["/tiddl-auth/auth.json", "/app/data/tiddl-auth.json"]
         tidal_authed = False
         for path in tidal_auth_paths:
@@ -272,6 +269,9 @@ async def download_stats():
                     pass
                 break
 
+        # tiddl is always available in the worker container; report based on auth status
+        tiddl_available = tidal_authed
+
         # Check Tidarr reachability (optional legacy fallback, quick timeout)
         tidarr_url = os.environ.get("TIDARR_URL", "http://tidarr:8484")
         tidarr_reachable = False
@@ -281,8 +281,8 @@ async def download_stats():
         except Exception:
             pass
 
-        # Determine active method — tiddl is primary, Tidarr is legacy fallback
-        method = "tiddl" if (tiddl_available and tidal_authed) else ("tidarr" if tidarr_reachable else "none")
+        # Determine active method — tiddl is primary (runs in worker), Tidarr is legacy fallback
+        method = "tiddl" if tidal_authed else ("tidarr" if tidarr_reachable else "none")
 
         return DownloadStatsResponse(
             total=total,
@@ -295,7 +295,7 @@ async def download_stats():
             avg_download_time_seconds=avg_time,
             estimated_remaining_seconds=estimated_remaining,
             method=method,
-            tiddl_available=tiddl_available and tidal_authed,
+            tiddl_available=tiddl_available,
             tidarr_reachable=tidarr_reachable,
         )
     except Exception as e:

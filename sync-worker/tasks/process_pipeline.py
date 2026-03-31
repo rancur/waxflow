@@ -1078,7 +1078,7 @@ def _download_track(db_path: str, track: dict):
             with get_db(db_path) as conn:
                 conn.execute(
                     """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
-                    VALUES (?, 'tidarr', 'downloading', ?, datetime('now'), NULL)""",
+                    VALUES (?, 'tiddl', 'downloading', ?, datetime('now'), NULL)""",
                     (track_id, attempts),
                 )
             dest_path = _download_track_via_tiddl(db_path, track)

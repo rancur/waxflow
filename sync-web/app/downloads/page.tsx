@@ -109,7 +109,7 @@ function formatDate(iso: string | null): string {
 function sourceLabel(source: string): string {
   const labels: Record<string, string> = {
     tiddl: 'Tidal (FLAC)',
-    tidarr: 'Tidal (legacy fallback)',
+    tidarr: 'Tidal (FLAC)',
     beatport: 'Beatport',
     bandcamp: 'Bandcamp',
   }
@@ -237,12 +237,10 @@ export default function DownloadsPage() {
     setPage(1)
   }
 
-  // Progress: only tracks that entered the download pipeline (total excludes skipped)
-  const progressPct = stats
-    ? stats.total > 0
-      ? Math.round((stats.complete / stats.total) * 100)
-      : 0
-    : 0
+  // Progress: resolved = downloaded + library matched, out of grand total
+  const totalTracks = stats ? stats.total + stats.skipped : 0
+  const resolvedTracks = stats ? stats.complete + stats.skipped : 0
+  const progressPct = totalTracks > 0 ? Math.round((resolvedTracks / totalTracks) * 100) : 0
   const allDownloadsDone = stats ? stats.pending === 0 && stats.queued === 0 && stats.downloading === 0 : false
 
   const SortIcon = ({ col }: { col: string }) => {
@@ -259,7 +257,7 @@ export default function DownloadsPage() {
           <p className="text-sm text-slate-500 mt-1">
             {totalItems.toLocaleString()} items total
             {stats?.avg_download_time_seconds ? ` \u00b7 avg ${stats.avg_download_time_seconds}s per track` : ''}
-            {stats ? ` \u00b7 via ${stats.method === 'tiddl' ? 'tiddl (direct)' : stats.method === 'tidarr' ? 'Tidal (legacy fallback)' : 'no downloader'}` : ''}
+            {stats ? ` \u00b7 via ${stats.tiddl_available ? 'tiddl (direct)' : stats.tidarr_reachable ? 'Tidarr (legacy)' : 'no downloader'}` : ''}
           </p>
         </div>
         {tidalStatus && (
@@ -339,7 +337,7 @@ export default function DownloadsPage() {
                 {allDownloadsDone && stats.failed === 0 ? (
                   <span className="text-emerald-400">All downloads complete</span>
                 ) : (
-                  <>{stats.complete.toLocaleString()} / {stats.total.toLocaleString()} ({progressPct}%)</>
+                  <>{stats.complete.toLocaleString()} downloaded + {stats.skipped.toLocaleString()} library matched = {resolvedTracks.toLocaleString()} / {totalTracks.toLocaleString()} ({progressPct}%)</>
                 )}
               </span>
             </div>
@@ -359,7 +357,7 @@ export default function DownloadsPage() {
               </p>
             ) : allDownloadsDone && stats.failed === 0 ? null : stats.downloading === 0 && (stats.pending + stats.queued) > 0 ? (
               <p className="text-xs text-slate-500 mt-2 text-right">
-                {(stats.pending + stats.queued).toLocaleString()} tracks waiting &mdash; no active downloads
+                All downloads paused &mdash; {(stats.pending + stats.queued).toLocaleString()} tracks in queue
               </p>
             ) : null}
           </div>
@@ -401,7 +399,7 @@ export default function DownloadsPage() {
             ))}
           </div>
         ) : (
-          <p className="text-sm text-slate-500 italic">Idle — waiting for next track</p>
+          <p className="text-sm text-slate-500 italic">Idle &mdash; no active downloads</p>
         )}
       </div>
 
