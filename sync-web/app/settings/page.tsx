@@ -24,6 +24,12 @@ export default function SettingsPage() {
     error?: string
   }>({ state: 'idle' })
   const [analyzeStats, setAnalyzeStats] = useState<any>(null)
+  const [updateInfo, setUpdateInfo] = useState<any>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [updatingNow, setUpdatingNow] = useState(false)
+  const [configBackups, setConfigBackups] = useState<any[]>([])
+  const [creatingBackup, setCreatingBackup] = useState(false)
+  const [restoringBackup, setRestoringBackup] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -32,7 +38,7 @@ export default function SettingsPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes, analyzeRes] = await Promise.allSettled([
+      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes, analyzeRes, updateRes, configBackupsRes] = await Promise.allSettled([
         apiFetch<any>('/settings'),
         apiFetch<any>('/lexicon/backups'),
         apiFetch<any>('/admin/version'),
@@ -41,6 +47,8 @@ export default function SettingsPage() {
         apiFetch<any>('/dashboard'),
         apiFetch<any>('/tidal/status'),
         apiFetch<any>('/admin/analyze-stats'),
+        apiFetch<any>('/admin/check-update'),
+        apiFetch<any>('/admin/backups'),
       ])
 
       if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value.settings || {})
@@ -51,6 +59,8 @@ export default function SettingsPage() {
       if (dashboardRes.status === 'fulfilled') setDashboard(dashboardRes.value)
       if (tidalRes.status === 'fulfilled') setTidalStatus(tidalRes.value)
       if (analyzeRes.status === 'fulfilled') setAnalyzeStats(analyzeRes.value)
+      if (updateRes.status === 'fulfilled') setUpdateInfo(updateRes.value)
+      if (configBackupsRes.status === 'fulfilled') setConfigBackups(configBackupsRes.value.backups || [])
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings')
@@ -159,6 +169,66 @@ export default function SettingsPage() {
       setTimeout(() => setSuccess(null), 3000)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Backup failed')
+    }
+  }
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true)
+    try {
+      const data = await apiFetch<any>('/admin/check-update')
+      setUpdateInfo(data)
+      if (!data.update_available) {
+        setSuccess('You are on the latest version')
+        setTimeout(() => setSuccess(null), 3000)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Update check failed')
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }
+
+  const handleUpdateNow = async () => {
+    setUpdatingNow(true)
+    try {
+      await apiFetch('/admin/update', { method: 'POST' })
+      setSuccess('Update requested. The deploy script will pick this up shortly.')
+      setTimeout(() => setSuccess(null), 5000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Update request failed')
+    } finally {
+      setUpdatingNow(false)
+    }
+  }
+
+  const handleCreateConfigBackup = async () => {
+    setCreatingBackup(true)
+    try {
+      const data = await apiFetch<any>('/admin/backup', { method: 'POST' })
+      setSuccess(`Backup created: ${data.timestamp}`)
+      // Refresh backup list
+      const fresh = await apiFetch<any>('/admin/backups')
+      setConfigBackups(fresh.backups || [])
+      setTimeout(() => setSuccess(null), 3000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Backup failed')
+    } finally {
+      setCreatingBackup(false)
+    }
+  }
+
+  const handleRestoreBackup = async (timestamp: string) => {
+    if (!confirm(`Restore from backup ${timestamp}? A pre-restore backup will be created automatically.`)) return
+    setRestoringBackup(timestamp)
+    try {
+      const data = await apiFetch<any>(`/admin/restore/${timestamp}`, { method: 'POST' })
+      setSuccess(`Restored from ${timestamp}. Pre-restore backup: ${data.pre_restore_backup}`)
+      fetchAll()
+      setTimeout(() => setSuccess(null), 5000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Restore failed')
+    } finally {
+      setRestoringBackup(null)
     }
   }
 
@@ -753,44 +823,203 @@ export default function SettingsPage() {
       </div>
 
       {/* ================================================================ */}
-      {/* EXPORT & VERSION                                                  */}
+      {/* VERSION & UPDATES                                                 */}
       {/* ================================================================ */}
 
       <div className="card">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <a
-              href="/api/admin/export?format=csv"
-              download="sync-report.csv"
-              className="btn-secondary text-sm inline-block"
-            >
-              Export CSV
-            </a>
-            <a
-              href="/api/admin/export?format=json"
-              download="sync-report.json"
-              className="btn-secondary text-sm inline-block"
-            >
-              Export JSON
-            </a>
-            {dashboard?.total_tracks && (
-              <span className="text-xs text-slate-500">{dashboard.total_tracks} tracks</span>
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Version &amp; Updates</h2>
+
+        {/* Update Available Banner */}
+        {updateInfo?.update_available && (
+          <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl px-5 py-4 mb-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-semibold text-blue-400">
+                Update Available: v{updateInfo.latest_version}
+              </span>
+              {updateInfo.published_at && (
+                <span className="text-xs text-slate-500">
+                  {new Date(updateInfo.published_at).toLocaleDateString()}
+                </span>
+              )}
+            </div>
+            {updateInfo.release_notes && (
+              <p className="text-xs text-slate-400 mb-3 whitespace-pre-line leading-relaxed">
+                {updateInfo.release_notes}
+              </p>
             )}
+            <div className="flex items-center gap-3">
+              <button
+                className="btn-primary text-sm"
+                onClick={handleUpdateNow}
+                disabled={updatingNow}
+              >
+                {updatingNow ? 'Requesting...' : 'Update Now'}
+              </button>
+              {updateInfo.release_url && (
+                <a
+                  href={updateInfo.release_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-400 hover:text-blue-300"
+                >
+                  View Release
+                </a>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-slate-500 font-mono">
-              {version?.version || '?'}{version?.git_sha ? ` (${version.git_sha})` : ''}
-            </span>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-500">Current Version</span>
+              <span className="text-sm text-slate-300 font-mono">
+                v{version?.version || '?'}{version?.git_sha ? ` (${version.git_sha.slice(0, 7)})` : ''}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-500">Latest Available</span>
+              <span className="text-sm text-slate-300 font-mono">
+                {updateInfo?.latest_version ? `v${updateInfo.latest_version}` : 'Unknown'}
+              </span>
+            </div>
+            {settings.last_update_check && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-slate-500">Last Check</span>
+                <span className="text-xs text-slate-400">
+                  {new Date(settings.last_update_check).toLocaleString()}
+                </span>
+              </div>
+            )}
             <button
-              className="btn-secondary text-sm"
-              onClick={() => apiFetch('/admin/update', { method: 'POST' }).then(() => {
-                setSuccess('Update requested')
-                setTimeout(() => setSuccess(null), 3000)
-              }).catch(() => setError('Update request failed'))}
+              className="btn-secondary text-sm w-full"
+              onClick={handleCheckUpdate}
+              disabled={checkingUpdate}
             >
-              Check for Updates
+              {checkingUpdate ? 'Checking...' : 'Check for Updates'}
             </button>
           </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-slate-300">Auto-Update</p>
+                <p className="text-xs text-slate-600">Automatically apply updates</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => updateSetting('auto_update_enabled', settings.auto_update_enabled === '1' ? '0' : '1')}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  settings.auto_update_enabled === '1' ? 'bg-emerald-500' : 'bg-slate-700'
+                }`}
+              >
+                <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                  settings.auto_update_enabled === '1' ? 'translate-x-6' : 'translate-x-1'
+                }`} />
+              </button>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Update Schedule</label>
+              <select
+                className="select-field w-full"
+                value={settings.auto_update_schedule || 'daily_3am'}
+                onChange={(e) => updateSetting('auto_update_schedule', e.target.value)}
+              >
+                <option value="manual">Manual Only</option>
+                <option value="daily_3am">Daily at 3 AM</option>
+                <option value="weekly_sunday_3am">Weekly Sunday 3 AM</option>
+              </select>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-slate-300">Backup Before Update</p>
+                <p className="text-xs text-slate-600">Auto-backup before applying</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => updateSetting('auto_backup_before_update', settings.auto_backup_before_update === '0' ? '1' : '0')}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  settings.auto_backup_before_update === '0' ? 'bg-slate-700' : 'bg-emerald-500'
+                }`}
+              >
+                <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                  settings.auto_backup_before_update === '0' ? 'translate-x-1' : 'translate-x-6'
+                }`} />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* CONFIG BACKUP & RESTORE                                           */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-300">Config Backup &amp; Restore</h2>
+            <p className="text-xs text-slate-500 mt-1">Full database + config snapshots</p>
+          </div>
+          <button
+            className="btn-secondary text-sm"
+            onClick={handleCreateConfigBackup}
+            disabled={creatingBackup}
+          >
+            {creatingBackup ? 'Creating...' : 'Create Backup'}
+          </button>
+        </div>
+        {configBackups.length > 0 ? (
+          <div className="space-y-2">
+            {configBackups.map((b: any) => (
+              <div key={b.timestamp} className="flex items-center justify-between bg-slate-800/50 rounded-lg px-4 py-2">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-300 font-mono">{b.timestamp}</span>
+                  <span className="text-xs text-slate-500">
+                    {(b.size_bytes / 1024).toFixed(0)} KB
+                  </span>
+                  {b.config && (
+                    <span className="text-xs text-slate-600">+ config</span>
+                  )}
+                </div>
+                <button
+                  className="text-xs text-amber-400 hover:text-amber-300"
+                  onClick={() => handleRestoreBackup(b.timestamp)}
+                  disabled={restoringBackup === b.timestamp}
+                >
+                  {restoringBackup === b.timestamp ? 'Restoring...' : 'Restore'}
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-slate-500">No config backups yet.</p>
+        )}
+      </div>
+
+      {/* ================================================================ */}
+      {/* EXPORT                                                            */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <div className="flex items-center gap-3">
+          <a
+            href="/api/admin/export?format=csv"
+            download="sync-report.csv"
+            className="btn-secondary text-sm inline-block"
+          >
+            Export CSV
+          </a>
+          <a
+            href="/api/admin/export?format=json"
+            download="sync-report.json"
+            className="btn-secondary text-sm inline-block"
+          >
+            Export JSON
+          </a>
+          {dashboard?.total_tracks && (
+            <span className="text-xs text-slate-500">{dashboard.total_tracks} tracks</span>
+          )}
         </div>
       </div>
     </div>

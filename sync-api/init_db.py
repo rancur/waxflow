@@ -147,7 +147,11 @@ def init():
             ('lexicon_legacy_path_prefixes', '/Volumes/Macintosh HD/Users/willcurran/Music/Database/,/Users/willcurran/Music/Database/'),
             ('analyze_interval_seconds', '3600'),
             ('analyze_batch_size', '20'),
-            ('analyze_total_processed', '0');
+            ('analyze_total_processed', '0'),
+            ('auto_update_enabled', '0'),
+            ('auto_update_schedule', 'daily_3am'),
+            ('auto_backup_before_update', '1'),
+            ('last_update_check', '');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed

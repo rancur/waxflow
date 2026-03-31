@@ -1,4 +1,7 @@
+import glob
+import json
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -188,3 +191,151 @@ async def get_version():
         git_sha = None
 
     return VersionResponse(version=version, git_sha=git_sha)
+
+
+@router.get("/admin/check-update")
+async def check_update():
+    """Check GitHub for newer releases."""
+    import httpx
+
+    current = "unknown"
+    version_path = Path("/app/VERSION")
+    try:
+        if version_path.exists():
+            current = version_path.read_text().strip()
+    except Exception:
+        pass
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.github.com/repos/rancur/spotify-lexicon-sync/releases/latest"
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                latest = data.get("tag_name", "").lstrip("v")
+                return {
+                    "current_version": current,
+                    "latest_version": latest,
+                    "update_available": latest != current and latest > current,
+                    "release_url": data.get("html_url"),
+                    "release_notes": data.get("body", "")[:500],
+                    "published_at": data.get("published_at"),
+                }
+    except Exception:
+        pass
+
+    return {"current_version": current, "update_available": False}
+
+
+# ============================================================
+# Config Backup System
+# ============================================================
+
+BACKUP_DIR = "/app/data/backups"
+
+
+@router.post("/admin/backup")
+async def create_backup():
+    """Create a full backup of the sync database and config."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+    # Backup database
+    db_src = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
+    db_dst = f"{BACKUP_DIR}/sync_{timestamp}.db"
+    shutil.copy2(db_src, db_dst)
+
+    # Backup config (all app_config values)
+    with get_db() as conn:
+        rows = conn.execute("SELECT key, value FROM app_config").fetchall()
+        config = {r["key"]: r["value"] for r in rows}
+
+    config_dst = f"{BACKUP_DIR}/config_{timestamp}.json"
+    with open(config_dst, "w") as f:
+        json.dump(config, f, indent=2)
+
+    # Prune old backups (keep last 10)
+    db_backups = sorted(glob.glob(f"{BACKUP_DIR}/sync_*.db"))
+    for old in db_backups[:-10]:
+        os.remove(old)
+        config_pair = old.replace("sync_", "config_").replace(".db", ".json")
+        if os.path.exists(config_pair):
+            os.remove(config_pair)
+
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO activity_log (event_type, message, details) VALUES (?, ?, ?)",
+            ("backup_created", f"Backup created: {timestamp}",
+             json.dumps({"database": db_dst, "config": config_dst})),
+        )
+
+    return {
+        "status": "ok",
+        "database": db_dst,
+        "config": config_dst,
+        "size_bytes": os.path.getsize(db_dst),
+        "timestamp": timestamp,
+    }
+
+
+@router.get("/admin/backups")
+async def list_backups():
+    """List available config/db backups."""
+    backups = []
+    for f in sorted(glob.glob(f"{BACKUP_DIR}/sync_*.db"), reverse=True):
+        ts = os.path.basename(f).replace("sync_", "").replace(".db", "")
+        config_path = f.replace("sync_", "config_").replace(".db", ".json")
+        backups.append({
+            "timestamp": ts,
+            "database": f,
+            "config": config_path if os.path.exists(config_path) else None,
+            "size_bytes": os.path.getsize(f),
+        })
+    return {"backups": backups}
+
+
+@router.post("/admin/restore/{timestamp}")
+async def restore_backup(timestamp: str):
+    """Restore from a backup by timestamp."""
+    db_backup = f"{BACKUP_DIR}/sync_{timestamp}.db"
+    config_backup = f"{BACKUP_DIR}/config_{timestamp}.json"
+
+    if not os.path.exists(db_backup):
+        raise HTTPException(status_code=404, detail=f"Backup not found: {timestamp}")
+
+    db_dst = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
+
+    # Create a pre-restore backup first
+    pre_ts = time.strftime("%Y%m%d_%H%M%S")
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    shutil.copy2(db_dst, f"{BACKUP_DIR}/sync_prerestore_{pre_ts}.db")
+
+    # Restore database
+    shutil.copy2(db_backup, db_dst)
+
+    # Restore config values if config backup exists
+    restored_keys = []
+    if os.path.exists(config_backup):
+        with open(config_backup) as f:
+            config = json.load(f)
+        with get_db() as conn:
+            for key, value in config.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_config (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+                restored_keys.append(key)
+            conn.execute(
+                "INSERT INTO activity_log (event_type, message, details) VALUES (?, ?, ?)",
+                ("backup_restored", f"Restored from backup: {timestamp}",
+                 json.dumps({"config_keys": restored_keys})),
+            )
+
+    return {
+        "status": "ok",
+        "restored_from": timestamp,
+        "database_restored": True,
+        "config_keys_restored": len(restored_keys),
+        "pre_restore_backup": f"sync_prerestore_{pre_ts}.db",
+    }

@@ -336,10 +336,10 @@ def _get_unanalyzed_tracks(db_path: str, limit: int = 20) -> list[dict]:
 
             unanalyzed = []
             for t in tracks:
-                bpm = t.get("bpm") or 0
-                key = t.get("initialKey") or t.get("key") or ""
-                # Track needs analysis if BPM is 0/missing or key is empty
-                if (not bpm or float(bpm) == 0) or not key:
+                key = t.get("key") or t.get("initialKey") or ""
+                # Track needs analysis if key is empty
+                # (BPM cannot be written via PATCH API -- must use Lexicon UI Analyze)
+                if not key:
                     unanalyzed.append(t)
                     if len(unanalyzed) >= limit:
                         break
@@ -421,11 +421,12 @@ def analyze_single_track(db_path: str, file_path: str, lexicon_track_id: str, sl
         result["key"] = key
 
     # Build edits for Lexicon
+    # NOTE: Lexicon PATCH API does NOT allow writing BPM (returns "bpm is not editable").
+    # BPM must be set via the Lexicon UI Analyze action (TrackBrowser_Analyze).
+    # We CAN write key via PATCH.
     edits = {}
-    if bpm and bpm > 0:
-        edits["bpm"] = bpm
     if key:
-        edits["initialKey"] = key
+        edits["key"] = key
 
     if edits and lexicon_track_id:
         patched = _patch_lexicon_track(db_path, lexicon_track_id, edits)
