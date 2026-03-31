@@ -23,6 +23,7 @@ export default function SettingsPage() {
     latency?: number
     error?: string
   }>({ state: 'idle' })
+  const [analyzeStats, setAnalyzeStats] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -31,7 +32,7 @@ export default function SettingsPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes] = await Promise.allSettled([
+      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes, analyzeRes] = await Promise.allSettled([
         apiFetch<any>('/settings'),
         apiFetch<any>('/lexicon/backups'),
         apiFetch<any>('/admin/version'),
@@ -39,6 +40,7 @@ export default function SettingsPage() {
         apiFetch<any>('/admin/health'),
         apiFetch<any>('/dashboard'),
         apiFetch<any>('/tidal/status'),
+        apiFetch<any>('/admin/analyze-stats'),
       ])
 
       if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value.settings || {})
@@ -48,6 +50,7 @@ export default function SettingsPage() {
       if (healthRes.status === 'fulfilled') setHealth(healthRes.value)
       if (dashboardRes.status === 'fulfilled') setDashboard(dashboardRes.value)
       if (tidalRes.status === 'fulfilled') setTidalStatus(tidalRes.value)
+      if (analyzeRes.status === 'fulfilled') setAnalyzeStats(analyzeRes.value)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings')
@@ -670,6 +673,72 @@ export default function SettingsPage() {
           <p className="text-xs text-slate-600 mt-1">
             Receives POST with track sync events. Leave empty to disable.
           </p>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* AUTO-ANALYSIS (BPM / KEY DETECTION)                               */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-2">Auto-Analysis (BPM / Key Detection)</h2>
+        <p className="text-xs text-slate-500 mb-4">
+          Automatically detect BPM and musical key for synced tracks using aubio,
+          then write metadata directly to Lexicon via PATCH API.
+          Runs inline after each sync and periodically for any missed tracks.
+        </p>
+
+        {analyzeStats && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center mb-4">
+            <div>
+              <p className="text-2xl font-bold text-emerald-400">{analyzeStats.total_processed}</p>
+              <p className="text-xs text-slate-500">Total Analyzed</p>
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-blue-400">{analyzeStats.events_last_24h}</p>
+              <p className="text-xs text-slate-500">Last 24h Events</p>
+            </div>
+            <div>
+              <p className="text-lg font-bold text-slate-300">{Math.round(analyzeStats.interval_seconds / 60)}m</p>
+              <p className="text-xs text-slate-500">Scan Interval</p>
+            </div>
+            <div>
+              <p className="text-lg font-bold text-slate-300">{analyzeStats.batch_size}</p>
+              <p className="text-xs text-slate-500">Batch Size</p>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-4">
+          <div className="grid md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Scan Interval (minutes)</label>
+              <input
+                type="number"
+                min="5"
+                className="input-field w-full"
+                value={String(Math.round(Number(settings.analyze_interval_seconds || '3600') / 60))}
+                onChange={(e) => updateSetting('analyze_interval_seconds', String(Number(e.target.value) * 60))}
+              />
+              <p className="text-xs text-slate-600 mt-1">
+                How often to scan Lexicon for unanalyzed tracks.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Batch Size</label>
+              <input
+                type="number"
+                min="1"
+                max="100"
+                className="input-field w-full"
+                value={settings.analyze_batch_size || '20'}
+                onChange={(e) => updateSetting('analyze_batch_size', e.target.value)}
+              />
+              <p className="text-xs text-slate-600 mt-1">
+                Max tracks to analyze per scan cycle.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
