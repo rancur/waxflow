@@ -651,6 +651,9 @@ def _match_track(db_path: str, track: dict):
                     duration_diff = abs(item_duration - duration_ms)
 
                     # Title matching tiers
+                    # TODO(Bug #32): Consider reusing _titles_match() here for consistency
+                    # with Lexicon matching. Currently uses inline tiered matching for
+                    # confidence scoring which _titles_match doesn't support.
                     norm_exact = (spotify_norm == item_norm)
                     partial_match = (
                         spotify_norm in item_norm

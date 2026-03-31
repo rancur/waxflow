@@ -161,15 +161,26 @@ async def get_error_tracks():
             for r in errors:
                 t = row_to_track(r)
                 err = (t.get("pipeline_error") or "").lower()
-                if "not lossless" in err or "aac" in err or "mp3" in err:
+                verify_status = t.get("verify_status")
+                verify_codec = (t.get("verify_codec") or "").lower()
+
+                # Check verify_status and codec first for accurate not_lossless detection
+                # (Bug #31: lossy tracks were misclassified as download_failed)
+                if verify_codec in ("aac", "mp3"):
                     categories["not_lossless"].append(t)
-                elif "no tidal match" in err or "no match" in err or "not found on tidal" in err:
+                elif verify_status == "fail" and "not lossless" in err:
+                    categories["not_lossless"].append(t)
+                elif "not lossless" in err or "aac" in err or "mp3" in err:
+                    categories["not_lossless"].append(t)
+                elif "no tidal match" in err or "no match" in err or "not found on tidal" in err or "permanently unavailable" in err:
                     categories["no_tidal_match"].append(t)
+                elif "geo-restricted" in err or "unavailable on tidal" in err:
+                    categories["download_failed"].append(t)
                 elif "download failed" in err or "download error" in err:
                     categories["download_failed"].append(t)
                 elif "lexicon" in err:
                     categories["lexicon_sync_failed"].append(t)
-                elif "fingerprint" in err:
+                elif "fingerprint" in err or "mismatched" in err:
                     categories["fingerprint_mismatch"].append(t)
                 else:
                     categories["other"].append(t)
