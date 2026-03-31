@@ -828,6 +828,18 @@ def _download_track_via_tiddl(db_path: str, track: dict) -> str:
             dest = f"{base}_{tidal_id}{extension}"
 
         shutil.move(downloaded, dest)
+
+        # Fix ownership so SynologyDrive syncs the file (must match PlexMediaServer UID/GID)
+        _PLEX_UID = 297536
+        _PLEX_GID = 297536
+        try:
+            os.chown(dest_dir, _PLEX_UID, _PLEX_GID)
+            os.chown(dest, _PLEX_UID, _PLEX_GID)
+            os.chmod(dest, 0o664)
+            os.chmod(dest_dir, 0o775)
+        except OSError as chown_err:
+            log.warning("Could not fix ownership for %s: %s", dest, chown_err)
+
         log.info("tiddl download complete: %s -> %s", tidal_id, dest)
         return dest
 

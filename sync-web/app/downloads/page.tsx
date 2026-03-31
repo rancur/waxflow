@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { apiFetch } from '../api'
 import StatusBadge from '../components/StatusBadge'
 
@@ -251,12 +251,32 @@ export default function DownloadsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-slate-100">Downloads</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          {totalItems.toLocaleString()} items total
-          {stats?.avg_download_time_seconds ? ` \u00b7 avg ${stats.avg_download_time_seconds}s per track` : ''}
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-100">Downloads</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            {totalItems.toLocaleString()} items total
+            {stats?.avg_download_time_seconds ? ` \u00b7 avg ${stats.avg_download_time_seconds}s per track` : ''}
+            {stats ? ` \u00b7 via ${stats.method === 'tiddl' ? 'tiddl (direct)' : stats.method === 'tidarr' ? 'Tidarr (fallback)' : 'no downloader'}` : ''}
+          </p>
+        </div>
+        {tidalStatus && (
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium ${
+            tidalStatus.connected && !tidalStatus.expired
+              ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
+              : 'bg-red-500/10 border border-red-500/30 text-red-400'
+          }`}>
+            <div className={`w-2 h-2 rounded-full ${
+              tidalStatus.connected && !tidalStatus.expired ? 'bg-emerald-400' : 'bg-red-400'
+            }`} />
+            {tidalStatus.connected && !tidalStatus.expired
+              ? `Tidal: Connected (${tidalStatus.hours_left}h left)`
+              : tidalStatus.connected && tidalStatus.expired
+                ? 'Tidal: Token expired'
+                : 'Tidal: Not connected'
+            }
+          </div>
+        )}
       </div>
 
       {error && (
@@ -326,34 +346,38 @@ export default function DownloadsPage() {
       </div>
 
       {/* --- Middle Section: Currently Downloading --- */}
-      <div className={`card border ${activeItem ? 'border-blue-500/30 bg-blue-500/5' : 'border-slate-800'}`}>
+      <div className={`card border ${activeDownloads.length > 0 ? 'border-blue-500/30 bg-blue-500/5' : 'border-slate-800'}`}>
         <div className="flex items-center gap-3 mb-3">
-          <div className={`w-2.5 h-2.5 rounded-full ${activeItem ? 'bg-blue-400 animate-pulse' : 'bg-slate-600'}`} />
+          <div className={`w-2.5 h-2.5 rounded-full ${activeDownloads.length > 0 ? 'bg-blue-400 animate-pulse' : 'bg-slate-600'}`} />
           <h2 className="text-sm font-semibold text-blue-400">Currently Downloading</h2>
         </div>
-        {activeItem ? (
-          <div className="flex items-start gap-4">
-            <div className="flex-1 min-w-0">
-              <p className="text-lg text-slate-100 font-semibold truncate">{activeItem.track_title || 'Unknown Track'}</p>
-              <p className="text-sm text-slate-400 truncate">{activeItem.track_artist || 'Unknown Artist'}</p>
-              <p className="text-xs text-slate-500 mt-1">{activeItem.track_album}</p>
-              <div className="flex items-center gap-4 mt-3">
-                <span className="text-xs text-slate-500">
-                  Source: <span className="text-slate-300">{sourceLabel(activeItem.source)}</span>
-                </span>
-                {activeItem.started_at && (
-                  <span className="text-xs text-slate-500">
-                    Started: <span className="text-slate-300 tabular-nums">{formatTime(activeItem.started_at)}</span>
-                  </span>
-                )}
+        {activeDownloads.length > 0 ? (
+          <div className="space-y-3">
+            {activeDownloads.map(dl => (
+              <div key={dl.id} className="flex items-start gap-4">
+                <div className="flex-1 min-w-0">
+                  <p className="text-lg text-slate-100 font-semibold truncate">{dl.title || 'Unknown Track'}</p>
+                  <p className="text-sm text-slate-400 truncate">{dl.artist || 'Unknown Artist'}</p>
+                  <p className="text-xs text-slate-500 mt-1">{dl.album}</p>
+                  <div className="flex items-center gap-4 mt-3">
+                    <span className="text-xs text-slate-500">
+                      Method: <span className="text-slate-300">{sourceLabel(dl.source)}</span>
+                    </span>
+                    {dl.started_at && (
+                      <span className="text-xs text-slate-500">
+                        Started: <span className="text-slate-300 tabular-nums">{formatTime(dl.started_at)}</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="shrink-0 flex items-center gap-2">
+                  <svg className="animate-spin h-5 w-5 text-blue-400" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                </div>
               </div>
-            </div>
-            <div className="shrink-0 flex items-center gap-2">
-              <svg className="animate-spin h-5 w-5 text-blue-400" viewBox="0 0 24 24" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-            </div>
+            ))}
           </div>
         ) : (
           <p className="text-sm text-slate-500 italic">Idle — waiting for next track</p>
