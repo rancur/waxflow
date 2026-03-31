@@ -1618,16 +1618,15 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         reasons.append(f"not lossless: codec={codec}, sr={sample_rate}")
 
     if fp_match_score is not None and fp_match_score < min_fp_score:
-        if fp_match_score < 0.70:
-            # Below 0.70: definite mismatch — fail
-            verify_pass = False
-            is_mismatched = True
-            reasons.append(f"fingerprint score too low: {fp_match_score:.2f} (mismatched)")
-        else:
-            # Between min_fp_score (0.70) and 0.85: auto-pass but flag as low confidence
-            log.warning("Track %d: low confidence fingerprint match (score=%.2f), auto-approving",
-                        track_id, fp_match_score)
-            reasons.append(f"low confidence fingerprint match: {fp_match_score:.2f} (auto-approved)")
+        # Below threshold (0.70): definite mismatch — fail
+        verify_pass = False
+        is_mismatched = True
+        reasons.append(f"fingerprint score too low: {fp_match_score:.2f} (mismatched)")
+    elif fp_match_score is not None and fp_match_score < 0.85:
+        # Between 0.70 and 0.85: auto-pass but flag as low confidence for review
+        log.warning("Track %d: low confidence fingerprint match (score=%.2f), auto-approving",
+                    track_id, fp_match_score)
+        reasons.append(f"low confidence fingerprint match: {fp_match_score:.2f} (auto-approved)")
 
     # Stricter duration-based mismatch detection (only for untrusted search matches)
     if not trusted_match:

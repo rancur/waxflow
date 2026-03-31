@@ -127,7 +127,7 @@ def init():
             ('spotify_poll_interval_seconds', '300'),
             ('lexicon_backup_before_sync', '1'),
             ('max_concurrent_downloads', '2'),
-            ('fingerprint_min_score', '0.85'),
+            ('fingerprint_min_score', '0.70'),
             ('music_library_path', '/music'),
             ('activity_log_retention_days', '365'),
             ('synology_sync_delay_seconds', '3'),
