@@ -35,7 +35,7 @@ BATCH_SIZE = 10  # legacy default
 # Per-stage batch sizes
 BATCH_NEW = 50       # Lexicon/file checks are fast
 BATCH_MATCH = 20     # Tidal API calls
-BATCH_DOWNLOAD = 5   # Pipeline multiple items to Tidarr
+BATCH_DOWNLOAD = 5   # Pipeline multiple items to tiddl
 BATCH_VERIFY = 20    # ffprobe is fast
 BATCH_ORGANIZE = 30  # Lexicon API
 
@@ -43,11 +43,11 @@ BATCH_ORGANIZE = 30  # Lexicon API
 _playlist_cache = {}  # (year, month) -> {"folder_id": str, "playlist_id": str}
 _playlist_cache_time = 0
 
-# tiddl CLI setup: convert Tidarr auth.json to tiddl 2.8.0 config format
+# tiddl CLI setup: convert Tidal auth.json to tiddl 2.8.0 config format
 _TIDDL_AVAILABLE = shutil.which("tiddl") is not None
 if _TIDDL_AVAILABLE:
     _tiddl_auth_sources = [
-        "/tiddl-auth/auth.json",       # mounted from Tidarr
+        "/tiddl-auth/auth.json",       # mounted Tidal auth (legacy path from Tidarr config dir)
         "/app/data/tiddl-auth.json",   # web UI auth flow
     ]
     _tiddl_auth_source = None
@@ -64,7 +64,7 @@ if _TIDDL_AVAILABLE:
         if _tiddl_auth_source and os.path.exists(_tiddl_auth_source):
             with open(_tiddl_auth_source) as f:
                 _auth = json.load(f)
-            # Build tiddl 2.8.0 config with auth from Tidarr
+            # Build tiddl 2.8.0 config with Tidal auth
             _tiddl_config = {
                 "template": {
                     "track": "{artist} - {title}",
@@ -108,7 +108,7 @@ if _TIDDL_AVAILABLE:
         logging.getLogger("worker.pipeline").warning("tiddl config setup failed: %s — tiddl disabled", _e)
         _TIDDL_AVAILABLE = False
 else:
-    logging.getLogger("worker.pipeline").info("tiddl CLI not found — using Tidarr for downloads")
+    logging.getLogger("worker.pipeline").info("tiddl CLI not found — downloads disabled (legacy Tidarr fallback available if configured)")
 
 
 async def process_pipeline(db_path: str):
@@ -544,7 +544,7 @@ def _normalize_title(title: str) -> str:
 
 
 def _match_track(db_path: str, track: dict):
-    """Try to find a Tidal match. Uses Tidarr's Tidal session for search via tiddl."""
+    """Try to find a Tidal match via Tidal API search."""
     track_id = track["id"]
     isrc = track.get("isrc")
     artist = track.get("artist", "")
@@ -559,7 +559,7 @@ def _match_track(db_path: str, track: dict):
     # Strategy 1: Search Tidal by ISRC
     if isrc:
         try:
-            results = _tidal_search_via_tidarr(isrc)
+            results = _tidal_search(isrc)
             # Check ALL results for matching ISRC (not just the first)
             for item in results:
                 if item.get("isrc", "").upper() == isrc.upper():
@@ -578,7 +578,7 @@ def _match_track(db_path: str, track: dict):
         query = f"{artist} {title}".strip()
         if query:
             try:
-                results = _tidal_search_via_tidarr(query)
+                results = _tidal_search(query)
                 spotify_norm = _normalize_title(title)
                 spotify_artists = [a.strip().lower() for a in artist.split(",")]
 
@@ -660,7 +660,7 @@ def _match_track(db_path: str, track: dict):
             conn.execute(
                 """INSERT INTO fallback_attempts
                 (track_id, source, status, search_query, result_count)
-                VALUES (?, 'tidarr', 'no_match', ?, 0)""",
+                VALUES (?, 'tidal', 'no_match', ?, 0)""",
                 (track_id, f"{artist} {title}"),
             )
         update_track(
@@ -673,16 +673,8 @@ def _match_track(db_path: str, track: dict):
         log.warning("Track %d: no match for '%s - %s'", track_id, artist, title)
 
 
-def _tidal_search_via_tidarr(query: str) -> list[dict]:
-    """Search Tidal using tiddl CLI inside Tidarr container via Docker exec on NAS.
-
-    Since Tidarr doesn't have a search API, and tiddl is the CLI tool that handles
-    Tidal auth, we use a simple HTTP search against Tidal's public-ish API.
-    Tidarr's tiddl config has the auth token.
-
-    Alternatively, we use the Tidal API directly with a device code flow.
-    For now, we'll try a direct Tidal API search (which may work without auth for basic search).
-    """
+def _tidal_search(query: str) -> list[dict]:
+    """Search Tidal API directly for tracks matching the query."""
     with httpx.Client(timeout=30) as client:
         # Tidal API search (public endpoint — may work without auth for basic results)
         headers = {
@@ -713,19 +705,20 @@ def _tidal_search_via_tidarr(query: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _get_tidarr_queue_state() -> dict | None:
-    """Fetch current Tidarr queue via SSE/API. Returns dict with item states or None on failure."""
+    """(Legacy) Fetch current Tidarr queue via SSE/API. Returns dict with item states or None on failure."""
     try:
         with httpx.Client(timeout=10) as client:
             resp = client.get(f"{TIDARR_URL}/api/queue/status")
             if resp.status_code == 200:
                 return resp.json()
     except Exception as e:
-        log.warning("Failed to fetch Tidarr queue state: %s", e)
+        log.warning("Failed to fetch Tidarr queue state (legacy): %s", e)
     return None
 
 
-def _cleanup_stale_downloads(db_path: str, tidarr_state: dict | None):
-    """Mark stale download_queue entries as failed, and finished ones as complete."""
+def _cleanup_stale_downloads(db_path: str, tidarr_state: dict | None = None):
+    """Mark stale download_queue entries as failed, and finished ones as complete.
+    tidarr_state is optional legacy data from Tidarr queue API."""
     with get_db(db_path) as conn:
         # Mark entries stuck in 'downloading' for >30 minutes as failed
         stale = conn.execute(
@@ -746,7 +739,7 @@ def _cleanup_stale_downloads(db_path: str, tidarr_state: dict | None):
               AND updated_at < datetime('now', '-30 minutes')"""
         )
 
-    # If Tidarr reports items as finished, mark them complete in our queue
+    # If Tidarr reports items as finished (legacy), mark them complete in our queue
     if tidarr_state and tidarr_state.get("items"):
         finished_ids = set()
         for item in tidarr_state.get("items", []):
@@ -755,11 +748,11 @@ def _cleanup_stale_downloads(db_path: str, tidarr_state: dict | None):
                 if tid:
                     finished_ids.add(tid)
         if finished_ids:
-            log.info("Tidarr reports %d finished items", len(finished_ids))
+            log.info("Tidarr (legacy) reports %d finished items", len(finished_ids))
 
 
 def _count_tidarr_active_items(tidarr_state: dict | None) -> int:
-    """Count how many items are actively downloading/queued in Tidarr."""
+    """(Legacy) Count how many items are actively downloading/queued in Tidarr."""
     if not tidarr_state:
         return 0
     items = tidarr_state.get("items", [])
@@ -768,7 +761,7 @@ def _count_tidarr_active_items(tidarr_state: dict | None) -> int:
 
 
 def _download_track_via_tiddl(db_path: str, track: dict) -> str:
-    """Download a track using tiddl CLI directly, bypassing Tidarr's queue."""
+    """Download a track using tiddl CLI directly."""
     tidal_id = track.get("tidal_id")
     artist = track.get("artist", "Unknown Artist")
     title = track.get("title", "Unknown Track")
@@ -882,7 +875,7 @@ def _process_downloading(db_path: str):
     if sync_mode == "scan":
         return  # Scan mode: no downloads
 
-    # When tiddl is available, skip Tidarr health/queue checks entirely
+    # When tiddl is available, use it directly (primary path)
     if _TIDDL_AVAILABLE:
         _ensure_tidal_auth()
         _cleanup_stale_downloads(db_path, None)
@@ -908,27 +901,27 @@ def _process_downloading(db_path: str):
                 log_activity(db_path, "download_error", track["id"], f"Download attempt {attempts} failed: {e}")
         return
 
-    # --- Tidarr fallback path (when tiddl is not available) ---
+    # --- Legacy Tidarr fallback path (when tiddl is not available) ---
 
     # Auth/health check before batch
     try:
         with httpx.Client(timeout=5) as client:
             resp = client.get(f"{TIDARR_URL}/api/queue/status")
             if resp.status_code != 200:
-                log.warning("Tidarr not responding (HTTP %d), skipping download batch", resp.status_code)
+                log.warning("Tidarr (legacy) not responding (HTTP %d), skipping download batch", resp.status_code)
                 return
     except Exception as e:
-        log.warning("Tidarr unreachable (%s), skipping download batch", e)
+        log.warning("Tidarr (legacy) unreachable (%s), skipping download batch", e)
         return
 
     # Clean up stale queue entries every cycle
     tidarr_state = _get_tidarr_queue_state()
     _cleanup_stale_downloads(db_path, tidarr_state)
 
-    # Concurrency control: only submit if Tidarr has room
+    # Concurrency control: only submit if Tidarr (legacy) has room
     active_in_tidarr = _count_tidarr_active_items(tidarr_state)
     if active_in_tidarr >= 3:
-        log.info("Tidarr has %d active items, waiting for queue to drain", active_in_tidarr)
+        log.info("Tidarr (legacy) has %d active items, waiting for queue to drain", active_in_tidarr)
         return
 
     slots_available = 3 - active_in_tidarr
@@ -957,7 +950,7 @@ def _process_downloading(db_path: str):
 
 
 def _download_track(db_path: str, track: dict):
-    """Download a track — tries tiddl CLI first, falls back to Tidarr API."""
+    """Download a track — uses tiddl CLI (primary), with disabled legacy Tidarr fallback."""
     track_id = track["id"]
     tidal_id = track.get("tidal_id")
     artist = track.get("artist", "Unknown Artist")
@@ -1031,7 +1024,7 @@ def _download_track(db_path: str, track: dict):
                 (track_id,),
             )
 
-    download_source = "tidarr"  # default
+    download_source = "tiddl"  # default (was "tidarr" before tiddl migration)
     dest_path = None
 
     # === PRIMARY: tiddl CLI (direct, fast, no queue issues) ===
@@ -1047,14 +1040,14 @@ def _download_track(db_path: str, track: dict):
             dest_path = _download_track_via_tiddl(db_path, track)
             download_source = "tiddl"
         except Exception as tiddl_err:
-            log.warning("Track %d: tiddl failed (%s), falling back to Tidarr", track_id, tiddl_err)
+            log.warning("Track %d: tiddl failed (%s), checking legacy fallback", track_id, tiddl_err)
             with get_db(db_path) as conn:
                 conn.execute(
                     "UPDATE download_queue SET status='failed', error=? WHERE track_id=? AND status='downloading'",
                     (str(tiddl_err)[:500], track_id),
                 )
 
-    # === FALLBACK: Tidarr API (DISABLED — Tidarr queue hangs and blocks pipeline) ===
+    # === LEGACY FALLBACK: Tidarr API (DISABLED — Tidarr queue hangs and blocks pipeline) ===
     if not dest_path and not _TIDDL_AVAILABLE:
         with get_db(db_path) as conn:
             conn.execute(
@@ -1080,7 +1073,7 @@ def _download_track(db_path: str, track: dict):
                 }},
             )
             if resp.status_code not in (200, 201):
-                error_detail = f"Tidarr save failed: HTTP {resp.status_code} - {resp.text[:500]}"
+                error_detail = f"Tidarr (legacy) save failed: HTTP {resp.status_code} - {resp.text[:500]}"
                 with get_db(db_path) as conn:
                     conn.execute(
                         "UPDATE download_queue SET error = ? WHERE track_id = ? AND status = 'downloading'",
@@ -1162,8 +1155,8 @@ def _download_track(db_path: str, track: dict):
 
 
 def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval: int = 5) -> str | None:
-    """Wait for Tidarr to finish downloading a track by polling the item-specific output.
-    Returns the last Tidarr output text for debugging."""
+    """(Legacy) Wait for Tidarr to finish downloading a track by polling the item-specific output.
+    Returns the last output text for debugging."""
     start = time.time()
     time.sleep(8)  # Give Tidarr time to start and potentially finish the download
     last_output = None
@@ -1182,16 +1175,16 @@ def _wait_for_tidarr_download(tidal_id: str, max_wait: int = 300, poll_interval:
                         time.sleep(3)
                         return last_output
                     if "No file to process" in text:
-                        log.warning("Tidarr reports 'No file to process' for tidal_id=%s — possible auth issue", tidal_id)
+                        log.warning("Tidarr (legacy) reports 'No file to process' for tidal_id=%s — possible auth issue", tidal_id)
                         return last_output
                     if "error" in text.lower() or "fail" in text.lower():
-                        log.warning("Tidarr error for tidal_id=%s: %s", tidal_id, text[:300])
+                        log.warning("Tidarr (legacy) error for tidal_id=%s: %s", tidal_id, text[:300])
                         return last_output
         except Exception as e:
-            log.debug("Tidarr poll error for %s: %s", tidal_id, e)
+            log.debug("Tidarr (legacy) poll error for %s: %s", tidal_id, e)
         time.sleep(poll_interval)
 
-    log.warning("Tidarr download timed out after %ds for tidal_id=%s", max_wait, tidal_id)
+    log.warning("Tidarr (legacy) download timed out after %ds for tidal_id=%s", max_wait, tidal_id)
     return last_output
 
 
@@ -1202,7 +1195,7 @@ def _filename_similarity(candidate: str, target: str) -> float:
 
 def _find_downloaded_file_broad(artist: str, title: str) -> str | None:
     """Broad search across /music and /downloads for a file matching artist+title.
-    Used as a pre-check before submitting to Tidarr."""
+    Used as a pre-check before downloading."""
     downloads_dir = os.environ.get("DOWNLOADS_PATH", "/downloads")
     title_norm = _normalize_for_comparison(title)
     title_stripped = re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
