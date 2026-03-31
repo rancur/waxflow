@@ -117,15 +117,15 @@ class DownloadQueueItem(BaseModel):
 
 
 class DownloadStatsResponse(BaseModel):
-    total: int
+    total: int  # tracks that entered the download pipeline (excludes skipped)
     pending: int
     queued: int
     downloading: int
     complete: int
     failed: int
-    skipped: int = 0
+    skipped: int = 0  # tracks matched to existing library (never downloaded)
     avg_download_time_seconds: Optional[float] = None
-    estimated_remaining_seconds: Optional[float] = None
+    estimated_remaining_seconds: Optional[float] = None  # only set when actively downloading
     method: str = "tiddl"
     tiddl_available: bool = False
     tidarr_reachable: bool = False

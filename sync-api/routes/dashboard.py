@@ -9,8 +9,8 @@ from models import DashboardResponse, ServiceHealth
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
-LEXICON_API = os.environ.get("LEXICON_API_URL", "http://192.168.1.116:48624")
-TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")  # optional legacy fallback
+LEXICON_API = os.environ.get("LEXICON_API_URL", "http://localhost:48624")
+TIDARR_API = os.environ.get("TIDARR_URL", "http://localhost:8484")  # optional legacy fallback
 
 
 @router.get("/dashboard", response_model=DashboardResponse)

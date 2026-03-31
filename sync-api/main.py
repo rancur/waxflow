@@ -13,9 +13,9 @@ from routes.spotify import router as spotify_router
 from routes.tidal import router as tidal_router
 
 app = FastAPI(
-    title="Spotify-Lexicon Sync API",
-    description="Music library sync: Spotify Liked Songs to Lexicon DJ",
-    version="1.3.0",
+    title="WaxFlow API",
+    description="All your music, flowing home. Spotify Liked Songs to Lexicon DJ.",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -40,4 +40,4 @@ app.include_router(tidal_router)
 
 @app.get("/")
 async def root():
-    return {"service": "spotify-lexicon-sync", "version": "1.0.0"}
+    return {"service": "waxflow", "version": "2.0.0"}

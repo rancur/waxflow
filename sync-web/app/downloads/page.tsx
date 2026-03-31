@@ -237,12 +237,13 @@ export default function DownloadsPage() {
     setPage(1)
   }
 
-  // Compute progress percentage (complete + skipped = done)
+  // Progress: only tracks that entered the download pipeline (total excludes skipped)
   const progressPct = stats
     ? stats.total > 0
-      ? Math.round(((stats.complete + stats.skipped) / stats.total) * 100)
+      ? Math.round((stats.complete / stats.total) * 100)
       : 0
     : 0
+  const allDownloadsDone = stats ? stats.pending === 0 && stats.queued === 0 && stats.downloading === 0 : false
 
   const SortIcon = ({ col }: { col: string }) => {
     if (sortBy !== col) return <span className="text-slate-600 ml-1">&#x25B4;&#x25BE;</span>
@@ -288,13 +289,20 @@ export default function DownloadsPage() {
 
       {/* --- Top Section: Live Stats Bar --- */}
       <div className="space-y-3">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {/* Library Matched (skipped) */}
+          <div className="card text-center border-violet-500/20">
+            <p className="text-3xl font-bold text-violet-400 tabular-nums">
+              {stats?.skipped?.toLocaleString() ?? '-'}
+            </p>
+            <p className="text-xs text-slate-500 font-medium mt-1">Library Matched</p>
+          </div>
           {/* Queue */}
           <div className="card text-center border-amber-500/20">
             <p className="text-3xl font-bold text-amber-400 tabular-nums">
               {stats ? (stats.pending + stats.queued).toLocaleString() : '-'}
             </p>
-            <p className="text-xs text-slate-500 font-medium mt-1">Queue</p>
+            <p className="text-xs text-slate-500 font-medium mt-1">Queued</p>
           </div>
           {/* Downloading */}
           <div className="card text-center border-blue-500/20">
@@ -311,7 +319,7 @@ export default function DownloadsPage() {
             <p className="text-3xl font-bold text-emerald-400 tabular-nums">
               {stats?.complete?.toLocaleString() ?? '-'}
             </p>
-            <p className="text-xs text-slate-500 font-medium mt-1">Complete</p>
+            <p className="text-xs text-slate-500 font-medium mt-1">Downloaded</p>
           </div>
           {/* Failed */}
           <div className="card text-center border-red-500/20">
@@ -326,23 +334,34 @@ export default function DownloadsPage() {
         {stats && stats.total > 0 && (
           <div className="card !py-3">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-slate-400 font-medium">Overall Progress</span>
+              <span className="text-xs text-slate-400 font-medium">Download Progress</span>
               <span className="text-xs text-slate-400 tabular-nums">
-                {(stats.complete + stats.skipped).toLocaleString()} / {stats.total.toLocaleString()} ({progressPct}%)
-                {stats.skipped > 0 && <span className="text-slate-500"> ({stats.skipped.toLocaleString()} skipped)</span>}
+                {allDownloadsDone && stats.failed === 0 ? (
+                  <span className="text-emerald-400">All downloads complete</span>
+                ) : (
+                  <>{stats.complete.toLocaleString()} / {stats.total.toLocaleString()} ({progressPct}%)</>
+                )}
               </span>
             </div>
             <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full transition-all duration-500"
+                className={`h-full rounded-full transition-all duration-500 ${
+                  allDownloadsDone && stats.failed === 0
+                    ? 'bg-gradient-to-r from-emerald-500 to-emerald-400'
+                    : 'bg-gradient-to-r from-blue-500 to-emerald-400'
+                }`}
                 style={{ width: `${progressPct}%` }}
               />
             </div>
-            {stats.estimated_remaining_seconds && (
+            {stats.estimated_remaining_seconds ? (
               <p className="text-xs text-slate-500 mt-2 text-right">
                 Est. remaining: <span className="text-slate-300 tabular-nums">{formatDuration(stats.estimated_remaining_seconds)}</span>
               </p>
-            )}
+            ) : allDownloadsDone && stats.failed === 0 ? null : stats.downloading === 0 && (stats.pending + stats.queued) > 0 ? (
+              <p className="text-xs text-slate-500 mt-2 text-right">
+                {(stats.pending + stats.queued).toLocaleString()} tracks waiting &mdash; no active downloads
+              </p>
+            ) : null}
           </div>
         )}
       </div>

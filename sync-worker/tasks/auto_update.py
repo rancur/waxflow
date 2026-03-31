@@ -15,7 +15,7 @@ from tasks.helpers import get_db, get_config, set_config, log_activity
 
 log = logging.getLogger("worker.auto_update")
 
-GITHUB_REPO = "rancur/spotify-lexicon-sync"
+GITHUB_REPO = "rancur/waxflow"
 BACKUP_DIR = "/app/data/backups"
 SIGNAL_FILE = Path("/app/data/.update-requested")
 

@@ -11,3 +11,4 @@ dist/
 *.log
 venv/
 .venv/
+deploy-history.log

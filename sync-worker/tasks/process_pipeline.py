@@ -825,8 +825,8 @@ def _download_track_via_tiddl(db_path: str, track: dict) -> str:
         shutil.move(downloaded, dest)
 
         # Fix ownership to match PlexMediaServer UID/GID on NAS (configurable via Settings)
-        _PLEX_UID = int(get_config(db_path, "plex_uid") or "297536")
-        _PLEX_GID = int(get_config(db_path, "plex_gid") or "297536")
+        _PLEX_UID = int(get_config(db_path, "plex_uid") or "1000")
+        _PLEX_GID = int(get_config(db_path, "plex_gid") or "1000")
         try:
             os.chown(dest_dir, _PLEX_UID, _PLEX_GID)
             os.chown(dest, _PLEX_UID, _PLEX_GID)
@@ -1667,15 +1667,15 @@ def _organize_track(db_path: str, track: dict):
     global _playlist_cache, _playlist_cache_time
 
     # Read configurable paths from app_config (fall back to env/defaults)
-    lexicon_library_path = get_config(db_path, "lexicon_library_path") or "/Volumes/music/Database"
-    lexicon_input_path = get_config(db_path, "lexicon_input_path") or "/Volumes/music/Input"
+    lexicon_library_path = get_config(db_path, "lexicon_library_path") or "/music/library"
+    lexicon_input_path = get_config(db_path, "lexicon_input_path") or "/music/downloads"
     lexicon_api = get_config(db_path, "lexicon_api_url") or LEXICON_API_URL
     downloads_dir = get_config(db_path, "downloads_path") or os.environ.get("DOWNLOADS_PATH", "/downloads")
 
     with httpx.Client(base_url=lexicon_api, timeout=60) as client:
         # Map container paths to the path prefix Lexicon sees on the host Mac:
-        #   /music/...      -> <lexicon_library_path>/...   (e.g. /Volumes/music/Database)
-        #   /downloads/...  -> <lexicon_input_path>/...     (e.g. /Volumes/music/Input)
+        #   /music/...      -> <lexicon_library_path>/...   (e.g. /music/library)
+        #   /downloads/...  -> <lexicon_input_path>/...     (e.g. /music/downloads)
         if file_path.startswith(downloads_dir):
             relative_path = os.path.relpath(file_path, downloads_dir)
             mac_path = f"{lexicon_input_path}/{relative_path}"
@@ -1950,10 +1950,10 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db
     title_raw = track.get("title", "")
 
     # Build path prefixes to check (configurable + current library path)
-    lexicon_library_path = "/Volumes/music/Database/"
+    lexicon_library_path = "/music/library/"
     legacy_prefixes_str = ""
     if db_path:
-        lexicon_library_path = (get_config(db_path, "lexicon_library_path") or "/Volumes/music/Database").rstrip("/") + "/"
+        lexicon_library_path = (get_config(db_path, "lexicon_library_path") or "/music/library").rstrip("/") + "/"
         legacy_prefixes_str = get_config(db_path, "lexicon_legacy_path_prefixes") or ""
     path_prefixes = [lexicon_library_path]
     for p in legacy_prefixes_str.split(","):

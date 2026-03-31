@@ -1,21 +1,37 @@
 #!/bin/bash
-# Self-healing monitor for Spotify-Lexicon Sync
-# Runs every 30 minutes via LaunchAgent
+# Self-healing monitor for WaxFlow
+# Runs every 30 minutes via cron or systemd timer
 # Detects issues and dispatches fixes automatically
 
 set -euo pipefail
 
-API_URL="http://192.168.1.221:8402"
-LEXICON_URL="http://192.168.1.116:48624"
-TIDARR_URL="http://192.168.1.221:8484"  # optional: legacy Tidarr service check
-LOG_FILE="${HOME}/.openclaw/logs/sls-monitor.log"
-STATE_FILE="${HOME}/.openclaw/logs/sls-monitor-state.json"
-COOLDOWN_FILE="${HOME}/.openclaw/logs/sls-monitor-cooldown.json"
-DEPLOY_SCRIPT="${HOME}/spotify-lexicon-sync/scripts/deploy-to-nas.sh"
+# Configure these for your environment
+API_URL="${WAXFLOW_API_URL:-http://localhost:8402}"
+LEXICON_URL="${WAXFLOW_LEXICON_URL:-http://localhost:48624}"
+TIDARR_URL="${WAXFLOW_TIDARR_URL:-http://localhost:8484}"  # optional: legacy Tidarr service check
+LOG_FILE="${WAXFLOW_LOG_DIR:-${HOME}/.waxflow/logs}/sls-monitor.log"
+STATE_FILE="${WAXFLOW_LOG_DIR:-${HOME}/.waxflow/logs}/sls-monitor-state.json"
+COOLDOWN_FILE="${WAXFLOW_LOG_DIR:-${HOME}/.waxflow/logs}/sls-monitor-cooldown.json"
+DEPLOY_SCRIPT="${WAXFLOW_DIR:-${HOME}/waxflow}/scripts/deploy-to-nas.sh"
+
+# SSH host for remote Docker commands (set to empty to use local docker)
+REMOTE_HOST="${WAXFLOW_REMOTE_HOST:-}"
+# Remote project path (only used if REMOTE_HOST is set)
+REMOTE_PATH="${WAXFLOW_REMOTE_PATH:-/opt/waxflow}"
+DOCKER_CMD="${WAXFLOW_DOCKER_CMD:-docker}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
+
+# Helper: run command locally or on remote host
+remote_exec() {
+    if [ -n "$REMOTE_HOST" ]; then
+        ssh -o ConnectTimeout=5 "$REMOTE_HOST" "$@"
+    else
+        eval "$@"
+    fi
+}
 
 # Cooldown: don't repeat the same fix within 2 hours
 check_cooldown() {
@@ -53,7 +69,7 @@ if [ -z "$DASHBOARD" ] || [ "$DASHBOARD" = "" ]; then
     # Try to restart containers
     if check_cooldown "restart_containers"; then
         log "ACTION: Restarting sync containers"
-        ssh -o ConnectTimeout=5 nas "cd /volume1/homes/willcurran/spotify-lexicon-sync && /usr/local/bin/docker compose restart" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_containers"
     fi
     exit 1
@@ -76,12 +92,12 @@ log "CHECK: parity=$SYNCED/$TOTAL ($PCT%) errors=$ERRORS downloading=$DOWNLOADIN
 
 # ===== CHECK SERVICES =====
 LEXICON_OK=$(curl -s --connect-timeout 5 "$LEXICON_URL/v1/playlists" 2>/dev/null | python3 -c "import json,sys; print('ok' if 'data' in json.loads(sys.stdin.read()) else 'error')" 2>/dev/null || echo "error")
-# Tidarr check is optional — downloads now use tiddl CLI directly
+# Tidarr check is optional -- downloads now use tiddl CLI directly
 TIDARR_OK=$(curl -s --connect-timeout 5 "$TIDARR_URL/api/queue/status" 2>/dev/null | python3 -c "import json,sys; json.loads(sys.stdin.read()); print('ok')" 2>/dev/null || echo "unavailable")
-WORKER_STATUS=$(ssh -o ConnectTimeout=3 nas "/usr/local/bin/docker ps --filter name=sync-worker --format '{{.Status}}'" 2>/dev/null || echo "unknown")
+WORKER_STATUS=$(remote_exec "$DOCKER_CMD ps --filter name=sync-worker --format '{{.Status}}'" 2>/dev/null || echo "unknown")
 
 # ===== CHECK: Worker health endpoint =====
-WORKER_HEALTH=$(curl -s --connect-timeout 5 http://192.168.1.221:8403/health 2>/dev/null)
+WORKER_HEALTH=$(curl -s --connect-timeout 5 "${API_URL%:8402}:8403/health" 2>/dev/null)
 WORKER_HEALTH_STATUS=$(echo "$WORKER_HEALTH" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('status','unknown'))" 2>/dev/null || echo "unreachable")
 
 log "SERVICES: lexicon=$LEXICON_OK tidal_legacy=$TIDARR_OK worker=$WORKER_STATUS worker_health=$WORKER_HEALTH_STATUS"
@@ -90,7 +106,7 @@ log "SERVICES: lexicon=$LEXICON_OK tidal_legacy=$TIDARR_OK worker=$WORKER_STATUS
 if [ "$WORKER_HEALTH_STATUS" = "stalled" ] || [ "$WORKER_HEALTH_STATUS" = "unreachable" ]; then
     if check_cooldown "restart_worker_health"; then
         log "ACTION: Worker stalled/unreachable (health=$WORKER_HEALTH_STATUS), restarting"
-        ssh -o ConnectTimeout=5 nas "cd /volume1/homes/willcurran/spotify-lexicon-sync && /usr/local/bin/docker compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_worker_health"
     fi
 fi
@@ -99,13 +115,13 @@ fi
 if echo "$WORKER_STATUS" | grep -qiE "exited|dead|created" || [ "$WORKER_STATUS" = "unknown" ]; then
     if check_cooldown "restart_worker"; then
         log "ACTION: Worker down, restarting"
-        ssh -o ConnectTimeout=5 nas "cd /volume1/homes/willcurran/spotify-lexicon-sync && /usr/local/bin/docker compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_worker"
     fi
 fi
 
 # ===== CHECK: Tidal auth status (reads from legacy Tidarr config path) =====
-TIDARR_AUTH=$(ssh -o ConnectTimeout=3 nas "/usr/local/bin/docker exec tidarr cat /shared/.tiddl/auth.json 2>/dev/null" 2>/dev/null | python3 -c "
+TIDARR_AUTH=$(remote_exec "$DOCKER_CMD exec tidarr cat /shared/.tiddl/auth.json 2>/dev/null" 2>/dev/null | python3 -c "
 import json,sys,time
 try:
     d=json.loads(sys.stdin.read())
@@ -134,7 +150,7 @@ print(count)
 
 if [ "$DL_FAILED" -gt 10 ] && check_cooldown "reset_dl_failed"; then
     log "ACTION: Resetting $DL_FAILED download-failed tracks"
-    ssh -o ConnectTimeout=5 nas "/usr/local/bin/docker exec sync-api python3 -c \"
+    remote_exec "$DOCKER_CMD exec sync-api python3 -c \"
 import sqlite3
 conn = sqlite3.connect('/app/data/sync.db')
 conn.execute('PRAGMA journal_mode=WAL')
@@ -157,7 +173,7 @@ import json,sys
 print(0)
 " 2>/dev/null || echo "0")
 
-ssh -o ConnectTimeout=5 nas "/usr/local/bin/docker exec sync-api python3 -c \"
+remote_exec "$DOCKER_CMD exec sync-api python3 -c \"
 import sqlite3
 conn = sqlite3.connect('/app/data/sync.db')
 count = conn.execute('''SELECT COUNT(*) FROM tracks
@@ -173,8 +189,8 @@ else:
 conn.close()
 \"" >> "$LOG_FILE" 2>&1 || true
 
-# ===== CHECK: Tidarr /music symlink (legacy — only relevant if Tidarr still running) =====
-SYMLINK_OK=$(ssh -o ConnectTimeout=3 nas "/usr/local/bin/docker exec tidarr ls /music/tracks 2>/dev/null && echo ok || echo missing" 2>/dev/null || echo "unknown")
+# ===== CHECK: Tidarr /music symlink (legacy -- only relevant if Tidarr still running) =====
+SYMLINK_OK=$(remote_exec "$DOCKER_CMD exec tidarr ls /music/tracks 2>/dev/null && echo ok || echo missing" 2>/dev/null || echo "unknown")
 if [ "$SYMLINK_OK" = "missing" ] && check_cooldown "fix_tidarr_mount"; then
     log "INFO: Tidarr /music mount missing (legacy check, non-critical)"
     set_cooldown "fix_tidarr_mount"
@@ -187,7 +203,7 @@ if [ -f "$STATE_FILE" ]; then
         log "WARNING: Pipeline may be stalled (no progress since last check)"
         if check_cooldown "restart_stalled"; then
             log "ACTION: Restarting worker to unstick pipeline"
-            ssh -o ConnectTimeout=5 nas "cd /volume1/homes/willcurran/spotify-lexicon-sync && /usr/local/bin/docker compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+            remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
             set_cooldown "restart_stalled"
         fi
     fi

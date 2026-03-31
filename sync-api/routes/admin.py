@@ -209,7 +209,7 @@ async def check_update():
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
-                "https://api.github.com/repos/rancur/spotify-lexicon-sync/releases/latest"
+                "https://api.github.com/repos/rancur/waxflow/releases/latest"
             )
             if resp.status_code == 200:
                 data = resp.json()

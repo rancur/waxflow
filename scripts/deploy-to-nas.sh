@@ -1,14 +1,14 @@
 #!/bin/bash
-# Deploy updates from Mac Mini to NAS
+# Deploy updates to a remote Docker host (e.g., NAS)
 # Usage: ./scripts/deploy-to-nas.sh
-# Can be installed as LaunchAgent or called manually
+# Can be called manually or from CI/CD
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-NAS_HOST="nas"  # SSH alias
-NAS_PATH="/volume1/homes/willcurran/spotify-lexicon-sync"
+REMOTE_HOST="${WAXFLOW_REMOTE_HOST:-nas}"  # SSH alias or hostname
+REMOTE_PATH="${WAXFLOW_REMOTE_PATH:-/opt/waxflow}"
 DEPLOY_LOG="$REPO_DIR/deploy-history.log"
 
 cd "$REPO_DIR"
@@ -18,15 +18,15 @@ VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0")
 GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 echo "[deploy] Version: $VERSION (SHA: $GIT_SHA)"
-echo "[deploy] Syncing files to NAS..."
+echo "[deploy] Syncing files to remote host..."
 tar czf - --exclude='.next' --exclude='node_modules' --exclude='.env' --exclude='*.db' --exclude='.git' --exclude='__pycache__' . \
-    | ssh "$NAS_HOST" "cd $NAS_PATH && tar xzf -"
+    | ssh "$REMOTE_HOST" "cd $REMOTE_PATH && tar xzf -"
 
-echo "[deploy] Rebuilding containers on NAS (VERSION=$VERSION, GIT_SHA=$GIT_SHA)..."
-ssh "$NAS_HOST" "cd $NAS_PATH && VERSION=$VERSION GIT_SHA=$GIT_SHA /usr/local/bin/docker compose build --build-arg GIT_SHA=$GIT_SHA && VERSION=$VERSION /usr/local/bin/docker compose up -d" 2>&1
+echo "[deploy] Rebuilding containers on remote host (VERSION=$VERSION, GIT_SHA=$GIT_SHA)..."
+ssh "$REMOTE_HOST" "cd $REMOTE_PATH && VERSION=$VERSION GIT_SHA=$GIT_SHA docker compose build --build-arg GIT_SHA=$GIT_SHA && VERSION=$VERSION docker compose up -d" 2>&1
 
 echo "[deploy] Done."
-ssh "$NAS_HOST" "/usr/local/bin/docker ps --filter name=sync --format 'table {{.Names}}\t{{.Status}}'"
+ssh "$REMOTE_HOST" "docker ps --filter name=sync --format 'table {{.Names}}\t{{.Status}}'"
 
 # Log deployment
 echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') v$VERSION ($GIT_SHA)" >> "$DEPLOY_LOG"

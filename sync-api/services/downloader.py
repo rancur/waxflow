@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from db import get_db
 
-TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")  # optional legacy fallback
+TIDARR_API = os.environ.get("TIDARR_URL", "http://localhost:8484")  # optional legacy fallback
 MUSIC_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/music")
 
 

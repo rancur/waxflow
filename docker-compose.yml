@@ -7,21 +7,22 @@ services:
       dockerfile: sync-api/Dockerfile
       args:
         - GIT_SHA=${GIT_SHA:-unknown}
-    image: spotify-lexicon-sync-api:${VERSION:-latest}
-    container_name: sync-api
+    image: waxflow-api:${VERSION:-latest}
+    container_name: waxflow-api
     ports:
       - "8402:8402"
     volumes:
       - sync-data:/app/data
-      - /volume1/music/Database:/music
+      # Mount your music library directory (e.g., /path/to/music/library)
+      - ${MUSIC_HOST_PATH:-./music}:/music
       # - ./.git:/app/.git:ro  # Optional: mount for version info
     environment:
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8400,http://192.168.1.221:8400}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8400}
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
-      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://192.168.1.221:8402/api/spotify/callback}
-      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}  # optional: only for legacy Tidarr fallback
-      - LEXICON_API_URL=${LEXICON_API_URL:-http://192.168.1.116:48624}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://localhost:8402/api/spotify/callback}
+      - TIDARR_URL=${TIDARR_URL:-http://localhost:8484}  # optional: only for legacy Tidarr fallback
+      - LEXICON_API_URL=${LEXICON_API_URL:-http://localhost:48624}
       - MUSIC_LIBRARY_PATH=/music
       - SLS_DB_PATH=/app/data/sync.db
     restart: unless-stopped
@@ -37,21 +38,24 @@ services:
       context: ./sync-worker
       args:
         - GIT_SHA=${GIT_SHA:-unknown}
-    image: spotify-lexicon-sync-worker:${VERSION:-latest}
-    container_name: sync-worker
+    image: waxflow-worker:${VERSION:-latest}
+    container_name: waxflow-worker
     ports:
       - "8403:8403"
     volumes:
       - sync-data:/app/data
-      - /volume1/music/Database:/music
-      - /volume1/music/Input:/downloads
-      - /volume1/PlexMediaServer/tidarr/config/.tiddl/auth.json:/tiddl-auth/auth.json:ro  # Tidal auth (legacy path from Tidarr config)
+      # Mount your music library directory (same as sync-api)
+      - ${MUSIC_HOST_PATH:-./music}:/music
+      # Mount your downloads/input directory
+      - ${DOWNLOADS_HOST_PATH:-./downloads}:/downloads
+      # Tidal auth file (optional -- only if using legacy Tidarr config)
+      # - /path/to/tiddl/auth.json:/tiddl-auth/auth.json:ro
     environment:
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
-      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://192.168.1.221:8402/api/spotify/callback}
-      - TIDARR_URL=${TIDARR_URL:-http://192.168.1.221:8484}  # optional: only for legacy Tidarr fallback
-      - LEXICON_API_URL=${LEXICON_API_URL:-http://192.168.1.116:48624}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://localhost:8402/api/spotify/callback}
+      - TIDARR_URL=${TIDARR_URL:-http://localhost:8484}  # optional: only for legacy Tidarr fallback
+      - LEXICON_API_URL=${LEXICON_API_URL:-http://localhost:48624}
       - MUSIC_LIBRARY_PATH=/music
       - SLS_DB_PATH=/app/data/sync.db
       - TIDDL_PATH=/tiddl-config
@@ -71,14 +75,14 @@ services:
       context: ./sync-web
       args:
         - GIT_SHA=${GIT_SHA:-unknown}
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.221:8402}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8402}
         - INTERNAL_API_URL=http://sync-api:8402
-    image: spotify-lexicon-sync-web:${VERSION:-latest}
-    container_name: sync-web
+    image: waxflow-web:${VERSION:-latest}
+    container_name: waxflow-web
     ports:
       - "8400:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.221:8402}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8402}
       - INTERNAL_API_URL=http://sync-api:8402
     depends_on:
       - sync-api

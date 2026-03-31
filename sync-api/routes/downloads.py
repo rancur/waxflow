@@ -229,13 +229,15 @@ async def download_stats():
     try:
         with get_db() as conn:
             # Use tracks table as source of truth (download_queue has stale legacy entries)
-            total = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
             pending = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'pending'").fetchone()[0]
             queued = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'queued'").fetchone()[0]
             downloading = conn.execute("SELECT COUNT(*) FROM tracks WHERE pipeline_stage = 'downloading'").fetchone()[0]
             complete = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'complete'").fetchone()[0]
             failed = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'failed'").fetchone()[0]
             skipped = conn.execute("SELECT COUNT(*) FROM tracks WHERE download_status = 'skipped'").fetchone()[0]
+
+            # Total = only tracks that entered the download pipeline (not skipped/library-matched)
+            total = pending + queued + downloading + complete + failed
 
             avg_row = conn.execute(
                 """SELECT AVG(
@@ -246,8 +248,12 @@ async def download_stats():
             ).fetchone()
             avg_time = round(avg_row["avg_time"], 1) if avg_row and avg_row["avg_time"] else None
 
-            remaining_count = pending + queued + downloading
-            estimated_remaining = round(avg_time * remaining_count, 1) if avg_time and remaining_count else None
+            # Only show ETA when something is actively downloading
+            if downloading > 0:
+                remaining_count = pending + queued + downloading
+                estimated_remaining = round(avg_time * remaining_count, 1) if avg_time and remaining_count else None
+            else:
+                estimated_remaining = None
 
         # Check tiddl availability
         tiddl_available = shutil.which("tiddl") is not None

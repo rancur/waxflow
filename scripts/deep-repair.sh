@@ -1,12 +1,12 @@
 #!/bin/bash
-# Deep repair: runs every 6 hours via OpenClaw cron
-# Dispatches a Claude Code session to analyze and fix issues
+# Deep repair: runs periodically to analyze and fix pipeline issues
+# Can be integrated with any external repair/alerting system
 
 set -euo pipefail
 
-API_URL="http://192.168.1.221:8402"
-LOG_FILE="${HOME}/.openclaw/logs/sls-deep-repair.log"
-STATE_FILE="${HOME}/.openclaw/logs/sls-monitor-state.json"
+API_URL="${WAXFLOW_API_URL:-http://localhost:8402}"
+LOG_FILE="${WAXFLOW_LOG_DIR:-${HOME}/.waxflow/logs}/sls-deep-repair.log"
+STATE_FILE="${WAXFLOW_LOG_DIR:-${HOME}/.waxflow/logs}/sls-monitor-state.json"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
@@ -48,11 +48,9 @@ if [ "$ERRORS" -gt 300 ]; then
 fi
 
 if [ "$NEEDS_REPAIR" = true ]; then
-    log "DISPATCHING REPAIR: $REASON"
-    # Dispatch Claude Code via cc-spawn for deep analysis
-    if command -v openclaw &> /dev/null; then
-        openclaw agent --agent repair --message "REPAIR REQUEST from sls-deep-repair. Spotify-Lexicon Sync issues: $REASON. Project at ~/spotify-lexicon-sync. API at $API_URL. Check pipeline, fix errors, deploy. Logs at ~/.openclaw/logs/sls-monitor.log" >> "$LOG_FILE" 2>&1 || true
-    fi
+    log "REPAIR NEEDED: $REASON"
+    # Hook: Add your alerting/repair dispatch here
+    # Example: curl -X POST your-webhook-url -d "{\"reason\": \"$REASON\"}"
 else
     log "All clear, no repair needed"
 fi

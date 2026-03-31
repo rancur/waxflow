@@ -104,7 +104,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className="dark">
       <head>
-        <title>Spotify / Lexicon Sync</title>
+        <title>WaxFlow</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         {/* favicon placeholder */}
       </head>
@@ -132,9 +132,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
             <div>
               <h1 className="text-sm font-bold text-slate-100 tracking-tight">
-                Spotify <span className="text-emerald-400">&#8596;</span> Lexicon
+                WaxFlow
               </h1>
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest">Sync Engine</p>
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">All your music, flowing home.</p>
             </div>
           </div>
 
@@ -184,7 +184,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </svg>
             </button>
             <span className="text-sm font-semibold text-slate-200">
-              Spotify <span className="text-emerald-400">&#8596;</span> Lexicon Sync
+              WaxFlow
             </span>
           </div>
 

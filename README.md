@@ -1,8 +1,8 @@
-# :headphones: spotify-lexicon-sync
+# :headphones: WaxFlow
 
-**Sync your Spotify Liked Songs to Lexicon DJ with lossless FLAC downloads from Tidal.**
+**All your music, flowing home. Sync your Spotify Liked Songs to Lexicon DJ with lossless FLAC downloads from Tidal.**
 
-![Version](https://img.shields.io/badge/version-v1.3.0-blue)
+![Version](https://img.shields.io/badge/version-v2.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Parity](https://img.shields.io/badge/parity-tracking-orange)
 
@@ -110,8 +110,8 @@ Spotify API --> sync-worker --> [Scan Library] --> [Match via Tidal] --> [Downlo
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/your-org/spotify-lexicon-sync.git
-cd spotify-lexicon-sync
+git clone https://github.com/rancur/waxflow.git
+cd waxflow
 ```
 
 ### 2. Configure environment
@@ -159,7 +159,7 @@ All settings are configurable from the **Settings** page in the web UI. Key sett
 | Poll Interval | How often to check Spotify for new liked songs | Configurable |
 | Download Quality | Tidal download quality | `master` (FLAC) |
 | Music Library Path | Path to your music library (inside container) | `/music` |
-| Lexicon API URL | Lexicon DJ REST API endpoint | `http://192.168.1.116:48624` |
+| Lexicon API URL | Lexicon DJ REST API endpoint | `http://localhost:48624` |
 
 ---
 
@@ -228,15 +228,15 @@ volumes:
 |----------|-------------|---------|
 | `SPOTIFY_CLIENT_ID` | Spotify Developer App client ID | *required* |
 | `SPOTIFY_CLIENT_SECRET` | Spotify Developer App client secret | *required* |
-| `SPOTIFY_REDIRECT_URI` | OAuth callback URL | `http://192.168.1.221:8402/api/spotify/callback` |
-| `LEXICON_API_URL` | Lexicon DJ REST API base URL | `http://192.168.1.116:48624` |
-| `NEXT_PUBLIC_API_URL` | Public API URL for the web frontend | `http://192.168.1.221:8402` |
+| `SPOTIFY_REDIRECT_URI` | OAuth callback URL | `http://localhost:8402/api/spotify/callback` |
+| `LEXICON_API_URL` | Lexicon DJ REST API base URL | `http://localhost:48624` |
+| `NEXT_PUBLIC_API_URL` | Public API URL for the web frontend | `http://localhost:8402` |
 | `INTERNAL_API_URL` | Internal Docker network API URL | `http://sync-api:8402` |
-| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | `http://localhost:8400,http://192.168.1.221:8400` |
+| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | `http://localhost:8400,http://localhost:8400` |
 | `MUSIC_LIBRARY_PATH` | Music library path inside container | `/music` |
 | `SLS_DB_PATH` | SQLite database path | `/app/data/sync.db` |
 | `SLS_HEALTH_PORT` | Worker health check port | `8403` |
-| `TIDARR_URL` | Legacy Tidarr fallback URL (optional) | `http://192.168.1.221:8484` |
+| `TIDARR_URL` | Legacy Tidarr fallback URL (optional) | `http://localhost:8484` |
 | `TIDDL_PATH` | tiddl config directory | `/tiddl-config` |
 
 ---

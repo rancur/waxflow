@@ -1,5 +1,5 @@
 """
-Spotify-Lexicon Sync Worker
+WaxFlow Worker
 Async pipeline: poll Spotify -> match -> download -> verify -> sync to Lexicon.
 Runs as standalone asyncio event loop with scheduled tasks.
 """

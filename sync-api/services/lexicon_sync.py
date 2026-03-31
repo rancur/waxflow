@@ -6,7 +6,7 @@ import httpx
 
 from db import get_db
 
-LEXICON_API = os.environ.get("LEXICON_API_URL", "http://192.168.1.116:48624")
+LEXICON_API = os.environ.get("LEXICON_API_URL", "http://localhost:48624")
 
 
 class LexiconSyncService:

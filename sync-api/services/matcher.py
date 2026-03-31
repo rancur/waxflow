@@ -4,7 +4,7 @@ import httpx
 
 from db import get_db
 
-TIDARR_API = os.environ.get("TIDARR_URL", "http://192.168.1.221:8484")  # optional legacy fallback
+TIDARR_API = os.environ.get("TIDARR_URL", "http://localhost:8484")  # optional legacy fallback
 
 
 class MatcherService:

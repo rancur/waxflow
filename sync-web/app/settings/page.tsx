@@ -405,7 +405,7 @@ export default function SettingsPage() {
               <input
                 type="text"
                 className="input-field w-full"
-                placeholder="http://192.168.1.116:48624"
+                placeholder="http://localhost:48624"
                 value={settings.lexicon_api_url || ''}
                 onChange={(e) => updateSetting('lexicon_api_url', e.target.value)}
               />
@@ -415,7 +415,7 @@ export default function SettingsPage() {
               <input
                 type="text"
                 className="input-field w-full"
-                placeholder="/Volumes/music/Database"
+                placeholder="/music/library"
                 value={settings.lexicon_library_path || ''}
                 onChange={(e) => updateSetting('lexicon_library_path', e.target.value)}
               />
@@ -425,7 +425,7 @@ export default function SettingsPage() {
               <input
                 type="text"
                 className="input-field w-full"
-                placeholder="/Volumes/music/Input"
+                placeholder="/music/downloads"
                 value={settings.lexicon_input_path || ''}
                 onChange={(e) => updateSetting('lexicon_input_path', e.target.value)}
               />
@@ -512,7 +512,7 @@ export default function SettingsPage() {
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">SynologyDrive Sync Delay (sec)</label>
+            <label className="block text-xs text-slate-500 mb-1">NAS Sync Delay (sec)</label>
             <input
               type="number"
               min="0"
@@ -566,14 +566,14 @@ export default function SettingsPage() {
                   type="number"
                   className="input-field w-full"
                   placeholder="UID"
-                  value={settings.plex_uid || '297536'}
+                  value={settings.plex_uid || '1000'}
                   onChange={(e) => updateSetting('plex_uid', e.target.value)}
                 />
                 <input
                   type="number"
                   className="input-field w-full"
                   placeholder="GID"
-                  value={settings.plex_gid || '297536'}
+                  value={settings.plex_gid || '1000'}
                   onChange={(e) => updateSetting('plex_gid', e.target.value)}
                 />
               </div>
@@ -583,7 +583,7 @@ export default function SettingsPage() {
               <input
                 type="text"
                 className="input-field w-full"
-                placeholder="/Volumes/Macintosh HD/Users/user/Music/Database/,/Users/user/Music/Database/"
+                placeholder="Comma-separated legacy path prefixes (optional)"
                 value={settings.lexicon_legacy_path_prefixes || ''}
                 onChange={(e) => updateSetting('lexicon_legacy_path_prefixes', e.target.value)}
               />

@@ -373,8 +373,8 @@ def _patch_lexicon_track(db_path: str, lexicon_track_id: str, edits: dict) -> bo
 
 def _lexicon_path_to_local(db_path: str, lexicon_location: str) -> str | None:
     """Convert a Lexicon file path (Mac host path) to a container-local path."""
-    lexicon_library_path = get_config(db_path, "lexicon_library_path") or "/Volumes/music/Database"
-    lexicon_input_path = get_config(db_path, "lexicon_input_path") or "/Volumes/music/Input"
+    lexicon_library_path = get_config(db_path, "lexicon_library_path") or "/music/library"
+    lexicon_input_path = get_config(db_path, "lexicon_input_path") or "/music/downloads"
     music_library_path = os.environ.get("MUSIC_LIBRARY_PATH", "/music")
     downloads_path = os.environ.get("DOWNLOADS_PATH", "/downloads")
 
