@@ -170,6 +170,10 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {/* ================================================================ */}
+      {/* CONNECTIONS                                                       */}
+      {/* ================================================================ */}
+
       {/* Spotify Connection */}
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Spotify Connection</h2>
@@ -271,7 +275,10 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Service Health */}
+      {/* ================================================================ */}
+      {/* SERVICE HEALTH                                                    */}
+      {/* ================================================================ */}
+
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Service Health</h2>
         <div className="space-y-3">
@@ -303,21 +310,21 @@ export default function SettingsPage() {
             </span>
           </div>
 
-          {/* Tidal Downloader (optional) */}
+          {/* Tidarr */}
           {(() => {
-            const tidal = dashboard?.services?.find((s: any) => s.name === 'tidal')
-            const tidalUrl = settings.tidarr_url || 'http://192.168.1.221:8484'
+            const tidarr = dashboard?.services?.find((s: any) => s.name === 'tidarr')
+            const tidarrUrl = settings.tidarr_url || 'http://192.168.1.221:8484'
             return (
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className={`w-2.5 h-2.5 rounded-full ${tidal?.status === 'ok' ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-                  <span className="text-sm text-slate-300">Tidal Downloader</span>
-                  <span className="text-xs text-slate-600 font-mono">{tidalUrl}</span>
+                  <div className={`w-2.5 h-2.5 rounded-full ${tidarr?.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                  <span className="text-sm text-slate-300">Tidarr</span>
+                  <span className="text-xs text-slate-600 font-mono">{tidarrUrl}</span>
                 </div>
                 <span className="text-xs text-slate-500">
-                  {tidal?.status === 'ok'
-                    ? `Connected (${tidal.latency_ms}ms)`
-                    : 'Optional'}
+                  {tidarr?.status === 'ok'
+                    ? `Connected (${tidarr.latency_ms}ms)`
+                    : tidarr?.error || 'Unknown'}
                 </span>
               </div>
             )
@@ -372,7 +379,10 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Sync Mode */}
+      {/* ================================================================ */}
+      {/* SYNC MODE                                                         */}
+      {/* ================================================================ */}
+
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Sync Mode</h2>
         <div className="flex items-center justify-between">
@@ -397,58 +407,270 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Configuration */}
+      {/* ================================================================ */}
+      {/* LIBRARY PATHS                                                     */}
+      {/* ================================================================ */}
+
       <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Configuration</h2>
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Library Paths</h2>
+        <p className="text-xs text-slate-500 mb-4">
+          Paths that map between the Docker container and the Lexicon host machine.
+        </p>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Lexicon Library Path</label>
+            <input
+              type="text"
+              className="input-field w-full"
+              placeholder="/Volumes/music/Database"
+              value={settings.lexicon_library_path || '/Volumes/music/Database'}
+              onChange={(e) => updateSetting('lexicon_library_path', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              The path where Lexicon sees the main music library (e.g. NAS SMB mount on the Mac).
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Lexicon Input Path</label>
+            <input
+              type="text"
+              className="input-field w-full"
+              placeholder="/Volumes/music/Input"
+              value={settings.lexicon_input_path || '/Volumes/music/Input'}
+              onChange={(e) => updateSetting('lexicon_input_path', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              The path where Lexicon sees the downloads/input folder.
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Music Library Path (container)</label>
+            <input
+              type="text"
+              className="input-field w-full"
+              placeholder="/music"
+              value={settings.music_library_path || '/music'}
+              onChange={(e) => updateSetting('music_library_path', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              Path to the music library inside the Docker container.
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Downloads Path (container)</label>
+            <input
+              type="text"
+              className="input-field w-full"
+              placeholder="/downloads"
+              value={settings.downloads_path || '/downloads'}
+              onChange={(e) => updateSetting('downloads_path', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              Path to the downloads folder inside the Docker container.
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Legacy Path Prefixes</label>
+            <input
+              type="text"
+              className="input-field w-full"
+              placeholder="/Volumes/Macintosh HD/Users/user/Music/Database/,/Users/user/Music/Database/"
+              value={settings.lexicon_legacy_path_prefixes || ''}
+              onChange={(e) => updateSetting('lexicon_legacy_path_prefixes', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              Comma-separated list of old path prefixes Lexicon may have stored. Used for matching tracks imported under a previous path layout.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* SERVICE URLS                                                      */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Service URLs</h2>
+        <p className="text-xs text-slate-500 mb-4">
+          Override the default service endpoints. Leave empty to use the environment variable or built-in default.
+        </p>
         <div className="grid md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Poll Interval (seconds)</label>
+            <label className="block text-xs text-slate-500 mb-1">Lexicon API URL</label>
             <input
-              type="number"
-              className="input-field"
-              value={settings.spotify_poll_interval_seconds || '300'}
-              onChange={(e) => updateSetting('spotify_poll_interval_seconds', e.target.value)}
+              type="text"
+              className="input-field w-full"
+              placeholder="http://192.168.1.116:48624"
+              value={settings.lexicon_api_url || ''}
+              onChange={(e) => updateSetting('lexicon_api_url', e.target.value)}
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Fingerprint Min Score</label>
+            <label className="block text-xs text-slate-500 mb-1">Tidarr URL</label>
             <input
-              type="number"
-              step="0.01"
-              className="input-field"
-              value={settings.fingerprint_min_score || '0.85'}
-              onChange={(e) => updateSetting('fingerprint_min_score', e.target.value)}
+              type="text"
+              className="input-field w-full"
+              placeholder="http://tidarr:8484"
+              value={settings.tidarr_url || ''}
+              onChange={(e) => updateSetting('tidarr_url', e.target.value)}
             />
+          </div>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* DOWNLOAD SETTINGS                                                 */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Download Settings</h2>
+        <div className="grid md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Tidal Download Quality</label>
+            <select
+              className="select-field w-full"
+              value={settings.tidal_download_quality || 'max'}
+              onChange={(e) => updateSetting('tidal_download_quality', e.target.value)}
+            >
+              <option value="low">Low</option>
+              <option value="normal">Normal</option>
+              <option value="high">High</option>
+              <option value="max">Max (Master/FLAC)</option>
+            </select>
+            <p className="text-xs text-slate-600 mt-1">
+              Audio quality for Tidal downloads via tiddl.
+            </p>
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Max Concurrent Downloads</label>
             <input
               type="number"
-              className="input-field"
+              min="1"
+              max="10"
+              className="input-field w-full"
               value={settings.max_concurrent_downloads || '2'}
               onChange={(e) => updateSetting('max_concurrent_downloads', e.target.value)}
             />
+            <p className="text-xs text-slate-600 mt-1">
+              How many tracks to download in parallel.
+            </p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Backup Before Sync</label>
-            <select
-              className="select-field w-full"
-              value={settings.lexicon_backup_before_sync || '1'}
-              onChange={(e) => updateSetting('lexicon_backup_before_sync', e.target.value)}
-            >
-              <option value="1">Enabled</option>
-              <option value="0">Disabled</option>
-            </select>
+            <label className="block text-xs text-slate-500 mb-1">Plex UID</label>
+            <input
+              type="number"
+              className="input-field w-full"
+              placeholder="297536"
+              value={settings.plex_uid || '297536'}
+              onChange={(e) => updateSetting('plex_uid', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              UID to chown downloaded files to (for NAS/Plex compatibility).
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Plex GID</label>
+            <input
+              type="number"
+              className="input-field w-full"
+              placeholder="297536"
+              value={settings.plex_gid || '297536'}
+              onChange={(e) => updateSetting('plex_gid', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              GID to chown downloaded files to (for NAS/Plex compatibility).
+            </p>
           </div>
         </div>
-        <div className="mt-4 pt-4 border-t border-slate-800 flex justify-end">
-          <button className="btn-primary text-sm" disabled={saving} onClick={handleSave}>
-            {saving ? 'Saving...' : 'Save Settings'}
+        <div className="mt-4 flex items-center justify-between">
+          <div>
+            <p className="text-sm text-slate-300">Auto-Analyze After Sync</p>
+            <p className="text-xs text-slate-600">
+              Automatically run Lexicon post-processing after each track is organized.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => updateSetting('auto_analyze_enabled', settings.auto_analyze_enabled === '0' ? '1' : '0')}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              settings.auto_analyze_enabled === '0' ? 'bg-slate-700' : 'bg-emerald-500'
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+              settings.auto_analyze_enabled === '0' ? 'translate-x-1' : 'translate-x-6'
+            }`} />
           </button>
         </div>
       </div>
 
-      {/* Lexicon Post-Processing */}
+      {/* ================================================================ */}
+      {/* MATCHING & VERIFICATION                                           */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Matching &amp; Verification</h2>
+        <div className="grid md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Fingerprint Match Threshold</label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              max="1"
+              className="input-field w-full"
+              value={settings.fingerprint_min_score || '0.85'}
+              onChange={(e) => updateSetting('fingerprint_min_score', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              Minimum Chromaprint similarity score (0.0 &ndash; 1.0) to consider a match valid.
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">SynologyDrive Sync Delay (seconds)</label>
+            <input
+              type="number"
+              min="0"
+              className="input-field w-full"
+              value={settings.synology_sync_delay_seconds || '3'}
+              onChange={(e) => updateSetting('synology_sync_delay_seconds', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              Wait time after file write before Lexicon import, allowing SynologyDrive to finish syncing.
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Retry Search Interval (hours)</label>
+            <input
+              type="number"
+              min="1"
+              className="input-field w-full"
+              value={String(Math.round(Number(settings.retry_search_interval_seconds || '43200') / 3600))}
+              onChange={(e) => updateSetting('retry_search_interval_seconds', String(Number(e.target.value) * 3600))}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              How often to retry matching for unmatched tracks.
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Spotify Poll Interval (seconds)</label>
+            <input
+              type="number"
+              min="30"
+              className="input-field w-full"
+              value={settings.spotify_poll_interval_seconds || '300'}
+              onChange={(e) => updateSetting('spotify_poll_interval_seconds', e.target.value)}
+            />
+            <p className="text-xs text-slate-600 mt-1">
+              How often to check Spotify for new liked songs.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* LEXICON POST-PROCESSING                                           */}
+      {/* ================================================================ */}
+
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-2">Lexicon Post-Processing</h2>
         <p className="text-xs text-slate-500 mb-4">
@@ -498,24 +720,55 @@ export default function SettingsPage() {
         </div>
         <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-800">
           <div>
-            <p className="text-sm text-slate-300">Enable Post-Processing</p>
-            <p className="text-xs text-slate-600">Master toggle &mdash; disabling turns off all actions above</p>
+            <p className="text-sm text-slate-300">Backup Before Sync</p>
+            <p className="text-xs text-slate-600">Create a Lexicon backup before each sync run</p>
           </div>
-          <button
-            type="button"
-            onClick={() => updateSetting('auto_analyze_enabled', settings.auto_analyze_enabled === '0' ? '1' : '0')}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              settings.auto_analyze_enabled === '0' ? 'bg-slate-700' : 'bg-emerald-500'
-            }`}
+          <select
+            className="select-field"
+            value={settings.lexicon_backup_before_sync || '1'}
+            onChange={(e) => updateSetting('lexicon_backup_before_sync', e.target.value)}
           >
-            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-              settings.auto_analyze_enabled === '0' ? 'translate-x-1' : 'translate-x-6'
-            }`} />
-          </button>
+            <option value="1">Enabled</option>
+            <option value="0">Disabled</option>
+          </select>
         </div>
       </div>
 
-      {/* Parity Stats */}
+      {/* ================================================================ */}
+      {/* GLOBAL SAVE                                                       */}
+      {/* ================================================================ */}
+
+      <div className="flex justify-end">
+        <button className="btn-primary text-sm px-6" disabled={saving} onClick={handleSave}>
+          {saving ? 'Saving...' : 'Save All Settings'}
+        </button>
+      </div>
+
+      {/* ================================================================ */}
+      {/* NOTIFICATIONS                                                     */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Webhook Notifications</h2>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Webhook URL (leave empty to disable)</label>
+          <input
+            type="url"
+            className="input-field w-full"
+            placeholder="https://example.com/webhook"
+            value={settings.webhook_url || ''}
+            onChange={(e) => updateSetting('webhook_url', e.target.value)}
+          />
+          <p className="text-xs text-slate-600 mt-1">
+            Receives POST with track sync events and parity milestones.
+          </p>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* PARITY STATS                                                      */}
+      {/* ================================================================ */}
+
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Parity Stats</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
@@ -538,7 +791,10 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Lexicon Backups */}
+      {/* ================================================================ */}
+      {/* LEXICON BACKUPS                                                    */}
+      {/* ================================================================ */}
+
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-sm font-semibold text-slate-300">Lexicon Backups</h2>
@@ -560,44 +816,10 @@ export default function SettingsPage() {
         )}
       </div>
 
-      {/* Version */}
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Version</h2>
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-slate-400">
-            <span className="font-mono text-xs">{version?.version || '?'}{version?.git_sha ? ` (${version.git_sha})` : ''}</span>
-          </div>
-          <button
-            className="btn-secondary text-sm"
-            onClick={() => apiFetch('/admin/update', { method: 'POST' }).then(() => {
-              setSuccess('Update requested')
-              setTimeout(() => setSuccess(null), 3000)
-            }).catch(() => setError('Update request failed'))}
-          >
-            Request Update
-          </button>
-        </div>
-      </div>
+      {/* ================================================================ */}
+      {/* EXPORT                                                            */}
+      {/* ================================================================ */}
 
-      {/* Webhook */}
-      <div className="card">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Webhook Notifications</h2>
-        <div>
-          <label className="block text-xs text-slate-500 mb-1">Webhook URL (leave empty to disable)</label>
-          <input
-            type="url"
-            className="input-field w-full"
-            placeholder="https://example.com/webhook"
-            value={settings.webhook_url || ''}
-            onChange={(e) => updateSetting('webhook_url', e.target.value)}
-          />
-          <p className="text-xs text-slate-600 mt-1">
-            Receives POST with track sync events and parity milestones.
-          </p>
-        </div>
-      </div>
-
-      {/* Export */}
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Export Sync Report</h2>
         <div className="flex items-center gap-3">
@@ -618,6 +840,28 @@ export default function SettingsPage() {
           <span className="text-xs text-slate-500 ml-auto">
             {dashboard?.total_tracks ? `${dashboard.total_tracks} tracks` : ''}
           </span>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* VERSION                                                           */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Version</h2>
+        <div className="flex items-center justify-between">
+          <div className="text-sm text-slate-400">
+            <span className="font-mono text-xs">{version?.version || '?'}{version?.git_sha ? ` (${version.git_sha})` : ''}</span>
+          </div>
+          <button
+            className="btn-secondary text-sm"
+            onClick={() => apiFetch('/admin/update', { method: 'POST' }).then(() => {
+              setSuccess('Update requested')
+              setTimeout(() => setSuccess(null), 3000)
+            }).catch(() => setError('Update request failed'))}
+          >
+            Request Update
+          </button>
         </div>
       </div>
     </div>
