@@ -102,7 +102,7 @@ class DownloadQueueItem(BaseModel):
     id: int
     track_id: int
     priority: int = 0
-    source: str = "tidarr"
+    source: str = "tiddl"
     status: str = "pending"
     attempts: int = 0
     max_attempts: int = 3
@@ -125,6 +125,9 @@ class DownloadStatsResponse(BaseModel):
     failed: int
     avg_download_time_seconds: Optional[float] = None
     estimated_remaining_seconds: Optional[float] = None
+    method: str = "tiddl"
+    tiddl_available: bool = False
+    tidarr_reachable: bool = False
 
 
 # --- Matching models ---

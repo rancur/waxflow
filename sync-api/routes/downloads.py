@@ -1,3 +1,9 @@
+import json
+import os
+import shutil
+import time
+
+import httpx
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
@@ -6,6 +12,39 @@ from models import DownloadQueueItem, DownloadStatsResponse, TrackOut
 from routes.tracks import row_to_track
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
+
+
+@router.get("/active")
+async def active_downloads():
+    """Get currently active downloads from the worker."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT dq.*, t.title, t.artist, t.album, t.tidal_id
+                FROM download_queue dq
+                JOIN tracks t ON dq.track_id = t.id
+                WHERE dq.status = 'downloading'
+                ORDER BY dq.started_at DESC
+                LIMIT 5
+            """).fetchall()
+            items = []
+            for r in rows:
+                d = dict(r)
+                items.append({
+                    "id": d["id"],
+                    "track_id": d["track_id"],
+                    "source": d["source"],
+                    "status": d["status"],
+                    "title": d.get("title"),
+                    "artist": d.get("artist"),
+                    "album": d.get("album"),
+                    "tidal_id": d.get("tidal_id"),
+                    "started_at": d.get("started_at"),
+                    "attempts": d.get("attempts", 0),
+                })
+            return {"active": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("")
@@ -169,7 +208,7 @@ async def retry_download(track_id: int):
                 )
             else:
                 conn.execute(
-                    "INSERT INTO download_queue (track_id, priority, source, status) VALUES (?, 0, 'tidarr', 'pending')",
+                    "INSERT INTO download_queue (track_id, priority, source, status) VALUES (?, 0, 'tiddl', 'pending')",
                     (track_id,),
                 )
 
@@ -208,15 +247,47 @@ async def download_stats():
             remaining_count = pending + queued + downloading
             estimated_remaining = round(avg_time * remaining_count, 1) if avg_time and remaining_count else None
 
-            return DownloadStatsResponse(
-                total=total,
-                pending=pending,
-                queued=queued,
-                downloading=downloading,
-                complete=complete,
-                failed=failed,
-                avg_download_time_seconds=avg_time,
-                estimated_remaining_seconds=estimated_remaining,
-            )
+        # Check tiddl availability
+        tiddl_available = shutil.which("tiddl") is not None
+
+        # Check Tidal auth file exists (same paths as tidal.py)
+        tidal_auth_paths = ["/tiddl-auth/auth.json", "/app/data/tiddl-auth.json"]
+        tidal_authed = False
+        for path in tidal_auth_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        auth = json.load(f)
+                    if auth.get("expires_at", 0) > time.time():
+                        tidal_authed = True
+                except Exception:
+                    pass
+                break
+
+        # Check Tidarr reachability (quick timeout)
+        tidarr_url = os.environ.get("TIDARR_URL", "http://tidarr:8484")
+        tidarr_reachable = False
+        try:
+            resp = httpx.get(f"{tidarr_url}/api/health", timeout=2)
+            tidarr_reachable = resp.status_code == 200
+        except Exception:
+            pass
+
+        # Determine active method
+        method = "tiddl" if (tiddl_available and tidal_authed) else ("tidarr" if tidarr_reachable else "none")
+
+        return DownloadStatsResponse(
+            total=total,
+            pending=pending,
+            queued=queued,
+            downloading=downloading,
+            complete=complete,
+            failed=failed,
+            avg_download_time_seconds=avg_time,
+            estimated_remaining_seconds=estimated_remaining,
+            method=method,
+            tiddl_available=tiddl_available and tidal_authed,
+            tidarr_reachable=tidarr_reachable,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

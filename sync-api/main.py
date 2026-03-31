@@ -10,6 +10,7 @@ from routes.playlists import router as playlists_router
 from routes.lexicon import router as lexicon_router
 from routes.admin import router as admin_router
 from routes.spotify import router as spotify_router
+from routes.tidal import router as tidal_router
 
 app = FastAPI(
     title="Spotify-Lexicon Sync API",
@@ -34,6 +35,7 @@ app.include_router(playlists_router)
 app.include_router(lexicon_router)
 app.include_router(admin_router)
 app.include_router(spotify_router)
+app.include_router(tidal_router)
 
 
 @app.get("/")

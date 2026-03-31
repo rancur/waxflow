@@ -10,6 +10,14 @@ export default function SettingsPage() {
   const [spotifyStatus, setSpotifyStatus] = useState<any>(null)
   const [health, setHealth] = useState<any>(null)
   const [dashboard, setDashboard] = useState<any>(null)
+  const [tidalStatus, setTidalStatus] = useState<any>(null)
+  const [tidalAuth, setTidalAuth] = useState<{
+    state: 'idle' | 'waiting_for_code' | 'showing_code' | 'polling' | 'success' | 'error'
+    verification_uri?: string
+    user_code?: string
+    error?: string
+    interval?: number
+  }>({ state: 'idle' })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -17,13 +25,14 @@ export default function SettingsPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes] = await Promise.allSettled([
+      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes] = await Promise.allSettled([
         apiFetch<any>('/settings'),
         apiFetch<any>('/lexicon/backups'),
         apiFetch<any>('/admin/version'),
         apiFetch<any>('/spotify/status'),
         apiFetch<any>('/admin/health'),
         apiFetch<any>('/dashboard'),
+        apiFetch<any>('/tidal/status'),
       ])
 
       if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value.settings || {})
@@ -32,6 +41,7 @@ export default function SettingsPage() {
       if (spotifyRes.status === 'fulfilled') setSpotifyStatus(spotifyRes.value)
       if (healthRes.status === 'fulfilled') setHealth(healthRes.value)
       if (dashboardRes.status === 'fulfilled') setDashboard(dashboardRes.value)
+      if (tidalRes.status === 'fulfilled') setTidalStatus(tidalRes.value)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings')
@@ -61,6 +71,57 @@ export default function SettingsPage() {
 
   const handleConnectSpotify = () => {
     window.open('/api/spotify/auth', '_blank')
+  }
+
+  const handleConnectTidal = async () => {
+    setTidalAuth({ state: 'waiting_for_code' })
+    try {
+      const data = await apiFetch<any>('/tidal/auth/start', { method: 'POST' })
+      if (data.error) {
+        setTidalAuth({ state: 'error', error: data.error })
+        return
+      }
+      setTidalAuth({
+        state: 'showing_code',
+        verification_uri: data.verification_uri,
+        user_code: data.user_code,
+        interval: data.interval || 5,
+      })
+      // Start polling
+      const pollInterval = (data.interval || 5) * 1000
+      const maxAttempts = Math.ceil((data.expires_in || 300) / (data.interval || 5))
+      let attempts = 0
+      const poll = setInterval(async () => {
+        attempts++
+        if (attempts > maxAttempts) {
+          clearInterval(poll)
+          setTidalAuth({ state: 'error', error: 'Authorization timed out. Please try again.' })
+          return
+        }
+        try {
+          const result = await apiFetch<any>('/tidal/auth/poll', { method: 'POST' })
+          if (result.status === 'authorized') {
+            clearInterval(poll)
+            setTidalAuth({ state: 'success' })
+            setSuccess(`Tidal connected (user ${result.user_id})`)
+            setTimeout(() => setSuccess(null), 5000)
+            // Refresh tidal status
+            const fresh = await apiFetch<any>('/tidal/status')
+            setTidalStatus(fresh)
+            setTimeout(() => setTidalAuth({ state: 'idle' }), 5000)
+          } else if (result.status === 'error') {
+            clearInterval(poll)
+            setTidalAuth({ state: 'error', error: result.error })
+          }
+          // 'pending' -> keep polling
+        } catch {
+          clearInterval(poll)
+          setTidalAuth({ state: 'error', error: 'Polling failed' })
+        }
+      }, pollInterval)
+    } catch (err) {
+      setTidalAuth({ state: 'error', error: err instanceof Error ? err.message : 'Failed to start auth' })
+    }
   }
 
   const handleCreateBackup = async () => {
@@ -130,6 +191,86 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* Tidal Connection */}
+      <div className="card">
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">Tidal Connection</h2>
+        <div className="space-y-4">
+          {/* Status row */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`w-3 h-3 rounded-full ${
+                tidalStatus?.connected
+                  ? tidalStatus?.expired ? 'bg-amber-400' : 'bg-emerald-400'
+                  : 'bg-red-400'
+              }`} />
+              <span className="text-sm text-slate-300">
+                {tidalStatus?.connected
+                  ? tidalStatus?.expired
+                    ? 'Token expired'
+                    : `Connected (user ${tidalStatus.user_id})`
+                  : 'Not connected'}
+              </span>
+              {tidalStatus?.connected && !tidalStatus?.expired && (
+                <span className="text-xs text-slate-500">
+                  Expires in {tidalStatus.hours_left}h
+                </span>
+              )}
+            </div>
+            <button
+              className="btn-primary text-sm"
+              onClick={handleConnectTidal}
+              disabled={tidalAuth.state === 'waiting_for_code' || tidalAuth.state === 'polling' || tidalAuth.state === 'showing_code'}
+            >
+              {tidalAuth.state === 'waiting_for_code' ? 'Starting...'
+                : tidalAuth.state === 'showing_code' || tidalAuth.state === 'polling' ? 'Waiting...'
+                : tidalStatus?.connected && !tidalStatus?.expired ? 'Reconnect' : 'Connect Tidal'}
+            </button>
+          </div>
+
+          {/* Device code flow UI */}
+          {(tidalAuth.state === 'showing_code' || tidalAuth.state === 'polling') && (
+            <div className="bg-slate-800/50 border border-slate-700 rounded-lg px-5 py-4 space-y-3">
+              <p className="text-sm text-slate-300">
+                Go to{' '}
+                <a
+                  href={tidalAuth.verification_uri}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 underline hover:text-blue-300"
+                >
+                  {tidalAuth.verification_uri}
+                </a>
+              </p>
+              {tidalAuth.user_code && (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-slate-400">Enter code:</span>
+                  <code className="text-lg font-bold text-slate-100 bg-slate-700 px-3 py-1 rounded tracking-wider">
+                    {tidalAuth.user_code}
+                  </code>
+                </div>
+              )}
+              <p className="text-xs text-slate-500 animate-pulse">
+                Waiting for authorization...
+              </p>
+            </div>
+          )}
+
+          {/* Success */}
+          {tidalAuth.state === 'success' && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-5 py-3">
+              <p className="text-sm text-emerald-400">Tidal authorized successfully.</p>
+            </div>
+          )}
+
+          {/* Error */}
+          {tidalAuth.state === 'error' && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-5 py-3">
+              <p className="text-sm text-red-400">{tidalAuth.error}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Service Health */}
       <div className="card">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">Service Health</h2>
@@ -142,6 +283,23 @@ export default function SettingsPage() {
             </div>
             <span className="text-xs text-slate-500">
               {spotifyStatus?.authenticated ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+
+          {/* Tidal */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`w-2.5 h-2.5 rounded-full ${
+                tidalStatus?.connected && !tidalStatus?.expired ? 'bg-emerald-400'
+                : tidalStatus?.connected && tidalStatus?.expired ? 'bg-amber-400'
+                : 'bg-red-400'
+              }`} />
+              <span className="text-sm text-slate-300">Tidal</span>
+            </div>
+            <span className="text-xs text-slate-500">
+              {tidalStatus?.connected
+                ? tidalStatus?.expired ? 'Token expired' : `Connected (${tidalStatus.hours_left}h left)`
+                : 'Disconnected'}
             </span>
           </div>
 

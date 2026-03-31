@@ -85,8 +85,8 @@ def init():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             track_id INTEGER NOT NULL REFERENCES tracks(id),
             priority INTEGER NOT NULL DEFAULT 0,
-            source TEXT NOT NULL DEFAULT 'tidarr'
-                CHECK(source IN ('tidarr','beatport','bandcamp')),
+            source TEXT NOT NULL DEFAULT 'tiddl'
+                CHECK(source IN ('tiddl','tidarr','beatport','bandcamp')),
             status TEXT NOT NULL DEFAULT 'pending'
                 CHECK(status IN ('pending','queued','downloading','complete','failed')),
             attempts INTEGER NOT NULL DEFAULT 0,
@@ -252,6 +252,37 @@ def init():
                 DROP TABLE tracks;
 
                 ALTER TABLE tracks_new RENAME TO tracks;
+            """)
+            print("Migration complete.")
+
+    # Migration: add 'tiddl' to download_queue source CHECK constraint
+    with get_db() as conn:
+        try:
+            conn.execute("UPDATE download_queue SET source = 'tiddl' WHERE 0")  # no-op, just tests constraint
+        except Exception:
+            print("Migrating download_queue table to add 'tiddl' source...")
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS download_queue_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    track_id INTEGER NOT NULL REFERENCES tracks(id),
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'tiddl'
+                        CHECK(source IN ('tiddl','tidarr','beatport','bandcamp')),
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','queued','downloading','complete','failed')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    error TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    started_at TEXT,
+                    completed_at TEXT
+                );
+
+                INSERT OR IGNORE INTO download_queue_new SELECT * FROM download_queue;
+
+                DROP TABLE download_queue;
+
+                ALTER TABLE download_queue_new RENAME TO download_queue;
             """)
             print("Migration complete.")
 

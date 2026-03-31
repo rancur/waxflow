@@ -41,6 +41,19 @@ interface RecentItem {
   completed_at: string
 }
 
+interface ActiveDownload {
+  id: number
+  track_id: number
+  source: string
+  status: string
+  title: string | null
+  artist: string | null
+  album: string | null
+  tidal_id: string | null
+  started_at: string | null
+  attempts: number
+}
+
 interface DownloadStats {
   total: number
   pending: number
@@ -50,6 +63,19 @@ interface DownloadStats {
   failed: number
   avg_download_time_seconds: number | null
   estimated_remaining_seconds: number | null
+  method: string
+  tiddl_available: boolean
+  tidarr_reachable: boolean
+}
+
+interface TidalStatus {
+  connected: boolean
+  user_id?: string
+  country?: string
+  expires_at?: number
+  expired?: boolean
+  hours_left?: number
+  source?: string
 }
 
 function formatDuration(seconds: number | null | undefined): string {
@@ -81,7 +107,8 @@ function formatDate(iso: string | null): string {
 
 function sourceLabel(source: string): string {
   const labels: Record<string, string> = {
-    tidarr: 'Tidarr (Tidal FLAC)',
+    tiddl: 'Tidal (FLAC)',
+    tidarr: 'Tidarr (fallback)',
     beatport: 'Beatport',
     bandcamp: 'Bandcamp',
   }
@@ -107,6 +134,8 @@ export default function DownloadsPage() {
   const [totalItems, setTotalItems] = useState(0)
   const [totalPages, setTotalPages] = useState(1)
   const [stats, setStats] = useState<DownloadStats | null>(null)
+  const [activeDownloads, setActiveDownloads] = useState<ActiveDownload[]>([])
+  const [tidalStatus, setTidalStatus] = useState<TidalStatus | null>(null)
   const [recent, setRecent] = useState<RecentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -120,8 +149,19 @@ export default function DownloadsPage() {
 
   const fetchStats = useCallback(async () => {
     try {
-      const s = await apiFetch<DownloadStats>('/downloads/stats')
+      const [s, active] = await Promise.all([
+        apiFetch<DownloadStats>('/downloads/stats'),
+        apiFetch<{ active: ActiveDownload[] }>('/downloads/active'),
+      ])
       setStats(s)
+      setActiveDownloads(active.active || [])
+    } catch {}
+  }, [])
+
+  const fetchTidalStatus = useCallback(async () => {
+    try {
+      const s = await apiFetch<TidalStatus>('/tidal/status')
+      setTidalStatus(s)
     } catch {}
   }, [])
 
@@ -152,12 +192,19 @@ export default function DownloadsPage() {
     }
   }, [page, search, statusFilter, sortBy, sortDir])
 
-  // Stats polling (3s)
+  // Stats + active downloads polling (3s)
   useEffect(() => {
     fetchStats()
     const interval = setInterval(fetchStats, STATS_POLL)
     return () => clearInterval(interval)
   }, [fetchStats])
+
+  // Tidal status polling (30s)
+  useEffect(() => {
+    fetchTidalStatus()
+    const interval = setInterval(fetchTidalStatus, 30_000)
+    return () => clearInterval(interval)
+  }, [fetchTidalStatus])
 
   // Table polling (10s)
   useEffect(() => {
@@ -188,11 +235,6 @@ export default function DownloadsPage() {
     setSearch(searchInput)
     setPage(1)
   }
-
-  const activeItem = useMemo(
-    () => items.find(i => i.status === 'downloading') || null,
-    [items]
-  )
 
   // Compute progress percentage
   const progressPct = stats

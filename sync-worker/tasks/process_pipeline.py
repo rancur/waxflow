@@ -49,14 +49,22 @@ _playlist_cache_time = 0
 # tiddl CLI setup: convert Tidarr auth.json to tiddl 2.8.0 config format
 _TIDDL_AVAILABLE = shutil.which("tiddl") is not None
 if _TIDDL_AVAILABLE:
-    _tiddl_auth_source = "/tiddl-auth/auth.json"
+    _tiddl_auth_sources = [
+        "/tiddl-auth/auth.json",       # mounted from Tidarr
+        "/app/data/tiddl-auth.json",   # web UI auth flow
+    ]
+    _tiddl_auth_source = None
+    for _candidate in _tiddl_auth_sources:
+        if os.path.exists(_candidate):
+            _tiddl_auth_source = _candidate
+            break
     _tiddl_config_dir = "/tmp/tiddl-home"
     _tiddl_config_path = os.path.join(_tiddl_config_dir, "tiddl.json")
     os.makedirs(_tiddl_config_dir, exist_ok=True)
     os.environ["TIDDL_PATH"] = _tiddl_config_dir  # tiddl 2.8.0 reads this
 
     try:
-        if os.path.exists(_tiddl_auth_source):
+        if _tiddl_auth_source and os.path.exists(_tiddl_auth_source):
             with open(_tiddl_auth_source) as f:
                 _auth = json.load(f)
             # Build tiddl 2.8.0 config with auth from Tidarr
@@ -91,12 +99,12 @@ if _TIDDL_AVAILABLE:
             with open(_tiddl_config_path, "w") as f:
                 json.dump(_tiddl_config, f, indent=2)
             logging.getLogger("worker.pipeline").info(
-                "tiddl CLI configured from Tidarr auth (user_id=%s) — direct downloads enabled",
-                _auth.get("user_id"),
+                "tiddl CLI configured from %s (user_id=%s) — direct downloads enabled",
+                _tiddl_auth_source, _auth.get("user_id"),
             )
         else:
             logging.getLogger("worker.pipeline").warning(
-                "tiddl CLI found but no auth at %s — tiddl disabled", _tiddl_auth_source
+                "tiddl CLI found but no auth at any of %s — tiddl disabled", _tiddl_auth_sources
             )
             _TIDDL_AVAILABLE = False
     except Exception as _e:
@@ -990,7 +998,7 @@ def _download_track(db_path: str, track: dict):
             with get_db(db_path) as conn:
                 conn.execute(
                     """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
-                    VALUES (?, 'tidarr', 'downloading', ?, datetime('now'), NULL)""",
+                    VALUES (?, 'tiddl', 'downloading', ?, datetime('now'), NULL)""",
                     (track_id, attempts),
                 )
             dest_path = _download_track_via_tiddl(db_path, track)
