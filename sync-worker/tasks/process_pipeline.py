@@ -1023,8 +1023,8 @@ def _download_track(db_path: str, track: dict):
                     (str(tiddl_err)[:500], track_id),
                 )
 
-    # === FALLBACK: Tidarr API ===
-    if not dest_path:
+    # === FALLBACK: Tidarr API (DISABLED — Tidarr queue hangs and blocks pipeline) ===
+    if not dest_path and not _TIDDL_AVAILABLE:
         with get_db(db_path) as conn:
             conn.execute(
                 """INSERT INTO download_queue (track_id, source, status, attempts, started_at, error)
@@ -1589,21 +1589,10 @@ def _organize_track(db_path: str, track: dict):
     with httpx.Client(base_url=LEXICON_API_URL, timeout=60) as client:
         # 1. Find or import the track in Lexicon
         # The file is already in the music library (/music/ = NAS /volume1/music/Database/)
-        # SynologyDrive syncs NAS files to Mac Mini where Lexicon reads them
-        # Mac Mini path: /Users/willcurran/Music/Database/{relative_path}
+        # The NAS 'music' share is mounted on the Lexicon Mac at /Volumes/music/
+        # This gives Lexicon direct access to NAS files without SynologyDrive sync delay
         relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
-        mac_path = f"/Users/willcurran/Music/Database/{relative_path}"
-
-        # Wait for SynologyDrive to sync — only needed for freshly downloaded files
-        download_source = track.get("download_source", "")
-        match_source = track.get("match_source", "")
-        if download_source in ("tidarr", "tiddl"):
-            sync_delay = int(get_config(db_path, "synology_sync_delay_seconds") or 3)
-            log.info("Waiting %ds for SynologyDrive sync (new download via %s)...", sync_delay, download_source)
-            time.sleep(sync_delay)
-        else:
-            log.debug("Skipping SynologyDrive delay for existing file (source=%s/%s)",
-                       match_source, download_source)
+        mac_path = f"/Volumes/music/Database/{relative_path}"
 
         # Search Lexicon for the track by file path
         lexicon_track_id = _lexicon_find_or_import(client, mac_path, track)
@@ -1762,9 +1751,15 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict) ->
             data = resp.json()
             results = data.get("data", {}).get("tracks", [])
             for t in results:
-                # Exact path match
-                if t.get("location", "") == mac_path:
+                # Path match (check both new /Volumes/music/ and legacy /Volumes/Macintosh HD/Users/willcurran/Music/ paths)
+                lex_loc = t.get("location", "")
+                if lex_loc == mac_path:
                     return str(t["id"])
+                # Extract relative path from both and compare
+                for prefix in ("/Volumes/music/Database/", "/Volumes/Macintosh HD/Users/willcurran/Music/Database/",
+                               "/Users/willcurran/Music/Database/"):
+                    if lex_loc.startswith(prefix) and mac_path.endswith(lex_loc[len(prefix):]):
+                        return str(t["id"])
                 # Fuzzy title match: Spotify "Hot One" matches Lexicon "Hot One (Original Mix)"
                 lex_title = (t.get("title") or "").lower().strip()
                 lex_artist = (t.get("artist") or "").lower().strip()
