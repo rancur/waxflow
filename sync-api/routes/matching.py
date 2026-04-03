@@ -55,17 +55,7 @@ async def review_matches():
                 "SELECT * FROM tracks WHERE match_status = 'mismatched' ORDER BY match_confidence ASC, updated_at DESC"
             ).fetchall()
 
-            # Fetch stats for summary cards
-            stats_row = conn.execute("""
-                SELECT
-                    COUNT(*) FILTER (WHERE match_status = 'mismatched') AS total_mismatched,
-                    COUNT(*) FILTER (WHERE match_status = 'mismatched' AND pipeline_stage NOT IN ('complete')) AS pending_review,
-                    0 AS approved,
-                    0 AS rejected
-                FROM tracks
-            """).fetchone()
-
-            # SQLite doesn't support FILTER — use CASE instead
+            # Fetch stats for summary cards (CASE-based for SQLite compatibility)
             stats_row = conn.execute("""
                 SELECT
                     SUM(CASE WHEN match_status = 'mismatched' THEN 1 ELSE 0 END) AS total_mismatched,
