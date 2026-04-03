@@ -17,7 +17,7 @@ from routes.tidal import router as tidal_router
 app = FastAPI(
     title="WaxFlow API",
     description="All your music, flowing home. Spotify Liked Songs to Lexicon DJ.",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 _cors_origins_env = os.environ.get("CORS_ORIGINS", "")
@@ -45,4 +45,4 @@ app.include_router(tidal_router)
 
 @app.get("/")
 async def root():
-    return {"service": "waxflow", "version": "2.0.0"}
+    return {"service": "waxflow", "version": "2.1.0"}

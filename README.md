@@ -2,7 +2,7 @@
 
 **All your music, flowing home. Sync your Spotify Liked Songs to Lexicon DJ with lossless FLAC downloads from Tidal.**
 
-![Version](https://img.shields.io/badge/version-v2.0.0-blue)
+![Version](https://img.shields.io/badge/version-v2.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Parity](https://img.shields.io/badge/parity-tracking-orange)
 
