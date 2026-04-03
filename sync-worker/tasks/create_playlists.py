@@ -488,7 +488,7 @@ def _create_smartlist(
 
 def _build_genre_tree(client: httpx.Client, root_id: int, existing: dict) -> int:
     """Build the full genre folder/smartlist tree. Returns count of playlists created."""
-    waxflow_folder = _create_folder(client, "WaxFlow Genres", root_id, existing)
+    waxflow_folder = _create_folder(client, "Genres", root_id, existing)
     if not waxflow_folder:
         return 0
 
@@ -528,7 +528,7 @@ def _build_attribute_playlists(client: httpx.Client, root_id: int, existing: dic
     if not config:
         return 0
 
-    folder = _create_folder(client, f"WaxFlow {category}", root_id, existing)
+    folder = _create_folder(client, f"{category}", root_id, existing)
     if not folder:
         return 0
 
@@ -550,7 +550,7 @@ def _build_attribute_playlists(client: httpx.Client, root_id: int, existing: dic
 
 def _build_rating_playlists(client: httpx.Client, root_id: int, existing: dict) -> int:
     """Build star-rating smartlists."""
-    folder = _create_folder(client, "WaxFlow Ratings", root_id, existing)
+    folder = _create_folder(client, "Ratings", root_id, existing)
     if not folder:
         return 0
 
@@ -568,7 +568,7 @@ def _build_rating_playlists(client: httpx.Client, root_id: int, existing: dict) 
 
 def _build_bpm_playlists(client: httpx.Client, root_id: int, existing: dict) -> int:
     """Build BPM-range smartlists."""
-    folder = _create_folder(client, "WaxFlow BPM", root_id, existing)
+    folder = _create_folder(client, "BPM", root_id, existing)
     if not folder:
         return 0
 
@@ -583,7 +583,7 @@ def _build_bpm_playlists(client: httpx.Client, root_id: int, existing: dict) -> 
 
 def _build_key_playlists(client: httpx.Client, root_id: int, existing: dict) -> int:
     """Build Camelot key smartlists."""
-    folder = _create_folder(client, "WaxFlow Keys", root_id, existing)
+    folder = _create_folder(client, "Keys", root_id, existing)
     if not folder:
         return 0
 
@@ -677,17 +677,17 @@ def _run_create_playlists(db_path: str):
             # Track state
             set_config(db_path, "auto_playlists_last_run", str(int(time.time())))
 
-            # Count total managed playlists (all WaxFlow-prefixed folders + their children)
+            # Count total managed playlists (all managed folders + their children)
             managed_count = sum(
                 1 for (name, _pid) in existing
-                if name.startswith("WaxFlow ") or _pid is not None
+                if name in ("Genres","Energy","Danceability","Popularity","Happiness","Ratings","BPM","Keys") or _pid is not None
             )
 
             # Store created IDs for tracking
             created_ids = {}
             for (name, pid), info in existing.items():
                 if isinstance(info, dict) and "id" in info:
-                    if name.startswith("WaxFlow "):
+                    if name in ("Genres","Energy","Danceability","Popularity","Happiness","Ratings","BPM","Keys"):
                         created_ids[name] = info["id"]
             set_config(db_path, "auto_playlists_created_ids", json.dumps(created_ids))
 
