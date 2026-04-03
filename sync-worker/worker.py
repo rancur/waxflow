@@ -21,6 +21,7 @@ from tasks.cleanup_activity import cleanup_activity
 from tasks.backup_lexicon import backup_lexicon
 from tasks.index_library import index_library
 from tasks.analyze_tracks import analyze_tracks
+from tasks.create_playlists import create_playlists
 from tasks.helpers import get_config, get_db
 
 DB_PATH = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
@@ -200,6 +201,9 @@ async def main():
         ),
         asyncio.create_task(
             run_task("analyze_tracks", analyze_tracks, interval_key="analyze_interval_seconds", default_interval=3600)
+        ),
+        asyncio.create_task(
+            run_task("create_playlists", create_playlists, default_interval=30)
         ),
     ]
 

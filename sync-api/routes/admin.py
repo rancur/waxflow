@@ -140,6 +140,23 @@ async def export_sync_report(format: str = "json"):
             return {"tracks": [dict(t) for t in tracks], "total": len(tracks)}
 
 
+@router.post("/admin/rebuild-playlists")
+async def rebuild_playlists():
+    """Trigger immediate playlist rebuild."""
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO app_config (key, value) VALUES ('auto_playlists_rebuild', '1')"
+            )
+            conn.execute(
+                "INSERT INTO activity_log (event_type, message) VALUES (?, ?)",
+                ("playlist_rebuild", "Manual playlist rebuild requested"),
+            )
+        return {"status": "ok", "message": "Playlist rebuild queued"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/admin/analyze-stats")
 async def get_analyze_stats():
     """Return stats about the auto-analysis system."""

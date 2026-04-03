@@ -151,7 +151,20 @@ def init():
             ('auto_update_enabled', '0'),
             ('auto_update_schedule', 'daily_3am'),
             ('auto_backup_before_update', '1'),
-            ('last_update_check', '');
+            ('last_update_check', ''),
+            ('auto_playlists_enabled', '1'),
+            ('auto_playlists_genres', '1'),
+            ('auto_playlists_energy', '1'),
+            ('auto_playlists_danceability', '1'),
+            ('auto_playlists_popularity', '1'),
+            ('auto_playlists_happiness', '1'),
+            ('auto_playlists_rating', '1'),
+            ('auto_playlists_bpm', '1'),
+            ('auto_playlists_key', '1'),
+            ('auto_playlists_interval_seconds', '86400'),
+            ('auto_playlists_last_run', ''),
+            ('auto_playlists_created_ids', '{}'),
+            ('auto_playlists_rebuild', '0');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed

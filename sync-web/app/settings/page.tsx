@@ -24,6 +24,7 @@ export default function SettingsPage() {
     error?: string
   }>({ state: 'idle' })
   const [analyzeStats, setAnalyzeStats] = useState<any>(null)
+  const [rebuildingPlaylists, setRebuildingPlaylists] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<any>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updatingNow, setUpdatingNow] = useState(false)
@@ -229,6 +230,19 @@ export default function SettingsPage() {
       setError(err instanceof Error ? err.message : 'Restore failed')
     } finally {
       setRestoringBackup(null)
+    }
+  }
+
+  const handleRebuildPlaylists = async () => {
+    setRebuildingPlaylists(true)
+    try {
+      await apiFetch('/admin/rebuild-playlists', { method: 'POST' })
+      setSuccess('Playlist rebuild queued. The worker will rebuild all playlists shortly.')
+      setTimeout(() => setSuccess(null), 5000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Rebuild failed')
+    } finally {
+      setRebuildingPlaylists(false)
     }
   }
 
@@ -809,6 +823,96 @@ export default function SettingsPage() {
               </p>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* AUTOMATIC PLAYLISTS                                               */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-slate-300">Automatic Playlists</h2>
+          <button
+            className="btn-secondary text-sm"
+            onClick={handleRebuildPlaylists}
+            disabled={rebuildingPlaylists || settings.auto_playlists_enabled === '0'}
+          >
+            {rebuildingPlaylists ? 'Queuing...' : 'Rebuild All Playlists'}
+          </button>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">
+          Automatically create and maintain organized smartlist trees in Lexicon DJ.
+          Runs daily. Safe to re-run (idempotent).
+        </p>
+
+        {settings.auto_playlists_last_run && (
+          <p className="text-xs text-slate-500 mb-4">
+            Last built: {new Date(Number(settings.auto_playlists_last_run) * 1000).toLocaleString()}
+            {settings.auto_playlists_created_ids && (() => {
+              try {
+                const ids = JSON.parse(settings.auto_playlists_created_ids)
+                return ` \u2014 ${Object.keys(ids).length} folders managed`
+              } catch { return '' }
+            })()}
+          </p>
+        )}
+
+        <div className="space-y-3">
+          {/* Master toggle */}
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div>
+              <p className="text-sm text-slate-300">Enable Automatic Playlists</p>
+              <p className="text-xs text-slate-600">Master toggle for all auto-playlist categories</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => updateSetting('auto_playlists_enabled', settings.auto_playlists_enabled === '0' ? '1' : '0')}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                settings.auto_playlists_enabled === '0' ? 'bg-slate-700' : 'bg-emerald-500'
+              }`}
+            >
+              <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                settings.auto_playlists_enabled === '0' ? 'translate-x-1' : 'translate-x-6'
+              }`} />
+            </button>
+          </div>
+
+          {/* Category toggles */}
+          {([
+            { key: 'auto_playlists_genres', label: 'Genre Tree', desc: 'Bass Music, House, Techno, Trance + 60 sub-genres' },
+            { key: 'auto_playlists_energy', label: 'Energy Levels', desc: 'Banging to Chill (5 tiers)' },
+            { key: 'auto_playlists_danceability', label: 'Danceability', desc: 'Extreme to Undanceable (5 tiers)' },
+            { key: 'auto_playlists_popularity', label: 'Popularity', desc: 'Extreme to Unpopular (5 tiers)' },
+            { key: 'auto_playlists_happiness', label: 'Happiness', desc: 'Extreme to Sadness (5 tiers)' },
+            { key: 'auto_playlists_rating', label: 'Star Rating', desc: '5 Stars to Not Rated' },
+            { key: 'auto_playlists_bpm', label: 'BPM Ranges', desc: '8 DJ-focused brackets (60-300 BPM)' },
+            { key: 'auto_playlists_key', label: 'Camelot Key', desc: 'Full Camelot wheel (24 keys)' },
+          ] as { key: string; label: string; desc: string }[]).map(cat => {
+            const isOn = settings[cat.key] !== '0'
+            const disabled = settings.auto_playlists_enabled === '0'
+            return (
+              <div key={cat.key} className={`flex items-center justify-between ${disabled ? 'opacity-40' : ''}`}>
+                <div>
+                  <p className="text-sm text-slate-300">{cat.label}</p>
+                  <p className="text-xs text-slate-600">{cat.desc}</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => updateSetting(cat.key, isOn ? '0' : '1')}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    disabled ? 'bg-slate-800 cursor-not-allowed'
+                    : isOn ? 'bg-emerald-500' : 'bg-slate-700'
+                  }`}
+                >
+                  <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                    isOn ? 'translate-x-6' : 'translate-x-1'
+                  }`} />
+                </button>
+              </div>
+            )
+          })}
         </div>
       </div>
 
