@@ -1,0 +1,36 @@
+name: Claude Maintenance
+
+on:
+  schedule:
+    - cron: '0 10 * * 1'  # Monday 10:00 UTC
+  workflow_dispatch:
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: "claude-sonnet-4-20250514"
+          direct_prompt: |
+            Weekly maintenance for WaxFlow (Spotify-Lexicon-Sync).
+
+            1. Review open issues and PRs -- close stale ones, add labels, summarize status.
+            2. Check ROADMAP.md -- update completed items, reprioritize if needed.
+            3. Scan for dependency updates in sync-api/requirements.txt, sync-worker/requirements.txt, and sync-web/package.json.
+            4. Look for TODO/FIXME/HACK comments in the codebase and file issues for important ones.
+            5. Review Dockerfiles for security best practices (pinned base images, non-root user, minimal layers).
+            6. If any changes are needed, create a PR with the maintenance updates.
+
+            Reference CLAUDE.md for project conventions.

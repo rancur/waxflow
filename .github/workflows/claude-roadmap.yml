@@ -1,0 +1,36 @@
+name: Claude Roadmap Driver
+
+on:
+  schedule:
+    - cron: '0 15 * * *'  # Daily 3pm UTC
+  workflow_dispatch:
+
+jobs:
+  roadmap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: "claude-sonnet-4-20250514"
+          direct_prompt: |
+            Pick one item from ROADMAP.md (prioritize High Priority items that have no open PR yet).
+
+            1. Read ROADMAP.md and check open PRs/issues to avoid duplicate work.
+            2. Choose a single, well-scoped task from the roadmap.
+            3. Implement the feature or improvement on a new branch.
+            4. Write tests if the change touches Python code.
+            5. Create a PR with a clear description linking back to the roadmap item.
+            6. Keep the PR focused -- one roadmap item per PR.
+
+            Reference CLAUDE.md for project conventions. Use conventional commits.

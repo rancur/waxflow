@@ -1,0 +1,48 @@
+name: Claude Bug Hunter
+
+on:
+  schedule:
+    - cron: '0 18 * * *'  # Daily 6pm UTC
+  workflow_dispatch:
+
+jobs:
+  bugfix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: "claude-sonnet-4-20250514"
+          direct_prompt: |
+            Bug hunting session for WaxFlow (Spotify-Lexicon-Sync).
+
+            1. Scan sync-api/ and sync-worker/ Python code for bugs:
+               - Unhandled exceptions (especially around external API calls to Spotify, Tidal, Lexicon)
+               - Race conditions in async code or SQLite access
+               - Missing error handling in pipeline stage transitions
+               - Incorrect HTTP status codes or response formats
+               - Resource leaks (unclosed files, DB connections, HTTP sessions)
+            2. Check sync-web/ for TypeScript issues:
+               - Unchecked API response handling
+               - Missing loading/error states
+               - Type mismatches between frontend types and API responses
+            3. Review scripts/ for shell script issues:
+               - Missing error handling (set -e, trap)
+               - Hardcoded paths that should be configurable
+               - Race conditions in monitoring scripts
+            4. For each bug found:
+               - If it is a clear fix, create a branch and PR with the fix.
+               - If it needs discussion, file an issue with reproduction details.
+            5. Maximum 3 fixes per run to keep PRs reviewable.
+
+            Reference CLAUDE.md for project conventions. Use conventional commits.
