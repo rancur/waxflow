@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 from fastapi import APIRouter, HTTPException
 
 from db import get_db
 from models import LexiconStatusResponse, LexiconBackupOut
 from services.lexicon_sync import LexiconSyncService
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/lexicon", tags=["lexicon"])
 
@@ -19,8 +22,8 @@ async def lexicon_status():
         tracks = await lexicon.get_tracks()
         connected = True
         track_count = len(tracks) if isinstance(tracks, list) else None
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("Lexicon connection check failed: %s", e)
 
     with get_db() as conn:
         last_sync_row = conn.execute(

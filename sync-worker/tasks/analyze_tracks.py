@@ -129,8 +129,11 @@ def _detect_bpm_aubio(file_path: str) -> float | None:
                         if 20 < bpm < 300:
                             return round(bpm, 1)
         finally:
-            if tmp_path != file_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            if tmp_path != file_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         return None
     except FileNotFoundError:
