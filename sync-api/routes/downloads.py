@@ -259,15 +259,16 @@ async def download_stats():
         tidal_auth_paths = ["/tiddl-auth/auth.json", "/app/data/tiddl-auth.json"]
         tidal_authed = False
         for path in tidal_auth_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path) as f:
-                        auth = json.load(f)
-                    if auth.get("expires_at", 0) > time.time():
-                        tidal_authed = True
-                except Exception:
-                    pass
-                break
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path) as f:
+                    auth = json.load(f)
+                if auth.get("expires_at", 0) > time.time():
+                    tidal_authed = True
+                break  # valid file found and parsed; stop checking
+            except Exception:
+                continue  # corrupt/unreadable file; try next path
 
         # tiddl is always available in the worker container; report based on auth status
         tiddl_available = tidal_authed
