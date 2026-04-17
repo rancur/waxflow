@@ -75,18 +75,24 @@ if [ -z "$DASHBOARD" ] || [ "$DASHBOARD" = "" ]; then
     exit 1
 fi
 
-eval $(echo "$DASHBOARD" | python3 -c "
+_parse_dashboard() {
+    local field="$1" default="${2:-0}"
+    echo "$DASHBOARD" | python3 -c "
 import json,sys
-d=json.loads(sys.stdin.read())
-print(f'TOTAL={d[\"spotify_total\"]}')
-print(f'SYNCED={d[\"lexicon_synced\"]}')
-print(f'PCT={d[\"parity_pct\"]}')
-print(f'ERRORS={d.get(\"by_pipeline_stage\",{}).get(\"error\",0)}')
-print(f'DOWNLOADING={d.get(\"by_pipeline_stage\",{}).get(\"downloading\",0)}')
-print(f'NEW={d.get(\"by_pipeline_stage\",{}).get(\"new\",0)}')
-print(f'ORGANIZING={d.get(\"by_pipeline_stage\",{}).get(\"organizing\",0)}')
-print(f'COMPLETE={d.get(\"by_pipeline_stage\",{}).get(\"complete\",0)}')
-")
+try:
+    d=json.loads(sys.stdin.read())
+    print(d$field)
+except: print('$default')
+" 2>/dev/null || echo "$default"
+}
+TOTAL=$(_parse_dashboard '["spotify_total"]' 0)
+SYNCED=$(_parse_dashboard '["lexicon_synced"]' 0)
+PCT=$(_parse_dashboard '["parity_pct"]' 0)
+ERRORS=$(_parse_dashboard '.get("by_pipeline_stage",{}).get("error",0)' 0)
+DOWNLOADING=$(_parse_dashboard '.get("by_pipeline_stage",{}).get("downloading",0)' 0)
+NEW=$(_parse_dashboard '.get("by_pipeline_stage",{}).get("new",0)' 0)
+ORGANIZING=$(_parse_dashboard '.get("by_pipeline_stage",{}).get("organizing",0)' 0)
+COMPLETE=$(_parse_dashboard '.get("by_pipeline_stage",{}).get("complete",0)' 0)
 
 log "CHECK: parity=$SYNCED/$TOTAL ($PCT%) errors=$ERRORS downloading=$DOWNLOADING new=$NEW organizing=$ORGANIZING"
 
