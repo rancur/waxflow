@@ -5,3 +5,5 @@ spotipy
 python-multipart
 aiofiles
 pydantic
+pytest
+pytest-asyncio
