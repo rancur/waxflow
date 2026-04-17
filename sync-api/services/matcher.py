@@ -1,8 +1,11 @@
+import logging
 import os
 import json
 import httpx
 
 from db import get_db
+
+logger = logging.getLogger(__name__)
 
 TIDARR_API = os.environ.get("TIDARR_URL", "http://localhost:8484")  # optional legacy fallback
 
@@ -67,7 +70,7 @@ class MatcherService:
                     if tracks:
                         return {"tidal_id": str(tracks[0].get("id", ""))}
         except Exception:
-            pass
+            logger.warning("ISRC match failed for %s", isrc, exc_info=True)
         return None
 
     async def _match_by_metadata(self, track: dict) -> dict | None:
@@ -106,7 +109,7 @@ class MatcherService:
                             (track.get("id", 0), query, len(tracks)),
                         )
         except Exception:
-            pass
+            logger.warning("Metadata match failed for '%s' by '%s'", title, artist, exc_info=True)
         return None
 
     def _compute_confidence(self, spotify_track: dict, tidal_track: dict) -> float:
