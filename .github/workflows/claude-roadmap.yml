@@ -24,7 +24,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: "--model claude-sonnet-4-6 --max-turns 25"
+          claude_args: "--model claude-sonnet-4-6 --max-turns 60"
           prompt: |
             Pick one item from ROADMAP.md (prioritize High Priority items that have no open PR yet).
 
