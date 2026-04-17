@@ -209,10 +209,19 @@ class SpotifyStatusResponse(BaseModel):
 
 # --- Admin models ---
 
+class SubsystemHealth(BaseModel):
+    status: str  # ok | degraded | error | unknown | unauthenticated | expired | expiring_soon
+    latency_ms: Optional[float] = None
+    detail: Optional[str] = None
+
+
 class HealthResponse(BaseModel):
-    status: str
-    database: str
-    uptime_seconds: Optional[float] = None
+    status: str  # ok | degraded | error
+    uptime_seconds: float
+    database: SubsystemHealth
+    spotify: SubsystemHealth
+    tidal: SubsystemHealth
+    disk: SubsystemHealth
 
 
 class VersionResponse(BaseModel):

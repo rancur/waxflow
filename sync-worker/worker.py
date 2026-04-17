@@ -61,10 +61,25 @@ class HealthHandler(BaseHTTPRequestHandler):
             status = "stalled"
         else:
             status = "ok"
+
+        queue_depth = None
+        try:
+            if os.path.exists(DB_PATH):
+                with get_db(DB_PATH) as conn:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM tracks"
+                        " WHERE pipeline_stage IN ('matching','downloading','verifying','organizing')"
+                    ).fetchone()
+                    queue_depth = row[0] if row else 0
+        except Exception:
+            pass
+
         body = json.dumps({
             "status": status,
             "last_cycle": last,
+            "last_cycle_age_seconds": round(now - last, 1) if last > 0 else None,
             "tracks_processed": _health_state["tracks_processed"],
+            "queue_depth": queue_depth,
         })
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

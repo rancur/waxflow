@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from db import get_db
-from models import ConfigUpdate, HealthResponse, VersionResponse
+from models import ConfigUpdate, HealthResponse, SubsystemHealth, VersionResponse
 
 router = APIRouter(prefix="/api", tags=["admin"])
 
@@ -75,20 +75,98 @@ async def set_sync_mode(body: dict):
         return {"sync_mode": mode, "tracks_queued": tracks_queued}
 
 
+_TIDAL_AUTH_PATHS = [
+    "/tiddl-auth/auth.json",
+    "/app/data/tiddl-auth.json",
+]
+
+
 @router.get("/admin/health", response_model=HealthResponse)
 async def health_check():
-    db_status = "ok"
+    # --- Database ---
+    t0 = time.monotonic()
+    db_status, db_detail = "ok", None
     try:
         with get_db() as conn:
             conn.execute("SELECT 1").fetchone()
-    except Exception:
-        db_status = "error"
+    except Exception as e:
+        db_status, db_detail = "error", str(e)
+    db_latency = round((time.monotonic() - t0) * 1000, 1)
 
-    status = "ok" if db_status == "ok" else "degraded"
+    # --- Spotify token ---
+    spotify_status, spotify_detail = "unknown", None
+    try:
+        with get_db() as conn:
+            access = conn.execute("SELECT value FROM app_config WHERE key='spotify_access_token'").fetchone()
+            expiry = conn.execute("SELECT value FROM app_config WHERE key='spotify_token_expiry'").fetchone()
+        if not access or not access[0]:
+            spotify_status, spotify_detail = "unauthenticated", "No access token stored"
+        elif expiry and expiry[0]:
+            remaining = int(expiry[0]) - int(time.time())
+            if remaining < 0:
+                spotify_status, spotify_detail = "expired", f"Token expired {-remaining}s ago"
+            elif remaining < 300:
+                spotify_status, spotify_detail = "expiring_soon", f"Expires in {remaining}s"
+            else:
+                spotify_status, spotify_detail = "ok", f"Valid for {remaining}s"
+        else:
+            spotify_status = "ok"
+    except Exception as e:
+        spotify_status, spotify_detail = "error", str(e)
+
+    # --- Tidal auth ---
+    tidal_status, tidal_detail = "unauthenticated", "No auth file found"
+    for auth_path in _TIDAL_AUTH_PATHS:
+        if os.path.exists(auth_path):
+            try:
+                with open(auth_path) as f:
+                    auth = json.load(f)
+                remaining = int(auth.get("expires_at", 0)) - int(time.time())
+                if remaining < 0:
+                    tidal_status, tidal_detail = "expired", f"Token expired {-remaining}s ago"
+                elif remaining < 3600:
+                    tidal_status, tidal_detail = "expiring_soon", f"Expires in {remaining}s"
+                else:
+                    tidal_status, tidal_detail = "ok", f"Valid for {remaining}s"
+            except Exception as e:
+                tidal_status, tidal_detail = "error", str(e)
+            break
+
+    # --- Disk space ---
+    disk_status, disk_detail = "ok", None
+    music_path = os.environ.get("MUSIC_LIBRARY_PATH", "/music")
+    db_dir = os.path.dirname(os.environ.get("SLS_DB_PATH", "/app/data/sync.db"))
+    for check_path in [music_path, db_dir]:
+        if os.path.exists(check_path):
+            try:
+                usage = shutil.disk_usage(check_path)
+                free_pct = usage.free / usage.total * 100
+                free_gb = usage.free / (1024 ** 3)
+                if free_pct < 5:
+                    disk_status, disk_detail = "error", f"{check_path}: {free_pct:.1f}% free ({free_gb:.1f} GB)"
+                    break
+                elif free_pct < 15 and disk_status == "ok":
+                    disk_status, disk_detail = "degraded", f"{check_path}: {free_pct:.1f}% free ({free_gb:.1f} GB)"
+            except Exception as e:
+                disk_status, disk_detail = "error", str(e)
+                break
+
+    # --- Overall status ---
+    subsystem_statuses = {db_status, spotify_status, tidal_status, disk_status}
+    if "error" in subsystem_statuses:
+        overall = "error"
+    elif subsystem_statuses & {"expired", "expiring_soon", "degraded", "unauthenticated"}:
+        overall = "degraded"
+    else:
+        overall = "ok"
+
     return HealthResponse(
-        status=status,
-        database=db_status,
+        status=overall,
         uptime_seconds=round(time.time() - _start_time, 1),
+        database=SubsystemHealth(status=db_status, latency_ms=db_latency, detail=db_detail),
+        spotify=SubsystemHealth(status=spotify_status, detail=spotify_detail),
+        tidal=SubsystemHealth(status=tidal_status, detail=tidal_detail),
+        disk=SubsystemHealth(status=disk_status, detail=disk_detail),
     )
 
 
