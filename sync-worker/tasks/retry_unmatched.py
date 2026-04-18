@@ -1,32 +1,35 @@
 """
-Periodic retry for tracks that failed matching.
-Resets 'No Tidal match found' errors back to the beginning of the pipeline
-so the worker will attempt matching again.
+Periodic retry for tracks that failed Tidal matching.
+On each retry, fuzzy_depth is incremented so _match_track uses progressively
+broader search queries (feat-stripped, version-stripped, bare title, etc.).
+When fuzzy_depth reaches fuzzy_match_max_depth the track is marked permanently
+unavailable.
 """
 
+import json
 import logging
 
-from tasks.helpers import get_db, log_activity
+from tasks.helpers import get_config, get_db, log_activity
 
 log = logging.getLogger("worker.retry_unmatched")
 
 
 async def retry_unmatched(db_path: str):
-    """Find tracks with 'No Tidal match found' errors and reset them for retry."""
+    """Find tracks with 'No Tidal match found' errors and retry with deeper fuzzy search."""
     import asyncio
 
     count = await asyncio.to_thread(_retry_unmatched_sync, db_path)
     if count > 0:
-        log.info(f"Reset {count} unmatched tracks for retry")
+        log.info("Reset %d unmatched tracks for fuzzy retry", count)
 
 
 def _retry_unmatched_sync(db_path: str) -> int:
     """Synchronous DB work for retry_unmatched."""
-    MAX_RETRIES = 3
+    max_depth = int(get_config(db_path, "fuzzy_match_max_depth") or "4")
 
     with get_db(db_path) as conn:
         rows = conn.execute(
-            """SELECT id, title, artist, download_attempts FROM tracks
+            """SELECT id, title, artist, fuzzy_depth FROM tracks
                WHERE match_status = 'failed'
                  AND pipeline_stage = 'error'
                  AND pipeline_error LIKE '%No Tidal match found%'"""
@@ -35,79 +38,73 @@ def _retry_unmatched_sync(db_path: str) -> int:
         if not rows:
             return 0
 
-        # Split into retryable vs permanently failed based on download_attempts
-        # (reusing download_attempts as retry counter for unmatched tracks)
         retryable = []
         permanently_failed = []
         for r in rows:
-            retry_count = r["download_attempts"] or 0
-            if retry_count >= MAX_RETRIES:
+            depth = r["fuzzy_depth"] or 0
+            if depth >= max_depth:
                 permanently_failed.append(r)
             else:
                 retryable.append(r)
 
-        # Mark permanently failed tracks so they stop being retried
         for row in permanently_failed:
+            depth = row["fuzzy_depth"] or 0
             conn.execute(
                 """UPDATE tracks
-                    SET pipeline_error = 'Permanently unavailable on Tidal (retried 3 times)',
+                    SET pipeline_error = ?,
                         updated_at = datetime('now')
                     WHERE id = ?""",
-                (row["id"],),
+                (f"No Tidal match after {depth} fuzzy search passes", row["id"]),
             )
             conn.execute(
                 "INSERT INTO activity_log (event_type, track_id, message, details) VALUES (?, ?, ?, ?)",
                 (
                     "retry_unmatched_exhausted",
                     row["id"],
-                    f"Permanently unavailable: {row['title']} by {row['artist']} (retried {MAX_RETRIES} times)",
+                    f"Permanently unavailable: {row['title']} by {row['artist']} (exhausted {depth} fuzzy passes)",
                     None,
                 ),
             )
 
         if permanently_failed:
-            log.info("Marked %d tracks as permanently unavailable (max retries reached)", len(permanently_failed))
+            log.info(
+                "Marked %d tracks as permanently unavailable (fuzzy_depth exhausted at %d)",
+                len(permanently_failed), max_depth,
+            )
 
         if not retryable:
             return 0
 
-        track_ids = [r["id"] for r in retryable]
-
-        # Increment download_attempts as a retry counter, then reset for re-matching
         for r in retryable:
-            new_count = (r["download_attempts"] or 0) + 1
+            new_depth = (r["fuzzy_depth"] or 0) + 1
             conn.execute(
                 """UPDATE tracks
                     SET pipeline_stage = 'new',
                         match_status = 'pending',
                         pipeline_error = NULL,
-                        download_attempts = ?,
+                        fuzzy_depth = ?,
                         updated_at = datetime('now')
                     WHERE id = ?""",
-                (new_count, r["id"]),
+                (new_depth, r["id"]),
             )
-
-        # Log each reset
-        for row in retryable:
             conn.execute(
                 "INSERT INTO activity_log (event_type, track_id, message, details) VALUES (?, ?, ?, ?)",
                 (
                     "retry_unmatched",
-                    row["id"],
-                    f"Retry search: {row['title']} by {row['artist']} (attempt {(row['download_attempts'] or 0) + 1}/{MAX_RETRIES})",
-                    None,
+                    r["id"],
+                    f"Fuzzy retry depth {new_depth}/{max_depth}: {r['title']} by {r['artist']}",
+                    json.dumps({"fuzzy_depth": new_depth, "max_depth": max_depth}),
                 ),
             )
 
-        # Summary log entry
         conn.execute(
             "INSERT INTO activity_log (event_type, track_id, message, details) VALUES (?, ?, ?, ?)",
             (
                 "retry_unmatched_batch",
                 None,
-                f"Reset {len(track_ids)} unmatched tracks for retry ({len(permanently_failed)} exhausted)",
+                f"Queued {len(retryable)} tracks for fuzzy retry ({len(permanently_failed)} exhausted)",
                 None,
             ),
         )
 
-        return len(track_ids)
+        return len(retryable)

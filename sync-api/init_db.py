@@ -46,6 +46,7 @@ def init():
                 CHECK(pipeline_stage IN ('new','matching','downloading','verifying','organizing','complete','error','waiting','ignored')),
             pipeline_error TEXT,
             is_protected INTEGER NOT NULL DEFAULT 0,
+            fuzzy_depth INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -144,6 +145,7 @@ def init():
             ('plex_uid', '1000'),
             ('plex_gid', '1000'),
             ('retry_search_interval_seconds', '43200'),
+            ('fuzzy_match_max_depth', '4'),
             ('lexicon_legacy_path_prefixes', ''),
             ('analyze_interval_seconds', '3600'),
             ('analyze_batch_size', '20'),
@@ -317,6 +319,13 @@ def init():
                 ALTER TABLE download_queue_new RENAME TO download_queue;
             """)
             print("Migration complete.")
+
+    # Migration: add fuzzy_depth column for progressive fuzzy match retry
+    with get_db() as conn:
+        existing_cols = [row[1] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()]
+        if "fuzzy_depth" not in existing_cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN fuzzy_depth INTEGER NOT NULL DEFAULT 0")
+            print("Migration: added fuzzy_depth column to tracks table.")
 
     print("Database initialized successfully.")
 
