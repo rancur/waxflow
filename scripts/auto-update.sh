@@ -34,9 +34,13 @@ cd "$REPO_DIR"
 # Check for signal file from web UI
 if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
     log "Update requested via web UI"
-    rm -f "$SIGNAL_FILE"
-    ${DOCKER} compose up -d --build >> "$LOG_FILE" 2>&1
-    log "Rebuild complete (web UI trigger)"
+    if ${DOCKER} compose up -d --build >> "$LOG_FILE" 2>&1; then
+        rm -f "$SIGNAL_FILE"
+        log "Rebuild complete (web UI trigger)"
+    else
+        log "Rebuild failed (web UI trigger), signal retained for retry"
+        exit 1
+    fi
     exit 0
 fi
 
