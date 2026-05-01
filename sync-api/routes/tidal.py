@@ -42,7 +42,7 @@ async def tidal_status():
 @router.post("/tidal/auth/start")
 async def tidal_auth_start():
     """Start Tidal device code auth flow."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             "https://auth.tidal.com/v1/oauth2/device_authorization",
             data={
@@ -89,7 +89,10 @@ async def tidal_auth_poll():
                 "scope": "r_usr w_usr w_sub",
             },
         )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            return {"status": "error", "error": f"Tidal returned HTTP {resp.status_code} with non-JSON body"}
 
         if resp.status_code == 200 and "access_token" in data:
             # Success — save the token
