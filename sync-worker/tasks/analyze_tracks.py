@@ -73,7 +73,7 @@ def _detect_bpm_aubio(file_path: str) -> float | None:
     try:
         # First try: convert to WAV via ffmpeg (aubio CLI handles WAV best)
         # Use a temp file to avoid issues with FLAC/other formats
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
 
         # Decode to 16-bit mono WAV for aubio
