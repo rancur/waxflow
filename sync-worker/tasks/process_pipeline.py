@@ -570,120 +570,255 @@ def _normalize_title(title: str) -> str:
     return " ".join(t.split())
 
 
+def _strip_all_parens(title: str) -> str:
+    """Strip ALL parenthetical and bracket content from a title."""
+    t = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", title).strip()
+    return " ".join(t.split())
+
+
+def _strip_features_from_artist(artist: str) -> str:
+    """Remove featuring clauses from an artist string (e.g. 'A feat. B' -> 'A')."""
+    t = re.sub(r"\s*(?:feat|ft|featuring)\.?\s+.*$", "", artist, flags=re.IGNORECASE)
+    return t.strip()
+
+
+def _extract_remix_artist(title: str) -> str | None:
+    """Extract remixer name from patterns like 'Title (Remixer Remix)'."""
+    m = re.search(
+        r"[\(\[]\s*(.+?)\s+(?:remix|rmx|rework|edit|bootleg)\s*[\)\]]",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _build_search_queries(artist: str, title: str, depth: int) -> list[tuple[str, str]]:
+    """Return (query, description) pairs for a given fuzzy retry depth.
+
+    Depth 0 is the baseline pass (initial attempt).
+    Higher depths add progressively more aggressive stripping strategies.
+    Queries from earlier depths are NOT repeated; each depth only adds new candidates.
+    """
+    artists_set = _normalize_artists(artist)
+    first_artist = next(iter(artists_set), artist.strip()) if artists_set else artist.strip()
+
+    # Base title: strip only feat/ft tags from the title text
+    base_title = re.sub(
+        r"\s*[\(\[]\s*(?:feat|ft)\.?\s+[^\)\]]+[\)\]]", "", title, flags=re.IGNORECASE
+    ).strip()
+    # Clean title: strip ALL parenthetical/bracket content
+    clean_title = _strip_all_parens(title)
+    # Clean artist: strip feat clauses from the artist string itself
+    clean_artist = _strip_features_from_artist(artist)
+
+    queries: list[tuple[str, str]] = []
+
+    if depth == 0:
+        # Baseline: full artist, first-artist, first-artist + base-title
+        full_q = f"{artist} {title}".strip()
+        if full_q:
+            queries.append((full_q, "full-artist + title"))
+        first_q = f"{first_artist} {title}".strip()
+        if first_q and first_q.lower() != full_q.lower():
+            queries.append((first_q, "first-artist + title"))
+        if base_title and base_title.lower() != title.lower():
+            base_q = f"{first_artist} {base_title}".strip()
+            if base_q.lower() not in {q.lower() for q, _ in queries}:
+                queries.append((base_q, "first-artist + feat-stripped-title"))
+
+    elif depth == 1:
+        # Strip all parentheticals from title; also clean the artist string
+        if clean_title and clean_title.lower() != title.lower():
+            q = f"{first_artist} {clean_title}".strip()
+            queries.append((q, "first-artist + no-parens-title"))
+        if clean_artist and clean_artist.lower() != artist.lower():
+            q2 = f"{clean_artist} {clean_title or title}".strip()
+            if q2.lower() not in {q.lower() for q, _ in queries}:
+                queries.append((q2, "clean-artist + no-parens-title"))
+        # Also try with alternate artists from a multi-artist string
+        for alt_artist in sorted(artists_set):
+            if alt_artist.lower() == first_artist.lower():
+                continue
+            q3 = f"{alt_artist} {clean_title or title}".strip()
+            if q3.lower() not in {q.lower() for q, _ in queries}:
+                queries.append((q3, f"alt-artist({alt_artist}) + no-parens-title"))
+
+    elif depth == 2:
+        # Try every individual artist with clean title; try title-only; try remixer
+        all_artists = list(artists_set) if artists_set else [first_artist]
+        for indiv in sorted(all_artists):
+            q = f"{indiv} {clean_title or title}".strip()
+            if q.lower() not in {q_.lower() for q_, _ in queries}:
+                queries.append((q, f"individual-artist({indiv}) + clean-title"))
+        # Title-only (high duration sensitivity required by caller)
+        title_q = (clean_title or title).strip()
+        if title_q:
+            queries.append((title_q, "title-only"))
+        # Remixer extracted from title
+        remix_artist = _extract_remix_artist(title)
+        if remix_artist:
+            remix_q = f"{remix_artist} {base_title or title}".strip()
+            if remix_q.lower() not in {q.lower() for q, _ in queries}:
+                queries.append((remix_q, f"remixer({remix_artist}) + base-title"))
+
+    elif depth >= 3:
+        # Last resort: partial title (first 4 words) with first artist
+        words = (clean_title or title).split()
+        if len(words) > 4:
+            partial = " ".join(words[:4])
+            queries.append((f"{first_artist} {partial}", "first-artist + partial-title"))
+        # Plain clean title alone
+        if clean_title:
+            queries.append((clean_title, "clean-title-only"))
+
+    return queries
+
+
+def _score_tidal_result(
+    item: dict,
+    artist: str,
+    title: str,
+    duration_ms: int,
+    depth: int,
+) -> float:
+    """Score a single Tidal search result against the target track.
+
+    Returns a confidence value 0.0–1.0, or 0.0 if no match.
+    Depth >= 3 uses a relaxed confidence floor.
+    """
+    item_title = item.get("title") or ""
+    item_norm = _normalize_title(item_title)
+    spotify_norm = _normalize_title(title)
+
+    tidal_artist_name = ""
+    if item.get("artist", {}).get("name"):
+        tidal_artist_name = item["artist"]["name"]
+    elif item.get("artists"):
+        tidal_artist_name = " ".join(a.get("name", "") for a in item["artists"])
+
+    # Title-only queries skip artist check but require tight duration match
+    # (caller passes artist="" for title-only queries)
+    if artist and not _artists_match(artist, tidal_artist_name):
+        return 0.0
+
+    item_duration = (item.get("duration") or 0) * 1000
+    duration_diff = abs(item_duration - duration_ms)
+
+    # TODO(Bug #32): Consider reusing _titles_match() here for consistency
+    norm_exact = (spotify_norm == item_norm)
+    partial_match = (
+        spotify_norm in item_norm
+        or item_norm in spotify_norm
+        or title.lower() in item_title.lower()
+        or item_title.lower() in title.lower()
+    )
+
+    if norm_exact and duration_diff <= 5000:
+        return 0.95
+    if norm_exact and duration_diff <= 15000:
+        return 0.90
+    if partial_match and duration_diff <= 5000:
+        return 0.85
+    if partial_match and duration_diff <= 15000:
+        return 0.80
+    # Depth >= 3: accept lower-confidence matches (looser duration window)
+    if depth >= 3:
+        if norm_exact and duration_diff <= 30000:
+            return 0.70
+        if partial_match and duration_diff <= 30000:
+            return 0.65
+    return 0.0
+
+
 def _match_track(db_path: str, track: dict):
-    """Try to find a Tidal match via Tidal API search."""
+    """Try to find a Tidal match via Tidal API search.
+
+    Uses progressive fuzzy retry passes controlled by the track's match_retry_depth.
+    Each depth adds more aggressive title/artist stripping strategies.
+    Every query attempt is logged to fallback_attempts for audit.
+    """
     track_id = track["id"]
     isrc = track.get("isrc")
     artist = track.get("artist", "")
     title = track.get("title", "")
     duration_ms = track.get("duration_ms") or 0
+    retry_depth = track.get("match_retry_depth") or 0
+
+    # Confidence floor: depth 3+ accepts lower-quality matches
+    min_confidence = 0.65 if retry_depth >= 3 else 0.80
 
     matched = False
     tidal_id = None
     confidence = 0.0
     match_source = None
 
-    # Strategy 1: Search Tidal by ISRC
+    # Strategy 1: Search Tidal by ISRC (always attempted on every pass)
     if isrc:
         try:
             results = _tidal_search(isrc)
-            # Check ALL results for matching ISRC (not just the first)
             for item in results:
                 if item.get("isrc", "").upper() == isrc.upper():
                     tidal_id = str(item["id"])
                     confidence = 1.0
                     match_source = "isrc"
                     matched = True
-                    log.debug("Track %d: ISRC match found at result index %d", track_id,
-                              results.index(item))
+                    log.debug(
+                        "Track %d: ISRC match at result index %d",
+                        track_id, results.index(item),
+                    )
                     break
+            if not matched:
+                _log_fallback(db_path, track_id, isrc, len(results), "isrc-no-exact-match")
         except Exception as e:
             log.warning("ISRC search failed for track %d: %s", track_id, e)
 
-    # Strategy 2: Search by artist + title with smarter matching
+    # Strategy 2: Fuzzy text search using depth-appropriate queries
     if not matched:
-        # Try multiple query formats to improve match rate for multi-artist tracks
-        spotify_artists_set = _normalize_artists(artist)
-        first_artist = next(iter(spotify_artists_set), artist.strip()) if spotify_artists_set else artist.strip()
-        base_title = re.sub(r"\s*[\(\[]\s*(?:feat|ft)\.?\s+[^\)\]]+[\)\]]", "", title, flags=re.IGNORECASE).strip()
+        queries = _build_search_queries(artist, title, retry_depth)
+        log.debug(
+            "Track %d depth=%d: trying %d fuzzy queries: %s",
+            track_id, retry_depth, len(queries),
+            [desc for _, desc in queries],
+        )
 
-        queries_to_try = []
-        full_query = f"{artist} {title}".strip()
-        if full_query:
-            queries_to_try.append(full_query)
-        first_artist_query = f"{first_artist} {title}".strip()
-        if first_artist_query and first_artist_query.lower() != full_query.lower():
-            queries_to_try.append(first_artist_query)
-        if base_title and base_title.lower() != title.lower():
-            base_query = f"{first_artist} {base_title}".strip()
-            if base_query.lower() not in [q.lower() for q in queries_to_try]:
-                queries_to_try.append(base_query)
-
-        for query in queries_to_try:
+        for query, query_desc in queries:
             if matched:
                 break
             try:
-                results = _tidal_search(query)
-                spotify_norm = _normalize_title(title)
+                # Title-only queries: pass empty artist to skip the artist filter
+                # but require a tight duration match (enforced inside _score_tidal_result)
+                score_artist = "" if "title-only" in query_desc else artist
 
+                results = _tidal_search(query)
                 best_candidate = None
-                best_confidence = 0.0
+                best_score = 0.0
 
                 for item in results:
-                    item_title = (item.get("title") or "")
-                    item_norm = _normalize_title(item_title)
-                    item_title_lower = item_title.lower()
-
-                    # Build full artist string from Tidal response
-                    tidal_artist_name = ""
-                    if item.get("artist", {}).get("name"):
-                        tidal_artist_name = item["artist"]["name"]
-                    elif item.get("artists"):
-                        tidal_artist_name = " ".join(
-                            a.get("name", "") for a in item["artists"]
-                        )
-
-                    # Use _artists_match for proper &/+/and/vs splitting
-                    if not _artists_match(artist, tidal_artist_name):
-                        continue
-
-                    item_duration = (item.get("duration") or 0) * 1000
-                    duration_diff = abs(item_duration - duration_ms)
-
-                    # Title matching tiers
-                    # TODO(Bug #32): Consider reusing _titles_match() here for consistency
-                    # with Lexicon matching. Currently uses inline tiered matching for
-                    # confidence scoring which _titles_match doesn't support.
-                    norm_exact = (spotify_norm == item_norm)
-                    partial_match = (
-                        spotify_norm in item_norm
-                        or item_norm in spotify_norm
-                        or title.lower() in item_title_lower
-                        or item_title_lower in title.lower()
-                    )
-
-                    # Compute confidence based on match quality
-                    candidate_confidence = 0.0
-                    if norm_exact and duration_diff <= 5000:
-                        candidate_confidence = 0.95
-                    elif norm_exact and duration_diff <= 15000:
-                        candidate_confidence = 0.90
-                    elif partial_match and duration_diff <= 5000:
-                        candidate_confidence = 0.85
-                    elif partial_match and duration_diff <= 15000:
-                        candidate_confidence = 0.80
-
-                    if candidate_confidence > best_confidence:
-                        best_confidence = candidate_confidence
+                    score = _score_tidal_result(item, score_artist, title, duration_ms, retry_depth)
+                    if score > best_score:
+                        best_score = score
                         best_candidate = item
 
-                if best_candidate and best_confidence >= 0.80:
+                if best_candidate and best_score >= min_confidence:
                     tidal_id = str(best_candidate["id"])
-                    confidence = best_confidence
+                    confidence = best_score
                     match_source = "search"
                     matched = True
+                    log.debug(
+                        "Track %d: matched via '%s' (conf=%.2f, depth=%d)",
+                        track_id, query_desc, best_score, retry_depth,
+                    )
+                else:
+                    reason = "no-results" if not results else "below-confidence-threshold"
+                    _log_fallback(db_path, track_id, query, len(results), reason)
+                    log.debug(
+                        "Track %d: query '%s' [%s] -> %d results, best=%.2f",
+                        track_id, query, query_desc, len(results), best_score,
+                    )
             except Exception as e:
-                log.warning("Title/artist search failed for track %d: %s", track_id, e)
+                log.warning("Search failed for track %d query '%s': %s", track_id, query, e)
 
     if matched and tidal_id:
         update_track(
@@ -697,26 +832,46 @@ def _match_track(db_path: str, track: dict):
         )
         log_activity(
             db_path, "match_found", track_id,
-            f"Matched via {match_source} (confidence {confidence}): tidal_id={tidal_id}",
-            {"tidal_id": tidal_id, "match_source": match_source, "confidence": confidence},
+            f"Matched via {match_source} (confidence {confidence:.2f}, depth {retry_depth}): "
+            f"tidal_id={tidal_id}",
+            {
+                "tidal_id": tidal_id,
+                "match_source": match_source,
+                "confidence": confidence,
+                "retry_depth": retry_depth,
+            },
         )
-        log.info("Track %d matched via %s -> tidal_id=%s", track_id, match_source, tidal_id)
+        log.info(
+            "Track %d matched via %s (depth=%d) -> tidal_id=%s",
+            track_id, match_source, retry_depth, tidal_id,
+        )
     else:
-        with get_db(db_path) as conn:
-            conn.execute(
-                """INSERT INTO fallback_attempts
-                (track_id, source, status, search_query, result_count)
-                VALUES (?, 'tidal', 'no_match', ?, 0)""",
-                (track_id, f"{artist} {title}"),
-            )
         update_track(
             db_path, track_id,
             match_status="failed",
             pipeline_stage="error",
-            pipeline_error="No Tidal match found",
+            pipeline_error=f"No Tidal match found (depth {retry_depth})",
         )
-        log_activity(db_path, "match_failed", track_id, f"No match found for: {artist} - {title}")
-        log.warning("Track %d: no match for '%s - %s'", track_id, artist, title)
+        log_activity(
+            db_path, "match_failed", track_id,
+            f"No match found for: {artist} - {title} (depth {retry_depth})",
+            {"retry_depth": retry_depth},
+        )
+        log.warning(
+            "Track %d: no match for '%s - %s' (depth=%d)",
+            track_id, artist, title, retry_depth,
+        )
+
+
+def _log_fallback(db_path: str, track_id: int, query: str, result_count: int, reason: str):
+    """Insert a record into fallback_attempts for a failed search query."""
+    with get_db(db_path) as conn:
+        conn.execute(
+            """INSERT INTO fallback_attempts
+               (track_id, source, status, search_query, result_count)
+               VALUES (?, 'tidal', ?, ?, ?)""",
+            (track_id, reason, query, result_count),
+        )
 
 
 def _tidal_search(query: str) -> list[dict]:

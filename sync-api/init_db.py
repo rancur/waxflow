@@ -164,8 +164,19 @@ def init():
             ('auto_playlists_interval_seconds', '86400'),
             ('auto_playlists_last_run', ''),
             ('auto_playlists_created_ids', '{}'),
-            ('auto_playlists_rebuild', '0');
+            ('auto_playlists_rebuild', '0'),
+            ('fuzzy_retry_depth', '3');
         """)
+    # Migration: add match_retry_depth column to tracks table
+    with get_db() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()}
+        if "match_retry_depth" not in cols:
+            print("Migrating tracks table: adding match_retry_depth column...")
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN match_retry_depth INTEGER NOT NULL DEFAULT 0"
+            )
+            print("Migration complete.")
+
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed
     with get_db() as conn:
