@@ -89,7 +89,10 @@ async def tidal_auth_poll():
                 "scope": "r_usr w_usr w_sub",
             },
         )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            return {"status": "error", "error": f"Invalid response from Tidal (HTTP {resp.status_code})"}
 
         if resp.status_code == 200 and "access_token" in data:
             # Success — save the token
