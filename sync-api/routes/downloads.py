@@ -276,8 +276,9 @@ async def download_stats():
         tidarr_url = os.environ.get("TIDARR_URL", "http://tidarr:8484")
         tidarr_reachable = False
         try:
-            resp = httpx.get(f"{tidarr_url}/api/health", timeout=2)
-            tidarr_reachable = resp.status_code == 200
+            async with httpx.AsyncClient(timeout=2) as health_client:
+                resp = await health_client.get(f"{tidarr_url}/api/health")
+                tidarr_reachable = resp.status_code == 200
         except Exception:
             pass
 
