@@ -602,7 +602,9 @@ def _build_search_queries(artist: str, title: str, depth: int) -> list[tuple[str
     Queries from earlier depths are NOT repeated; each depth only adds new candidates.
     """
     artists_set = _normalize_artists(artist)
-    first_artist = next(iter(artists_set), artist.strip()) if artists_set else artist.strip()
+    # Split on the raw comma to get the primary (first-listed) artist deterministically.
+    # Using next(iter(set)) would be non-deterministic since sets are unordered.
+    first_artist = artist.split(",")[0].strip() or artist.strip()
 
     # Base title: strip only feat/ft tags from the title text
     base_title = re.sub(
