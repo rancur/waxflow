@@ -102,9 +102,9 @@ async def get_dashboard():
             latency = round((time.monotonic() - t0) * 1000, 1)
             services.append(ServiceHealth(
                 name="tidal",
-                status="ok" if resp.status_code < 500 else "error",
+                status="ok" if resp.status_code == 200 else "error",
                 latency_ms=latency,
-                error=None if resp.status_code < 500 else f"HTTP {resp.status_code}",
+                error=None if resp.status_code == 200 else f"HTTP {resp.status_code}",
             ))
         except Exception as e:
             services.append(ServiceHealth(name="tidal", status="error", error=str(e)))
