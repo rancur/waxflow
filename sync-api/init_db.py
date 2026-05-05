@@ -164,7 +164,9 @@ def init():
             ('auto_playlists_interval_seconds', '86400'),
             ('auto_playlists_last_run', ''),
             ('auto_playlists_created_ids', '{}'),
-            ('auto_playlists_rebuild', '0');
+            ('auto_playlists_rebuild', '0'),
+            ('parity_alert_threshold', '95.0'),
+            ('parity_alert_cooldown_seconds', '1800');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed
