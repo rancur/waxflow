@@ -38,7 +38,8 @@ class LexiconSyncService:
         if playlist_id:
             params["playlistId"] = playlist_id
         resp = await self._request("GET", "/v1/tracks", params=params)
-        return resp.json()
+        data = resp.json()
+        return data.get("data", {}).get("tracks", [])
 
     async def search_tracks(self, artist: str, title: str) -> list[dict]:
         """Search Lexicon for tracks by artist and title."""
