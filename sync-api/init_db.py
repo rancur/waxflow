@@ -144,6 +144,7 @@ def init():
             ('plex_uid', '1000'),
             ('plex_gid', '1000'),
             ('retry_search_interval_seconds', '43200'),
+            ('fuzzy_match_depth', '3'),
             ('lexicon_legacy_path_prefixes', ''),
             ('analyze_interval_seconds', '3600'),
             ('analyze_batch_size', '20'),

@@ -570,6 +570,52 @@ def _normalize_title(title: str) -> str:
     return " ".join(t.split())
 
 
+def _build_fuzzy_query_passes(artist: str, title: str) -> list[tuple[int, str, str]]:
+    """Return ordered (pass_num, query, description) tuples for progressive fuzzy Tidal search.
+
+    Passes go from most specific to most permissive. Slice with fuzzy_match_depth config
+    to control how many are attempted.
+    """
+    # Use the first name from the original string (comma/&/feat split), not a set,
+    # so the query order is deterministic across Python versions.
+    first_artist = re.split(r"[,&+]|\bx\b|\bvs\.?\b|\band\b|\bfeat\.?\b|\bft\.?\b",
+                            artist, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if not first_artist:
+        first_artist = artist.strip()
+    first_artist_word = first_artist.split()[0] if first_artist else ""
+
+    # Strip only the "(feat. X)" / "[ft. X]" tag from the title, keep remix suffixes
+    title_no_feat = re.sub(
+        r"\s*[\(\[]\s*(?:feat|ft)\.?\s+[^\)\]]+[\)\]]", "", title, flags=re.IGNORECASE
+    ).strip()
+
+    # Strip remix/edit/mix suffixes via existing helper
+    base_title = _extract_base_title(title)
+
+    # Strip ALL parenthetical/bracket content and trailing "- suffix"
+    core_title = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", title).strip()
+    core_title = re.sub(r"\s+-\s+\S.*$", "", core_title).strip()
+
+    candidates = [
+        (1, f"{artist} {title}".strip(), "full_artist+full_title"),
+        (2, f"{first_artist} {title}".strip(), "first_artist+full_title"),
+        (3, f"{first_artist} {title_no_feat}".strip(), "first_artist+no_feat_title"),
+        (4, f"{first_artist} {base_title}".strip(), "first_artist+base_title"),
+        (5, f"{first_artist} {core_title}".strip(), "first_artist+core_title"),
+        (6, f"{first_artist_word} {base_title}".strip(), "first_artist_word+base_title"),
+    ]
+
+    seen: set[str] = set()
+    unique: list[tuple[int, str, str]] = []
+    for pass_num, query, desc in candidates:
+        key = query.lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append((pass_num, query, desc))
+
+    return unique
+
+
 def _match_track(db_path: str, track: dict):
     """Try to find a Tidal match via Tidal API search."""
     track_id = track["id"]
@@ -600,26 +646,12 @@ def _match_track(db_path: str, track: dict):
         except Exception as e:
             log.warning("ISRC search failed for track %d: %s", track_id, e)
 
-    # Strategy 2: Search by artist + title with smarter matching
+    # Strategy 2: Progressive fuzzy metadata search with configurable depth
     if not matched:
-        # Try multiple query formats to improve match rate for multi-artist tracks
-        spotify_artists_set = _normalize_artists(artist)
-        first_artist = next(iter(spotify_artists_set), artist.strip()) if spotify_artists_set else artist.strip()
-        base_title = re.sub(r"\s*[\(\[]\s*(?:feat|ft)\.?\s+[^\)\]]+[\)\]]", "", title, flags=re.IGNORECASE).strip()
+        fuzzy_depth = int(get_config(db_path, "fuzzy_match_depth") or "3")
+        fuzzy_passes = _build_fuzzy_query_passes(artist, title)[:fuzzy_depth]
 
-        queries_to_try = []
-        full_query = f"{artist} {title}".strip()
-        if full_query:
-            queries_to_try.append(full_query)
-        first_artist_query = f"{first_artist} {title}".strip()
-        if first_artist_query and first_artist_query.lower() != full_query.lower():
-            queries_to_try.append(first_artist_query)
-        if base_title and base_title.lower() != title.lower():
-            base_query = f"{first_artist} {base_title}".strip()
-            if base_query.lower() not in [q.lower() for q in queries_to_try]:
-                queries_to_try.append(base_query)
-
-        for query in queries_to_try:
+        for pass_num, query, pass_desc in fuzzy_passes:
             if matched:
                 break
             try:
@@ -682,8 +714,21 @@ def _match_track(db_path: str, track: dict):
                     confidence = best_confidence
                     match_source = "search"
                     matched = True
+                else:
+                    with get_db(db_path) as conn:
+                        conn.execute(
+                            """INSERT INTO fallback_attempts
+                               (track_id, source, status, search_query, result_count)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (track_id, f"tidal_fuzzy_pass{pass_num}", "no_match",
+                             query, len(results)),
+                        )
+                    log.debug(
+                        "Track %d fuzzy pass %d/%d [%s]: query=%r results=%d no match",
+                        track_id, pass_num, len(fuzzy_passes), pass_desc, query, len(results),
+                    )
             except Exception as e:
-                log.warning("Title/artist search failed for track %d: %s", track_id, e)
+                log.warning("Fuzzy pass %d failed for track %d: %s", pass_num, track_id, e)
 
     if matched and tidal_id:
         update_track(
@@ -702,13 +747,6 @@ def _match_track(db_path: str, track: dict):
         )
         log.info("Track %d matched via %s -> tidal_id=%s", track_id, match_source, tidal_id)
     else:
-        with get_db(db_path) as conn:
-            conn.execute(
-                """INSERT INTO fallback_attempts
-                (track_id, source, status, search_query, result_count)
-                VALUES (?, 'tidal', 'no_match', ?, 0)""",
-                (track_id, f"{artist} {title}"),
-            )
         update_track(
             db_path, track_id,
             match_status="failed",
