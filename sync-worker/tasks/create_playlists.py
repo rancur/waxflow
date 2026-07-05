@@ -394,12 +394,91 @@ CAMELOT_KEYS = [
 ]
 
 # ============================================================
-# Lexicon API helpers
+# Managed top-level folders + legacy-name reconciliation
 # ============================================================
+
+# The canonical top-level folders WaxFlow owns under ROOT.
+MANAGED_TOP_FOLDERS = [
+    "Genres", "Energy", "Danceability", "Popularity",
+    "Happiness", "Ratings", "BPM", "Keys",
+]
+
+# Historical name variants WaxFlow used to create for the same managed folder.
+# When the canonical name changed (e.g. the "WaxFlow " prefix was dropped in
+# v2.1), `_create_folder` — which keys idempotency on the EXACT (name, parentId)
+# — did not recognise the old folder and created a brand-new parallel tree,
+# leaving a duplicate orphan set ("WaxFlow Genres" alongside "Genres", etc.).
+# Reconciling legacy names to the canonical name BEFORE building makes a future
+# rename adopt the existing tree in place instead of re-duplicating it.
+LEGACY_NAME_PREFIXES = ["WaxFlow "]
 
 
 def _get_lexicon_url(db_path: str) -> str:
     return get_config(db_path, "lexicon_api_url") or LEXICON_API_URL
+
+
+def _delete_folder_tree(client: httpx.Client, folder: dict, existing: dict) -> int:
+    """Delete a managed folder and all its descendants via Lexicon batch delete.
+
+    The Lexicon REST API exposes create (`POST /v1/playlist`) and batch delete
+    (`DELETE /v1/playlists` with `{"ids": [...]}`) but NO rename/update verb, so
+    reconciliation is done by delete + rebuild-under-canonical-name. Everything
+    WaxFlow creates here is a folder or a rule-based smartlist (never a manual
+    playlist), so deleting the tree removes ZERO track assignments from the
+    user's library. Deletes deepest-first. Returns count deleted.
+    """
+    # Collect descendant ids depth-first from the cached tree.
+    ordered: list[tuple[int, int]] = []  # (depth, id)
+
+    def _collect(node: dict, depth: int):
+        ordered.append((depth, node["id"]))
+        for child in node.get("playlists", []):
+            _collect(child, depth + 1)
+
+    _collect(folder, 0)
+    ids = [i for _d, i in sorted(ordered, key=lambda x: -x[0])]
+    if not ids:
+        return 0
+    resp = client.request("DELETE", "/v1/playlists", json={"ids": ids})
+    if resp.status_code in (200, 201):
+        for key in list(existing):
+            if existing[key].get("id") in ids:
+                del existing[key]
+        return len(ids)
+    log.warning("Failed to delete legacy folder tree '%s': HTTP %d %s",
+                folder.get("name"), resp.status_code, resp.text[:200])
+    return 0
+
+
+def _reconcile_legacy_folders(client: httpx.Client, root_id: int, existing: dict) -> int:
+    """Remove legacy-named managed folders so the build can't re-duplicate.
+
+    When a managed folder's canonical name changed (e.g. the "WaxFlow " prefix
+    was dropped), `_create_folder` — keyed on the EXACT (name, parentId) — did
+    not recognise the old folder and created a brand-new parallel tree, leaving
+    a duplicate orphan set ("WaxFlow Genres" alongside "Genres", etc.).
+
+    Because the Lexicon API has no rename verb and every node WaxFlow owns is a
+    folder or rule-based smartlist (no manual track membership), we DELETE the
+    legacy tree; the normal build below then (re)creates it under the canonical
+    name. This is lossless for the user's library and makes a future rename
+    self-heal instead of duplicating.
+
+    Returns the number of nodes deleted. Updates `existing` in place.
+    """
+    deleted = 0
+    for canonical in MANAGED_TOP_FOLDERS:
+        for prefix in LEGACY_NAME_PREFIXES:
+            legacy_key = (f"{prefix}{canonical}", root_id)
+            legacy = existing.get(legacy_key)
+            if not legacy:
+                continue
+            log.info("Removing legacy folder '%s%s' (id=%s); will rebuild as '%s'",
+                     prefix, canonical, legacy.get("id"), canonical)
+            deleted += _delete_folder_tree(client, legacy, existing)
+    if deleted:
+        log.info("Reconciled legacy folders: %d node(s) removed", deleted)
+    return deleted
 
 
 def _fetch_existing_playlists(client: httpx.Client) -> dict:
@@ -645,6 +724,11 @@ def _run_create_playlists(db_path: str):
             # Fetch existing playlists for idempotency
             existing = _fetch_existing_playlists(client)
             root_id = 1  # Lexicon ROOT playlist
+
+            # Adopt any legacy-named managed folders (e.g. "WaxFlow Genres")
+            # BEFORE building, so a name change renames in place instead of
+            # spawning a duplicate parallel tree.
+            _reconcile_legacy_folders(client, root_id, existing)
 
             total_created = 0
 

@@ -14,11 +14,27 @@ STATE_FILE="${WAXFLOW_LOG_DIR:-${HOME}/.waxflow/logs}/sls-monitor-state.json"
 COOLDOWN_FILE="${WAXFLOW_LOG_DIR:-${HOME}/.waxflow/logs}/sls-monitor-cooldown.json"
 DEPLOY_SCRIPT="${WAXFLOW_DIR:-${HOME}/waxflow}/scripts/deploy-to-nas.sh"
 
+# Resolve the repo dir this script lives in (…/scripts/monitor-parity.sh -> repo root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+
 # SSH host for remote Docker commands (set to empty to use local docker)
 REMOTE_HOST="${WAXFLOW_REMOTE_HOST:-}"
 # Remote project path (only used if REMOTE_HOST is set)
 REMOTE_PATH="${WAXFLOW_REMOTE_PATH:-/opt/waxflow}"
 DOCKER_CMD="${WAXFLOW_DOCKER_CMD:-docker}"
+
+# Directory to run `docker compose` from. In remote mode use REMOTE_PATH on the
+# remote host; in LOCAL mode the compose file lives in this checkout, NOT
+# /opt/waxflow — using REMOTE_PATH locally makes every self-heal restart fail
+# with `cd: /opt/waxflow: No such file or directory`, so the instance can stay
+# down indefinitely (observed: a full week of "API not responding" with no
+# successful restart). Default to the repo dir when running locally.
+if [ -n "$REMOTE_HOST" ]; then
+    COMPOSE_DIR="$REMOTE_PATH"
+else
+    COMPOSE_DIR="${WAXFLOW_COMPOSE_DIR:-$REPO_DIR}"
+fi
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -69,7 +85,7 @@ if [ -z "$DASHBOARD" ] || [ "$DASHBOARD" = "" ]; then
     # Try to restart containers
     if check_cooldown "restart_containers"; then
         log "ACTION: Restarting sync containers"
-        remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_containers"
     fi
     exit 1
@@ -106,7 +122,7 @@ log "SERVICES: lexicon=$LEXICON_OK tidal_legacy=$TIDARR_OK worker=$WORKER_STATUS
 if [ "$WORKER_HEALTH_STATUS" = "stalled" ] || [ "$WORKER_HEALTH_STATUS" = "unreachable" ]; then
     if check_cooldown "restart_worker_health"; then
         log "ACTION: Worker stalled/unreachable (health=$WORKER_HEALTH_STATUS), restarting"
-        remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_worker_health"
     fi
 fi
@@ -115,7 +131,7 @@ fi
 if echo "$WORKER_STATUS" | grep -qiE "exited|dead|created" || [ "$WORKER_STATUS" = "unknown" ]; then
     if check_cooldown "restart_worker"; then
         log "ACTION: Worker down, restarting"
-        remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_worker"
     fi
 fi
@@ -203,7 +219,7 @@ if [ -f "$STATE_FILE" ]; then
         log "WARNING: Pipeline may be stalled (no progress since last check)"
         if check_cooldown "restart_stalled"; then
             log "ACTION: Restarting worker to unstick pipeline"
-            remote_exec "cd $REMOTE_PATH && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+            remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
             set_cooldown "restart_stalled"
         fi
     fi
