@@ -36,6 +36,27 @@ else
     COMPOSE_DIR="${WAXFLOW_COMPOSE_DIR:-$REPO_DIR}"
 fi
 
+# Compose command differs by host and CANNOT be hardcoded. This host (macOS dev
+# box) ships Compose v1 as the standalone `docker-compose` binary and has NO
+# `docker compose` v2 plugin -- invoking `docker compose` here dies with
+# "docker: unknown command: docker compose". The NAS is the opposite: it has the
+# v2 plugin (`docker compose`) but no standalone `docker-compose`. Hardcoding
+# `docker compose` was the ROOT CAUSE of a ~90-day silent outage: every 2h the
+# self-heal logged "ACTION: Restarting sync containers" then failed on the
+# unknown command, so the stack never actually recovered. Auto-detect instead.
+if [ -n "${WAXFLOW_COMPOSE_CMD:-}" ]; then
+    COMPOSE_CMD="$WAXFLOW_COMPOSE_CMD"
+elif [ -n "$REMOTE_HOST" ]; then
+    # Command runs on the remote host; assume Compose v2 plugin there.
+    COMPOSE_CMD="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD="docker-compose"
+elif docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD="docker compose"
+else
+    COMPOSE_CMD="docker-compose"
+fi
+
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
@@ -85,7 +106,7 @@ if [ -z "$DASHBOARD" ] || [ "$DASHBOARD" = "" ]; then
     # Try to restart containers
     if check_cooldown "restart_containers"; then
         log "ACTION: Restarting sync containers"
-        remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $COMPOSE_DIR && $COMPOSE_CMD restart" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_containers"
     fi
     exit 1
@@ -110,7 +131,7 @@ log "CHECK: parity=$SYNCED/$TOTAL ($PCT%) errors=$ERRORS downloading=$DOWNLOADIN
 LEXICON_OK=$(curl -s --connect-timeout 5 "$LEXICON_URL/v1/playlists" 2>/dev/null | python3 -c "import json,sys; print('ok' if 'data' in json.loads(sys.stdin.read()) else 'error')" 2>/dev/null || echo "error")
 # Tidarr check is optional -- downloads now use tiddl CLI directly
 TIDARR_OK=$(curl -s --connect-timeout 5 "$TIDARR_URL/api/queue/status" 2>/dev/null | python3 -c "import json,sys; json.loads(sys.stdin.read()); print('ok')" 2>/dev/null || echo "unavailable")
-WORKER_STATUS=$(remote_exec "$DOCKER_CMD ps --filter name=sync-worker --format '{{.Status}}'" 2>/dev/null || echo "unknown")
+WORKER_STATUS=$(remote_exec "$DOCKER_CMD ps --filter name=waxflow-worker --format '{{.Status}}'" 2>/dev/null || echo "unknown")
 
 # ===== CHECK: Worker health endpoint =====
 WORKER_HEALTH=$(curl -s --connect-timeout 5 "${API_URL%:8402}:8403/health" 2>/dev/null)
@@ -122,7 +143,7 @@ log "SERVICES: lexicon=$LEXICON_OK tidal_legacy=$TIDARR_OK worker=$WORKER_STATUS
 if [ "$WORKER_HEALTH_STATUS" = "stalled" ] || [ "$WORKER_HEALTH_STATUS" = "unreachable" ]; then
     if check_cooldown "restart_worker_health"; then
         log "ACTION: Worker stalled/unreachable (health=$WORKER_HEALTH_STATUS), restarting"
-        remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $COMPOSE_DIR && $COMPOSE_CMD restart sync-worker" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_worker_health"
     fi
 fi
@@ -131,7 +152,7 @@ fi
 if echo "$WORKER_STATUS" | grep -qiE "exited|dead|created" || [ "$WORKER_STATUS" = "unknown" ]; then
     if check_cooldown "restart_worker"; then
         log "ACTION: Worker down, restarting"
-        remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+        remote_exec "cd $COMPOSE_DIR && $COMPOSE_CMD restart sync-worker" >> "$LOG_FILE" 2>&1 || true
         set_cooldown "restart_worker"
     fi
 fi
@@ -219,7 +240,7 @@ if [ -f "$STATE_FILE" ]; then
         log "WARNING: Pipeline may be stalled (no progress since last check)"
         if check_cooldown "restart_stalled"; then
             log "ACTION: Restarting worker to unstick pipeline"
-            remote_exec "cd $COMPOSE_DIR && $DOCKER_CMD compose restart sync-worker" >> "$LOG_FILE" 2>&1 || true
+            remote_exec "cd $COMPOSE_DIR && $COMPOSE_CMD restart sync-worker" >> "$LOG_FILE" 2>&1 || true
             set_cooldown "restart_stalled"
         fi
     fi
