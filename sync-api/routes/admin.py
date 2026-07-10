@@ -75,20 +75,59 @@ async def set_sync_mode(body: dict):
         return {"sync_mode": mode, "tracks_queued": tracks_queued}
 
 
+# Import-health statuses that mean new imports will silently fail.
+_IMPORT_HEALTH_CRITICAL = {"mount_down", "lexicon_unreachable"}
+
+
 @router.get("/admin/health", response_model=HealthResponse)
 async def health_check():
     db_status = "ok"
+    import_health = "unchecked"
+    import_detail = None
+    import_checked_at = None
+    mount_ok = None
+    empty_count = None
     try:
         with get_db() as conn:
             conn.execute("SELECT 1").fetchone()
+            # Surface the Lexicon import-health signal written by the worker
+            # canary + empty-import detector (see sync-worker/tasks/lexicon_health.py).
+            cfg = {
+                r["key"]: r["value"]
+                for r in conn.execute(
+                    "SELECT key, value FROM app_config WHERE key IN "
+                    "('lexicon_import_health','lexicon_mount_ok','lexicon_mount_detail',"
+                    "'lexicon_mount_checked_at','lexicon_import_empty_count')"
+                ).fetchall()
+            }
+        import_health = cfg.get("lexicon_import_health") or "unchecked"
+        import_detail = cfg.get("lexicon_mount_detail")
+        import_checked_at = cfg.get("lexicon_mount_checked_at")
+        mo = cfg.get("lexicon_mount_ok")
+        mount_ok = True if mo == "1" else (False if mo == "0" else None)
+        try:
+            empty_count = int(cfg.get("lexicon_import_empty_count") or 0)
+        except ValueError:
+            empty_count = 0
     except Exception:
         db_status = "error"
 
-    status = "ok" if db_status == "ok" else "degraded"
+    # Overall status degrades if the DB is down OR Lexicon imports are broken —
+    # so a monitor/Kuma check watching this endpoint's JSON pages on a mount outage.
+    if db_status != "ok" or import_health in _IMPORT_HEALTH_CRITICAL:
+        status = "degraded"
+    else:
+        status = "ok"
+
     return HealthResponse(
         status=status,
         database=db_status,
         uptime_seconds=round(time.time() - _start_time, 1),
+        lexicon_mount_ok=mount_ok,
+        import_health=import_health,
+        import_health_detail=import_detail,
+        import_health_checked_at=import_checked_at,
+        lexicon_import_empty_count=empty_count,
     )
 
 

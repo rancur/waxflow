@@ -160,6 +160,34 @@ All settings are configurable from the **Settings** page in the web UI. Key sett
 | Download Quality | Tidal download quality | `master` (FLAC) |
 | Music Library Path | Path to your music library (inside container) | `/music` |
 | Lexicon API URL | Lexicon DJ REST API endpoint | `http://localhost:48624` |
+| Non-music filter | Skip audiobooks/podcasts/spoken-word at ingest (`nonmusic_filter_enabled`) | `1` (on) |
+| Non-music max duration | Duration cap in ms; items longer are treated as non-music (`nonmusic_max_duration_ms`) | `1800000` (30 min) |
+| Import-health canary interval | How often the import-health self-check runs (`lexicon_canary_interval_seconds`) | `900` (15 min) |
+| Watch/staging dir | Dir the canary write-checks (`lexicon_watch_dir`) | `/downloads` |
+
+---
+
+## Import Health
+
+Silent Lexicon-import failures are surfaced loudly:
+
+- **Empty-import = hard failure.** If Lexicon returns HTTP 200 but imports 0 tracks
+  (the signature of a lost NAS music mount on the Lexicon host), WaxFlow sets a
+  distinct `[lexicon_import_empty]` error state instead of treating it as success.
+- **Proactive canary.** Every 15 min the worker verifies the import flow's NAS-side
+  dependencies (staging/watch dir writable + Lexicon API reachable) before real
+  imports fail.
+- **Surfaced everywhere.** `GET /api/admin/health` returns `import_health`,
+  `lexicon_mount_ok`, and `lexicon_import_empty_count`; overall `status` degrades
+  when imports are broken. `scripts/monitor-parity.sh` logs `CRITICAL` and can page
+  a webhook (`WAXFLOW_ALERT_WEBHOOK`).
+
+## Non-Music Filter
+
+A DJ library should be music only. At Spotify poll time WaxFlow skips podcast
+episodes / audiobook objects (`type != track`), audiobook/spoken-word keywords
+(LibriVox, "chapter N", unabridged, …), and anything longer than the configured
+duration cap. Skips are logged as `nonmusic_skipped`.
 
 ---
 
@@ -186,7 +214,8 @@ The `scripts/monitor-parity.sh` script runs every 30 minutes and performs:
 2. **Lexicon connectivity check** -- verifies Lexicon DJ API is reachable
 3. **Pipeline stall detection** -- flags if the worker hasn't processed tracks in 5+ minutes
 4. **Error accumulation check** -- alerts if error count is growing
-5. **Cooldown enforcement** -- 2-hour minimum between repeated fixes to prevent loops
+5. **Import-health check** -- reads `import_health` from `/api/admin/health` and logs `CRITICAL` (and optionally pages `WAXFLOW_ALERT_WEBHOOK`) when Lexicon imports are silently failing; does not restart for this, since a restart can't remount the Mac's NAS share
+6. **Cooldown enforcement** -- 2-hour minimum between repeated fixes to prevent loops
 
 The worker itself exposes a `/health` endpoint on port 8403 that reports `ok`, `starting`, or `stalled` status.
 

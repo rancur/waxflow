@@ -213,6 +213,13 @@ class HealthResponse(BaseModel):
     status: str
     database: str
     uptime_seconds: Optional[float] = None
+    # Lexicon import-health (written by the worker canary + empty-import detector).
+    # import_health: ok | mount_down | lexicon_unreachable | no_reference | skipped_scan | unknown | unchecked
+    lexicon_mount_ok: Optional[bool] = None
+    import_health: Optional[str] = None
+    import_health_detail: Optional[str] = None
+    import_health_checked_at: Optional[str] = None
+    lexicon_import_empty_count: Optional[int] = None
 
 
 class VersionResponse(BaseModel):
