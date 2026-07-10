@@ -23,9 +23,26 @@ def _poll(db_path: str):
         return
 
     last_poll = get_config(db_path, "last_spotify_poll")
-    log.info("Polling Spotify liked songs (last poll: %s)", last_poll or "never")
+
+    # Full-backfill mode: a one-shot pull of the ENTIRE liked-songs history,
+    # ignoring the incremental last_poll cutoff. The normal incremental poll stops
+    # at the first track added at/before last_poll (liked songs come back newest-
+    # first), so once last_poll is set it never reaches older history — that is why
+    # the DB was stuck far below the true liked-songs total. When app_config
+    # 'backfill_all_liked' == '1' we paginate every page; already-present tracks are
+    # skipped by the spotify_id / ISRC / artist+title dedup checks below, and each
+    # missing track is inserted with its REAL spotify_added_at (needed for correct
+    # monthly playlists). The flag is auto-cleared once the run completes.
+    backfill = get_config(db_path, "backfill_all_liked") == "1"
+    effective_cutoff = None if backfill else last_poll
+
+    log.info(
+        "Polling Spotify liked songs (mode=%s, last poll: %s)",
+        "FULL-BACKFILL" if backfill else "incremental", last_poll or "never",
+    )
 
     new_count = 0
+    scanned = 0
     offset = 0
     limit = 50
     done = False
@@ -45,10 +62,13 @@ def _poll(db_path: str):
             break
 
         for item in items:
+            scanned += 1
             added_at = item.get("added_at", "")
 
-            # If we have a last_poll timestamp, skip tracks added before it
-            if last_poll and added_at and added_at <= last_poll:
+            # Incremental cutoff: stop at the first track added at/before the last
+            # poll (liked songs are newest-first). Disabled during full-backfill so
+            # the entire history is walked.
+            if effective_cutoff and added_at and added_at <= effective_cutoff:
                 done = True
                 break
 
@@ -149,11 +169,23 @@ def _poll(db_path: str):
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     set_config(db_path, "last_spotify_poll", now)
 
-    if new_count > 0:
-        log.info("Imported %d new tracks from Spotify", new_count)
+    # Clear the one-shot backfill flag once the full history has been walked, so
+    # subsequent polls return to fast incremental mode.
+    if backfill:
+        set_config(db_path, "backfill_all_liked", "0")
+        log.info(
+            "Full backfill complete: scanned %d liked songs, imported %d new tracks",
+            scanned, new_count,
+        )
+        log_activity(
+            db_path, "backfill_complete", None,
+            f"Spotify full backfill complete: scanned {scanned}, imported {new_count} new tracks",
+        )
+    elif new_count > 0:
+        log.info("Imported %d new tracks from Spotify (scanned %d)", new_count, scanned)
         log_activity(db_path, "poll_complete", None, f"Spotify poll complete: {new_count} new tracks")
     else:
-        log.info("Spotify poll complete: no new tracks")
+        log.info("Spotify poll complete: no new tracks (scanned %d)", scanned)
 
 
 async def poll_spotify(db_path: str):
