@@ -43,7 +43,7 @@ def init():
             lexicon_track_id TEXT,
             lexicon_playlist_id TEXT,
             pipeline_stage TEXT NOT NULL DEFAULT 'new'
-                CHECK(pipeline_stage IN ('new','matching','downloading','verifying','organizing','complete','error','waiting','ignored')),
+                CHECK(pipeline_stage IN ('new','matching','downloading','verifying','organizing','complete','error','waiting','ignored','needs_import_review')),
             pipeline_error TEXT,
             is_protected INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
@@ -315,6 +315,75 @@ def init():
                 DROP TABLE download_queue;
 
                 ALTER TABLE download_queue_new RENAME TO download_queue;
+            """)
+            print("Migration complete.")
+
+    # Migration: add 'needs_import_review' to pipeline_stage CHECK constraint.
+    # This holding stage is where the worker parks tracks whose Lexicon import was
+    # blocked by the duplicate-safety guard (no hard ISRC match) — awaiting human
+    # approval instead of silently creating a possibly-duplicate Lexicon track.
+    #
+    # NOTE: detection reads the table's stored DDL from sqlite_master rather than
+    # attempting `UPDATE ... WHERE 0`. A zero-row UPDATE never evaluates a CHECK
+    # constraint in SQLite, so the WHERE-0 probe used by the older migrations above
+    # is a false-positive (it silently skips). Reading the DDL is reliable and
+    # idempotent (after the rebuild the new value is present in the DDL).
+    with get_db() as conn:
+        tbl_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tracks'"
+        ).fetchone()
+        if tbl_row and "needs_import_review" not in (tbl_row[0] or ""):
+            print("Migrating tracks table to add 'needs_import_review' pipeline stage...")
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS tracks_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    spotify_id TEXT UNIQUE NOT NULL,
+                    spotify_uri TEXT,
+                    spotify_added_at TEXT,
+                    title TEXT,
+                    artist TEXT,
+                    album TEXT,
+                    duration_ms INTEGER,
+                    isrc TEXT,
+                    spotify_popularity INTEGER,
+                    match_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(match_status IN ('pending','matched','mismatched','manual','failed')),
+                    match_source TEXT,
+                    match_confidence REAL,
+                    tidal_id TEXT,
+                    download_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(download_status IN ('pending','queued','downloading','complete','failed','skipped')),
+                    download_source TEXT,
+                    download_attempts INTEGER NOT NULL DEFAULT 0,
+                    download_error TEXT,
+                    file_path TEXT,
+                    file_hash_sha256 TEXT,
+                    verify_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(verify_status IN ('pending','pass','fail','skipped')),
+                    verify_codec TEXT,
+                    verify_sample_rate INTEGER,
+                    verify_bit_depth INTEGER,
+                    verify_is_genuine_lossless INTEGER,
+                    chromaprint TEXT,
+                    fingerprint_match_score REAL,
+                    lexicon_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(lexicon_status IN ('pending','synced','skipped','error')),
+                    lexicon_track_id TEXT,
+                    lexicon_playlist_id TEXT,
+                    pipeline_stage TEXT NOT NULL DEFAULT 'new'
+                        CHECK(pipeline_stage IN ('new','matching','downloading','verifying','organizing','complete','error','waiting','ignored','needs_import_review')),
+                    pipeline_error TEXT,
+                    is_protected INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                INSERT OR IGNORE INTO tracks_new SELECT * FROM tracks;
+
+                DROP TABLE tracks;
+
+                ALTER TABLE tracks_new RENAME TO tracks;
             """)
             print("Migration complete.")
 

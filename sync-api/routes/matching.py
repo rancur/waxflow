@@ -139,6 +139,63 @@ async def review_matches():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/import-review")
+async def import_review_queue():
+    """Return tracks whose Lexicon import was blocked by the duplicate-safety
+    guard (no hard ISRC match). These are awaiting explicit human approval before
+    a new Lexicon track is created for them."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tracks WHERE pipeline_stage = 'needs_import_review' "
+                "ORDER BY updated_at DESC"
+            ).fetchall()
+            tracks = [row_to_track(r) for r in rows]
+            return {"tracks": tracks, "total": len(tracks)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{track_id}/approve-import", response_model=TrackOut)
+async def approve_import(track_id: int):
+    """Explicit human approval to create a NEW Lexicon track for a track parked
+    in the import-review queue. Sets match_source='manual_import_approved' so the
+    worker's duplicate-safety guard permits the import on the next full-mode
+    organizing cycle."""
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Track not found")
+            if row["pipeline_stage"] != "needs_import_review":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Track {track_id} is not awaiting import review (stage='{row['pipeline_stage']}')",
+                )
+
+            conn.execute(
+                """UPDATE tracks SET
+                    match_source = 'manual_import_approved',
+                    lexicon_status = 'pending',
+                    pipeline_stage = 'organizing',
+                    pipeline_error = NULL,
+                    updated_at = datetime('now')
+                WHERE id = ?""",
+                (track_id,),
+            )
+            conn.execute(
+                "INSERT INTO activity_log (event_type, track_id, message) VALUES (?, ?, ?)",
+                ("import_approved", track_id,
+                 f"Import approved for track {track_id} — will create Lexicon entry on next full-mode cycle"),
+            )
+            row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            return TrackOut(**row_to_track(row))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/{track_id}/approve", response_model=TrackOut)
 async def approve_match(track_id: int):
     try:
