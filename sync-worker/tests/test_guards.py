@@ -16,6 +16,7 @@ or:  python -m unittest discover -s sync-worker/tests
 
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -257,6 +258,22 @@ class TestTidalTokenRefreshBypassesTiddlModel(unittest.TestCase):
 
         with mock.patch.object(pp.httpx, "Client", return_value=_C()):
             self.assertIsNone(pp._refresh_tidal_token("bad"))
+
+
+class TestWorkerHeartbeat(unittest.TestCase):
+    """Per-stage liveness heartbeat: written next to the DB, readable as an epoch
+    timestamp. Prevents a busy worker (long cycle during backlog) being misread as
+    'stalled' and needlessly restarted by the self-heal monitor."""
+
+    def test_touch_and_read_heartbeat(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        db = os.path.join(d, "sync.db")
+        pp.touch_worker_heartbeat(db)
+        hb = pp._worker_heartbeat_path(db)
+        self.assertTrue(os.path.exists(hb))
+        val = float(open(hb).read().strip())
+        self.assertLessEqual(abs(time.time() - val), 5)
 
 
 class TestGuard1ScanReadOnly(unittest.TestCase):
