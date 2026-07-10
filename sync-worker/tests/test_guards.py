@@ -106,6 +106,95 @@ class TestGuard3ImportGate(unittest.TestCase):
         )
 
 
+class _FakeDBCtx:
+    """Context-manager stand-in for get_db(...).__enter__ returning a conn."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, *a, **k):
+        return None
+
+
+class _FakeClientCtx:
+    def __init__(self, client):
+        self._client = client
+
+    def __enter__(self):
+        return self._client
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestOrganizeAlreadyInLexicon(unittest.TestCase):
+    """Regression: tracks already present in Lexicon (match_source='lexicon_existing'
+    with a real lexicon_track_id) carry a host-side file_path the worker container
+    cannot see (e.g. /Volumes/Macintosh HD/...). Organizing them must NOT raise
+    FileNotFoundError — they only need to be filed into the monthly playlist using
+    the existing lexicon_track_id. This was the cause of ~331 stuck 'error' tracks."""
+
+    def _run_organize(self, track):
+        captured = {}
+
+        def fake_update_track(db_path, tid, **kw):
+            captured.update(kw)
+
+        def fake_get_config(db_path, key):
+            return {
+                "lexicon_library_path": "/music/library",
+                "lexicon_input_path": "/music/downloads",
+                "lexicon_api_url": "http://lexicon.test",
+                "downloads_path": "/downloads",
+                "auto_analyze_enabled": "0",
+            }.get(key)
+
+        fake_client = mock.MagicMock()
+        with mock.patch.object(pp, "update_track", side_effect=fake_update_track), \
+             mock.patch.object(pp, "get_config", side_effect=fake_get_config), \
+             mock.patch.object(pp, "_ensure_playlist", return_value={
+                 "id": 1, "lexicon_folder_id": 10, "lexicon_playlist_id": 20}), \
+             mock.patch.object(pp, "httpx") as fake_httpx, \
+             mock.patch.object(pp, "_lexicon_find_or_import") as find_import, \
+             mock.patch.object(pp, "_lexicon_track_in_playlist", return_value=False), \
+             mock.patch.object(pp, "_lexicon_add_to_playlist"), \
+             mock.patch.object(pp, "_lexicon_tag_track"), \
+             mock.patch.object(pp, "get_db", return_value=_FakeDBCtx()), \
+             mock.patch.object(pp, "log_activity"), \
+             mock.patch.object(pp, "_notify_sync_complete"):
+            fake_httpx.Client.return_value = _FakeClientCtx(fake_client)
+            pp._organize_track("/tmp/x.db", track)
+            return captured, find_import
+
+    def test_already_in_lexicon_missing_file_does_not_raise_and_syncs(self):
+        track = {
+            "id": 1, "spotify_id": "sp1",
+            "file_path": "/Volumes/Macintosh HD/Users/willcurran/Music/nope.flac",
+            "spotify_added_at": "2026-04-15T00:00:00Z",
+            "artist": "A", "title": "T",
+            "match_source": "lexicon_existing", "lexicon_track_id": "2315",
+        }
+        captured, find_import = self._run_organize(track)
+        self.assertEqual(captured.get("lexicon_status"), "synced")
+        self.assertEqual(captured.get("pipeline_stage"), "complete")
+        self.assertEqual(str(captured.get("lexicon_track_id")), "2315")
+        find_import.assert_not_called()  # must not re-search/import an existing track
+
+    def test_downloaded_track_with_missing_file_still_raises(self):
+        track = {
+            "id": 2, "spotify_id": "sp2",
+            "file_path": "/downloads/gone.flac",
+            "spotify_added_at": "2026-04-15T00:00:00Z",
+            "artist": "A", "title": "T",
+            "match_source": "isrc", "lexicon_track_id": None,
+        }
+        with self.assertRaises(FileNotFoundError):
+            self._run_organize(track)
+
+
 class TestGuard1ScanReadOnly(unittest.TestCase):
     """Guard 1: _process_organizing is a no-op in scan mode."""
 

@@ -1750,8 +1750,23 @@ def _organize_track(db_path: str, track: dict):
     file_path = track.get("file_path")
     added_at = track.get("spotify_added_at", "")
 
-    if not file_path or not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
+    # Tracks matched to a file that already exists in Lexicon's own database
+    # (match_source="lexicon_existing") carry a real lexicon_track_id and a
+    # file_path that is Lexicon's on-host location string (e.g.
+    # "/Volumes/Macintosh HD/Users/.../Music/..." or "/Volumes/music/..."),
+    # which the worker container cannot see. There is nothing to download or
+    # import for these — we only need to file the existing Lexicon track into
+    # the monthly playlist. So skip the container-side file existence check and
+    # the find/import step for them. This does NOT create any new Lexicon track,
+    # so the dedup guards are unaffected.
+    existing_lexicon_id = track.get("lexicon_track_id")
+    already_in_lexicon = bool(
+        track.get("match_source") == "lexicon_existing" and existing_lexicon_id
+    )
+
+    if not already_in_lexicon:
+        if not file_path or not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
 
     # Determine target year/month
     if added_at:
@@ -1785,25 +1800,30 @@ def _organize_track(db_path: str, track: dict):
     downloads_dir = get_config(db_path, "downloads_path") or os.environ.get("DOWNLOADS_PATH", "/downloads")
 
     with httpx.Client(base_url=lexicon_api, timeout=60) as client:
-        # Map container paths to the path prefix Lexicon sees on the host Mac:
-        #   /music/...      -> <lexicon_library_path>/...   (e.g. /music/library)
-        #   /downloads/...  -> <lexicon_input_path>/...     (e.g. /music/downloads)
-        if file_path.startswith(downloads_dir):
-            relative_path = os.path.relpath(file_path, downloads_dir)
-            mac_path = f"{lexicon_input_path}/{relative_path}"
+        if already_in_lexicon:
+            # Already present in Lexicon's DB with a known track_id — no path
+            # mapping or import needed; just file it into the playlist below.
+            lexicon_track_id = str(existing_lexicon_id)
         else:
-            relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
-            mac_path = f"{lexicon_library_path}/{relative_path}"
+            # Map container paths to the path prefix Lexicon sees on the host Mac:
+            #   /music/...      -> <lexicon_library_path>/...   (e.g. /music/library)
+            #   /downloads/...  -> <lexicon_input_path>/...     (e.g. /music/downloads)
+            if file_path.startswith(downloads_dir):
+                relative_path = os.path.relpath(file_path, downloads_dir)
+                mac_path = f"{lexicon_input_path}/{relative_path}"
+            else:
+                relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
+                mac_path = f"{lexicon_library_path}/{relative_path}"
 
-        # Search Lexicon for the track by file path
-        lexicon_track_id = _lexicon_find_or_import(client, mac_path, track, db_path=db_path)
+            # Search Lexicon for the track by file path
+            lexicon_track_id = _lexicon_find_or_import(client, mac_path, track, db_path=db_path)
 
-        if not lexicon_track_id:
-            artist_name = track.get("artist", "unknown")
-            title_name = track.get("title", "unknown")
-            log.error("Lexicon find/import returned None for track %d: %s - %s (mac_path=%s)",
-                      track_id, artist_name, title_name, mac_path)
-            raise RuntimeError(f"Lexicon find/import failed for: {artist_name} - {title_name} at {mac_path}")
+            if not lexicon_track_id:
+                artist_name = track.get("artist", "unknown")
+                title_name = track.get("title", "unknown")
+                log.error("Lexicon find/import returned None for track %d: %s - %s (mac_path=%s)",
+                          track_id, artist_name, title_name, mac_path)
+                raise RuntimeError(f"Lexicon find/import failed for: {artist_name} - {title_name} at {mac_path}")
 
         # 2. Ensure folder and playlist exist (use cache to avoid repeated GET /v1/playlists)
         cache_key = (year, month)
