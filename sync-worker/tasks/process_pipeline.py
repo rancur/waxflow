@@ -145,6 +145,12 @@ else:
 
 async def process_pipeline(db_path: str):
     """Run one cycle of the pipeline processor."""
+    # Organize FIRST so tracks already staged for Lexicon (e.g. already-owned
+    # tracks that need no download) are not starved by the downloading stage,
+    # which can block for many seconds per track waiting on the downloader. This
+    # keeps the Lexicon sync draining steadily even while a download backlog is
+    # being worked through.
+    await asyncio.to_thread(_process_organizing, db_path)
     await asyncio.to_thread(_process_new, db_path)
     await asyncio.to_thread(_process_matching, db_path)
     await asyncio.to_thread(_process_downloading, db_path)
@@ -910,16 +916,115 @@ def _download_track_via_tiddl(db_path: str, track: dict) -> str:
 
 _last_auth_refresh = 0  # throttle refresh attempts
 
-def _ensure_tidal_auth():
-    """Check tidal auth token and refresh if expiring soon.
+def _refresh_tidal_token(refresh_token: str) -> dict | None:
+    """Refresh a Tidal access token via the OAuth endpoint DIRECTLY.
 
-    Checks the actual tiddl config (where refreshed tokens are written) first,
-    then falls back to the source auth.json files.  Throttles refresh attempts
-    to at most once every 10 minutes.
+    We deliberately do NOT use `tiddl auth refresh` / tiddl.auth.refreshToken:
+    every bundled tiddl (2.8.x and 3.x) validates Tidal's token response through
+    a pydantic model that requires `user.facebookUid`, a field Tidal has stopped
+    returning, so tiddl's own refresh raises a ValidationError and silently never
+    writes the new token (this was the real cause of "no new music" — the Tidal
+    session looked dead but was actually fine). We only need the access token and
+    its lifetime, so we call the endpoint ourselves and parse those directly,
+    reusing tiddl's embedded client credentials so we stay in sync with it.
+    """
+    auth_url = "https://auth.tidal.com/v1/oauth2"
+    client_id = client_secret = None
+    try:
+        from tiddl.auth import CLIENT_ID as client_id, CLIENT_SECRET as client_secret, AUTH_URL as auth_url  # tiddl 2.x
+    except Exception:
+        try:
+            from tiddl.core.auth.client import CLIENT_ID as client_id, CLIENT_SECRET as client_secret  # tiddl 3.x (best-effort)
+        except Exception:
+            pass
+    if not client_id:
+        log.warning("Cannot refresh Tidal token: tiddl client credentials unavailable")
+        return None
+    try:
+        with httpx.Client(timeout=20) as client:
+            resp = client.post(
+                f"{auth_url}/token",
+                data={
+                    "client_id": client_id,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                    "scope": "r_usr+w_usr+w_sub",
+                },
+                auth=(client_id, client_secret),
+            )
+        if resp.status_code != 200:
+            log.warning("Tidal token refresh HTTP %d: %s", resp.status_code, resp.text[:200])
+            return None
+        d = resp.json()
+        if not d.get("access_token"):
+            log.warning("Tidal token refresh returned no access_token: %s", str(d)[:200])
+            return None
+        user = d.get("user") or {}
+        return {
+            "access_token": d["access_token"],
+            "expires_in": int(d.get("expires_in", 86400)),
+            "refresh_token": d.get("refresh_token", refresh_token),
+            "user_id": str(user.get("userId") or d.get("user_id") or ""),
+            "country_code": user.get("countryCode") or d.get("countryCode") or "US",
+        }
+    except Exception as e:
+        log.warning("Tidal token refresh request failed: %s", e)
+        return None
+
+
+def _write_tidal_auth(new: dict):
+    """Persist a refreshed token to the tiddl config (auth.token/auth.expires,
+    what the CLI actually reads) and to the source auth.json files (on the
+    persisted data volume), so both stay in sync and survive restarts."""
+    expires_at = int(time.time()) + int(new["expires_in"])
+    if _TIDDL_AVAILABLE:
+        cfg_path = os.path.join(_tiddl_config_dir, "tiddl.json")
+        try:
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            cfg.setdefault("auth", {})
+            cfg["auth"]["token"] = new["access_token"]
+            cfg["auth"]["expires"] = expires_at
+            if new.get("refresh_token"):
+                cfg["auth"]["refresh_token"] = new["refresh_token"]
+            if new.get("user_id"):
+                cfg["auth"]["user_id"] = new["user_id"]
+            if new.get("country_code"):
+                cfg["auth"]["country_code"] = new["country_code"]
+            with open(cfg_path, "w") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception as e:
+            log.warning("Failed to write refreshed token to tiddl.json: %s", e)
+    for src_path in ["/app/data/tiddl-auth.json", "/tiddl-auth/auth.json"]:
+        if not os.path.exists(src_path):
+            continue
+        try:
+            with open(src_path) as f:
+                a = json.load(f)
+            a["token"] = new["access_token"]
+            a["expires_at"] = expires_at
+            if new.get("refresh_token"):
+                a["refresh_token"] = new["refresh_token"]
+            if new.get("user_id"):
+                a["user_id"] = new["user_id"]
+            if new.get("country_code"):
+                a["country_code"] = new["country_code"]
+            with open(src_path, "w") as f:
+                json.dump(a, f)
+        except Exception as e:
+            log.warning("Failed to sync refreshed token to %s: %s", src_path, e)
+
+
+def _ensure_tidal_auth():
+    """Check the Tidal auth token and refresh it (in place) if it is expiring
+    soon, so downloads never hit an expired token. Refresh is done via
+    _refresh_tidal_token (direct OAuth call), throttled to once / 10 minutes.
+
+    Checks the live tiddl config first (where refreshed tokens live), then the
+    source auth.json files.
     """
     global _last_auth_refresh
 
-    # First check the actual tiddl config where refreshed tokens live
     tiddl_cfg = os.path.join(_tiddl_config_dir, "tiddl.json") if _TIDDL_AVAILABLE else None
     check_paths = []
     if tiddl_cfg and os.path.exists(tiddl_cfg):
@@ -930,53 +1035,37 @@ def _ensure_tidal_auth():
         try:
             with open(path) as f:
                 data = json.load(f)
-            # tiddl.json stores expiry under auth.expires; auth.json uses expires_at
-            if "auth" in data:
-                expires_at = data["auth"].get("expires", 0)
-            else:
-                expires_at = data.get("expires_at", 0)
-
-            if expires_at > time.time() + 1800:
-                return True  # token is still fresh
-
-            # Token expiring soon — throttle refresh to once per 10 minutes
-            if time.time() - _last_auth_refresh < 600:
-                return True  # recently refreshed, skip
-
-            _last_auth_refresh = time.time()
-            log.info("Tidal token expiring soon (expires_at=%s), triggering refresh via tiddl", expires_at)
-            result = subprocess.run(
-                ["tiddl", "auth", "refresh"],
-                capture_output=True, timeout=30,
-                env={**os.environ, "TIDDL_PATH": _tiddl_config_dir},
-            )
-            if result.returncode == 0:
-                log.info("Tidal token refresh succeeded")
-                # Also update the source auth files so they stay in sync
-                try:
-                    with open(os.path.join(_tiddl_config_dir, "tiddl.json")) as f:
-                        refreshed = json.load(f)
-                    refreshed_auth = refreshed.get("auth", {})
-                    for src_path in ["/app/data/tiddl-auth.json", "/tiddl-auth/auth.json"]:
-                        if os.path.exists(src_path):
-                            with open(src_path, "w") as f:
-                                json.dump({
-                                    "token": refreshed_auth.get("token", ""),
-                                    "refresh_token": refreshed_auth.get("refresh_token", ""),
-                                    "expires_at": refreshed_auth.get("expires", 0),
-                                    "user_id": str(refreshed_auth.get("user_id", "")),
-                                    "country_code": refreshed_auth.get("country_code", "US"),
-                                }, f)
-                except Exception as sync_err:
-                    log.warning("Failed to sync refreshed auth back to source files: %s", sync_err)
-            else:
-                log.warning("Tidal token refresh failed: %s", result.stderr.decode(errors="replace"))
-            return True
         except FileNotFoundError:
             continue
         except Exception as e:
             log.warning("Failed to check tidal auth at %s: %s", path, e)
             continue
+
+        # tiddl.json stores expiry under auth.expires; auth.json uses expires_at
+        if "auth" in data:
+            expires_at = data["auth"].get("expires", 0)
+            refresh_token = data["auth"].get("refresh_token", "")
+        else:
+            expires_at = data.get("expires_at", 0)
+            refresh_token = data.get("refresh_token", "")
+
+        if expires_at > time.time() + 1800:
+            return True  # token still fresh
+
+        if time.time() - _last_auth_refresh < 600:
+            return True  # recently attempted; don't hammer the endpoint
+
+        if not refresh_token:
+            log.warning("Tidal token expiring but no refresh_token available at %s", path)
+            return False
+
+        _last_auth_refresh = time.time()
+        log.info("Tidal token expiring soon (expires_at=%s), refreshing via Tidal OAuth", expires_at)
+        new = _refresh_tidal_token(refresh_token)
+        if new:
+            _write_tidal_auth(new)
+            log.info("Tidal token refresh succeeded (valid ~%dh)", int(new["expires_in"]) // 3600)
+        return True
     return False
 
 
