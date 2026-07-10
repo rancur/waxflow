@@ -36,6 +36,18 @@ _health_state = {
     "tracks_processed": 0,
 }
 
+_HEARTBEAT_PATH = os.path.join(os.path.dirname(DB_PATH) or ".", ".worker_heartbeat")
+
+
+def _read_worker_heartbeat() -> float:
+    """Read the per-stage liveness heartbeat written by process_pipeline. Returns
+    the last heartbeat epoch seconds, or 0.0 if unavailable."""
+    try:
+        with open(_HEARTBEAT_PATH) as f:
+            return float(f.read().strip() or 0)
+    except Exception:
+        return 0.0
+
 
 class HealthHandler(BaseHTTPRequestHandler):
     """Lightweight HTTP handler for health and stats endpoints."""
@@ -55,9 +67,15 @@ class HealthHandler(BaseHTTPRequestHandler):
     def _handle_health(self):
         now = time.time()
         last = _health_state["last_cycle_time"]
-        if last == 0:
+        # Liveness is the most recent of a completed cycle OR a per-stage
+        # heartbeat. During a large backlog a single cycle can exceed
+        # STALL_THRESHOLD, but stages still complete steadily — the heartbeat
+        # reflects that so a busy worker is not misread as 'stalled' and
+        # needlessly restarted by the self-heal monitor.
+        liveness = max(last, _read_worker_heartbeat())
+        if liveness == 0:
             status = "starting"
-        elif now - last > STALL_THRESHOLD:
+        elif now - liveness > STALL_THRESHOLD:
             status = "stalled"
         else:
             status = "ok"

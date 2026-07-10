@@ -143,19 +143,42 @@ else:
     logging.getLogger("worker.pipeline").info("tiddl CLI not found — downloads disabled (legacy Tidarr fallback available if configured)")
 
 
+def _worker_heartbeat_path(db_path: str) -> str:
+    return os.path.join(os.path.dirname(db_path) or ".", ".worker_heartbeat")
+
+
+def touch_worker_heartbeat(db_path: str):
+    """Record a liveness heartbeat. Written after every pipeline STAGE (not just
+    at end-of-cycle) so a worker that is busy on a long stage during a backlog is
+    not misread as 'stalled' by the health check / self-heal monitor and needlessly
+    restarted. A full cycle can legitimately exceed the stall threshold while a
+    large backlog drains; per-stage heartbeats keep liveness accurate."""
+    try:
+        with open(_worker_heartbeat_path(db_path), "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass  # heartbeat is best-effort; never fail the pipeline on it
+
+
 async def process_pipeline(db_path: str):
     """Run one cycle of the pipeline processor."""
     # Organize FIRST so tracks already staged for Lexicon (e.g. already-owned
     # tracks that need no download) are not starved by the downloading stage,
     # which can block for many seconds per track waiting on the downloader. This
     # keeps the Lexicon sync draining steadily even while a download backlog is
-    # being worked through.
+    # being worked through. A heartbeat is written after each stage for liveness.
     await asyncio.to_thread(_process_organizing, db_path)
+    touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_new, db_path)
+    touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_matching, db_path)
+    touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_downloading, db_path)
+    touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_verifying, db_path)
+    touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_organizing, db_path)
+    touch_worker_heartbeat(db_path)
 
 
 # ---------------------------------------------------------------------------
