@@ -207,16 +207,21 @@ def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
             if row:
                 return {"file_path": row[0], "match_type": "isrc"}
 
-        # Secondary: fuzzy title + artist prefix match
+        # Secondary: fuzzy title + artist match. The SQL LIKE prefix is only a
+        # COARSE index prefilter — "Drift%" also matches "Drifting", so every
+        # candidate MUST be confirmed with the word-boundary-aware _titles_match /
+        # _artists_match before it is accepted. (Bug: the 2026 Bonobo single
+        # "Drift" was wrongly matched to the file "Bonobo - Drifting".)
         if title and artist:
             title_prefix = title[:15]
             artist_first = artist.split(",")[0].strip()
-            row = conn.execute(
-                "SELECT file_path FROM file_index WHERE title LIKE ? AND artist LIKE ?",
+            rows = conn.execute(
+                "SELECT file_path, title, artist FROM file_index WHERE title LIKE ? AND artist LIKE ?",
                 (f"{title_prefix}%", f"{artist_first}%"),
-            ).fetchone()
-            if row:
-                return {"file_path": row[0], "match_type": "title_artist"}
+            ).fetchall()
+            for row in rows:
+                if _titles_match(title, row[1] or "") and _artists_match(artist, row[2] or ""):
+                    return {"file_path": row[0], "match_type": "title_artist"}
 
     return None
 
@@ -537,12 +542,17 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='file_index'"
                 ).fetchone()
                 if table_exists:
-                    row = conn.execute(
-                        "SELECT file_path FROM file_index WHERE title LIKE ? AND artist LIKE ? LIMIT 1",
+                    # LIKE '%...%' is a coarse prefilter that also matches
+                    # substrings ("Drift" -> "Drifting"); confirm each candidate
+                    # with the word-boundary-aware matchers before accepting.
+                    rows = conn.execute(
+                        "SELECT file_path, title, artist FROM file_index WHERE title LIKE ? AND artist LIKE ?",
                         (f"%{title[:20]}%", f"%{artist.split(',')[0].strip()[:15]}%"),
-                    ).fetchone()
-                    if row and os.path.exists(row[0]):
-                        return {"file_path": row[0]}
+                    ).fetchall()
+                    for row in rows:
+                        if (_titles_match(title, row[1] or "") and _artists_match(artist, row[2] or "")
+                                and os.path.exists(row[0])):
+                            return {"file_path": row[0]}
         except Exception:
             pass  # file_index may not exist yet
 
@@ -582,11 +592,12 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
                         if not f.endswith((".flac", ".aiff", ".m4a", ".wav")):
                             continue
                         fname_norm = _normalize_for_comparison(os.path.splitext(f)[0])
-                        fname_lower = f.lower()
-                        # Match if normalized title appears in normalized filename
-                        if (title_base_norm and title_base_norm in fname_norm or
-                                title_norm and title_norm[:15] in fname_norm or
-                                title_lower[:20] in fname_lower):
+                        # Match if the normalized title appears in the normalized
+                        # filename as complete word(s) — word-boundary anchored so a
+                        # single-word title fragment ("drift") does NOT match a
+                        # filename containing a longer word ("...drifting...").
+                        if (_contains_at_word_boundary(title_base_norm, fname_norm) or
+                                _contains_at_word_boundary(title_norm, fname_norm)):
                             return {"file_path": os.path.join(root, f)}
 
     return None
