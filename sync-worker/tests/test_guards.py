@@ -39,59 +39,85 @@ class _FakeResponse:
 
 
 class _FakeLexiconClient:
-    """Stand-in for httpx.Client. Search returns no matches (simulating the
-    fuzzy-miss that would otherwise trigger a duplicate import); POST is recorded."""
+    """Stand-in for httpx.Client. Every search returns the same candidate list
+    (`search_tracks`); POST /v1/tracks is recorded and returns a new id. `status`
+    controls the search HTTP status (use 500 to simulate an unavailable Lexicon)."""
 
-    def __init__(self, search_tracks=None):
+    def __init__(self, search_tracks=None, status=200):
         self._search_tracks = search_tracks or []
+        self._status = status
         self.post_calls = []
 
     def get(self, path, params=None):
-        return _FakeResponse(200, {"data": {"tracks": self._search_tracks}})
+        return _FakeResponse(self._status, {"data": {"tracks": self._search_tracks}})
 
     def post(self, path, json=None):
         self.post_calls.append({"path": path, "json": json})
         return _FakeResponse(201, {"data": {"tracks": [{"id": 999}]}})
 
 
-class TestGuard3ImportGate(unittest.TestCase):
-    """Guard 3: gate POST /v1/tracks on a hard ISRC match."""
+class TestImportGuardLinkImportReview(unittest.TestCase):
+    """Refined guard: at the Lexicon-import step a track either LINKs to an
+    existing Lexicon track (never duplicating Will's large library), AUTO-IMPORTs
+    when confidently absent, or is routed to review only when genuinely ambiguous.
+    Lexicon exposes no ISRC, so the decision uses a robust title+artist existence
+    check (_classify_lexicon_presence), not a hard ISRC gate."""
 
-    def test_fuzzy_match_source_is_routed_to_review_not_imported(self):
+    def test_confidently_absent_new_track_is_imported(self):
+        # Lexicon search returns nothing -> confidently new -> AUTO-IMPORT.
         client = _FakeLexiconClient(search_tracks=[])
-        track = {
-            "title": "Some Song", "artist": "Some Artist",
-            "isrc": "US1234567890", "match_source": "search",  # fuzzy Tidal text match
-        }
+        track = {"title": "Brand New Song", "artist": "Some Artist",
+                 "isrc": "US1234567890", "match_source": "search"}
+        result = pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
+        self.assertEqual(result, "999")
+        self.assertEqual(len(client.post_calls), 1, "confidently-absent track must import exactly once")
+
+    def test_no_isrc_but_absent_is_imported(self):
+        # No ISRC no longer blocks import when the song is confidently absent.
+        client = _FakeLexiconClient(search_tracks=[])
+        track = {"title": "New One", "artist": "Artist", "isrc": "", "match_source": "search"}
+        result = pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
+        self.assertEqual(result, "999")
+
+    def test_existing_track_is_linked_not_imported(self):
+        # Confident title+artist match in Lexicon -> LINK, no new track.
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 314, "title": "My Song", "artist": "Cool Artist"}])
+        track = {"title": "My Song", "artist": "Cool Artist",
+                 "isrc": "US1", "match_source": "search"}
+        result = pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
+        self.assertEqual(result, "314")
+        self.assertEqual(client.post_calls, [], "an existing Lexicon track must be LINKed, never imported")
+
+    def test_ambiguous_same_artist_near_title_is_routed_to_review(self):
+        # Same artist, near-identical title ("Runaway" vs "Run Away") that is NOT a
+        # confident title match -> genuinely ambiguous -> review, do not import.
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 77, "title": "Run Away", "artist": "Kanye West"}])
+        track = {"title": "Runaway", "artist": "Kanye West",
+                 "isrc": "US2", "match_source": "search"}
         with self.assertRaises(pp.ImportNeedsReview):
             pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
-        self.assertEqual(client.post_calls, [], "must NOT POST /v1/tracks for a fuzzy match")
+        self.assertEqual(client.post_calls, [], "ambiguous near-collision must not import")
 
-    def test_no_isrc_is_routed_to_review(self):
-        client = _FakeLexiconClient(search_tracks=[])
-        track = {"title": "T", "artist": "A", "isrc": "", "match_source": "library_existing"}
+    def test_search_unavailable_is_routed_to_review(self):
+        # Lexicon search errors (HTTP 500) -> cannot prove absence -> fail safe to
+        # review rather than risk a duplicate.
+        client = _FakeLexiconClient(search_tracks=[], status=500)
+        track = {"title": "Whatever", "artist": "Artist", "isrc": "US3", "match_source": "search"}
         with self.assertRaises(pp.ImportNeedsReview):
             pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
-        self.assertEqual(client.post_calls, [])
+        self.assertEqual(client.post_calls, [], "inconclusive check must not import")
 
-    def test_isrc_match_source_is_imported(self):
-        client = _FakeLexiconClient(search_tracks=[])
-        track = {"title": "T", "artist": "A", "isrc": "US1234567890", "match_source": "isrc"}
+    def test_manual_approval_forces_import_even_when_ambiguous(self):
+        # Explicit human approval overrides the ambiguous->review routing.
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 77, "title": "Run Away", "artist": "Kanye West"}])
+        track = {"title": "Runaway", "artist": "Kanye West",
+                 "isrc": "", "match_source": "manual_import_approved"}
         result = pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
         self.assertEqual(result, "999")
-        self.assertEqual(len(client.post_calls), 1, "hard ISRC match should import exactly once")
-
-    def test_file_index_isrc_match_source_is_imported(self):
-        client = _FakeLexiconClient(search_tracks=[])
-        track = {"title": "T", "artist": "A", "isrc": "US1234567890", "match_source": "file_index_isrc"}
-        result = pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
-        self.assertEqual(result, "999")
-
-    def test_manual_import_approval_bypasses_gate(self):
-        client = _FakeLexiconClient(search_tracks=[])
-        track = {"title": "T", "artist": "A", "isrc": "", "match_source": "manual_import_approved"}
-        result = pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
-        self.assertEqual(result, "999")
+        self.assertEqual(len(client.post_calls), 1)
 
     def test_known_lexicon_id_short_circuits_without_search_or_import(self):
         client = _FakeLexiconClient(search_tracks=[])
@@ -100,11 +126,66 @@ class TestGuard3ImportGate(unittest.TestCase):
         self.assertEqual(result, "4242")
         self.assertEqual(client.post_calls, [], "known id must not trigger an import")
 
-    def test_hard_sources_frozenset_contents(self):
+    def test_exact_path_match_links_even_without_artist_match(self):
+        # Lexicon already indexes this exact file -> LINK by path.
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 55, "title": "X", "artist": "Y", "location": "/music/library/x.flac"}])
+        track = {"title": "X", "artist": "Y", "isrc": "US4", "match_source": "search"}
+        result = pp._lexicon_find_or_import(client, "/music/library/x.flac", track, db_path=None)
+        self.assertEqual(result, "55")
+        self.assertEqual(client.post_calls, [])
+
+    def test_force_import_sources_is_manual_only(self):
         self.assertEqual(
-            pp._HARD_IMPORT_MATCH_SOURCES,
-            frozenset({"isrc", "file_index_isrc", "manual_import_approved"}),
+            pp._FORCE_IMPORT_MATCH_SOURCES,
+            frozenset({"manual_import_approved"}),
         )
+
+
+class TestClassifyLexiconPresence(unittest.TestCase):
+    """Direct coverage of the link/absent/ambiguous/unknown existence classifier."""
+
+    def test_link_on_confident_title_and_artist(self):
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 10, "title": "Outgrown", "artist": "Bonobo"}])
+        self.assertEqual(
+            pp._classify_lexicon_presence(client, {"title": "Outgrown", "artist": "Bonobo"}),
+            ("link", "10"))
+
+    def test_absent_when_no_candidates(self):
+        client = _FakeLexiconClient(search_tracks=[])
+        self.assertEqual(
+            pp._classify_lexicon_presence(client, {"title": "Nope", "artist": "Nobody"}),
+            ("absent", None))
+
+    def test_absent_when_same_title_different_artist(self):
+        # Title collision with an unrelated artist is a different song -> import.
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 3, "title": "Alright", "artist": "Different Person"}])
+        self.assertEqual(
+            pp._classify_lexicon_presence(client, {"title": "Alright", "artist": "Some Band"}),
+            ("absent", None))
+
+    def test_ambiguous_same_artist_near_title(self):
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 4, "title": "Run Away", "artist": "Kanye West"}])
+        self.assertEqual(
+            pp._classify_lexicon_presence(client, {"title": "Runaway", "artist": "Kanye West"}),
+            ("ambiguous", None))
+
+    def test_unknown_when_search_unavailable(self):
+        client = _FakeLexiconClient(search_tracks=[], status=500)
+        self.assertEqual(
+            pp._classify_lexicon_presence(client, {"title": "T", "artist": "A"}),
+            ("unknown", None))
+
+    def test_drift_not_linked_to_drifting_same_artist(self):
+        # Regression tie-in: "Drift" must NOT link to "Drifting" (word-boundary
+        # matcher); with ratio 0.77 < 0.85 it is treated as absent -> importable.
+        client = _FakeLexiconClient(search_tracks=[
+            {"id": 9, "title": "Drifting", "artist": "Bonobo"}])
+        decision, _ = pp._classify_lexicon_presence(client, {"title": "Drift", "artist": "Bonobo"})
+        self.assertNotEqual(decision, "link")
 
 
 class _FakeDBCtx:

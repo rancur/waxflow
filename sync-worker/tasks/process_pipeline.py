@@ -38,17 +38,22 @@ class ImportNeedsReview(Exception):
     silently creating a possibly-duplicate Lexicon track."""
 
 
-# Match sources that establish a HARD (reliable, ISRC-confirmed) track identity.
-# Only these may auto-create a new Lexicon track via POST /v1/tracks. A track
-# matched by fuzzy text search ("search", "file_index_title_artist",
-# "library_existing") or with no ISRC does NOT qualify and is routed to review.
-# "manual_import_approved" is set by an operator via the import-review approve
-# endpoint (explicit human approval).
-_HARD_IMPORT_MATCH_SOURCES = frozenset({
-    "isrc",               # Tidal exact ISRC match
-    "file_index_isrc",    # WaxFlow file_index exact ISRC match
+# Match sources that FORCE a new-track import, bypassing the existence-check
+# review gate. Only explicit human approval qualifies: an operator approved the
+# track via the import-review endpoint, which sets match_source to this value.
+# Everything else defers to _classify_lexicon_presence() to decide link vs
+# import vs review (Lexicon exposes no ISRC, so a hard ISRC gate is impossible;
+# a thorough title+artist existence check is used instead).
+_FORCE_IMPORT_MATCH_SOURCES = frozenset({
     "manual_import_approved",  # explicit human approval via review UI/API
 })
+
+# Base-title similarity (SequenceMatcher ratio on normalized base titles) at or
+# above this, together with a confident artist match but NO confident title
+# match, marks a NEAR-COLLISION we cannot safely auto-resolve (e.g. a same-artist
+# alternate spacing/version Lexicon may or may not already hold, like
+# "Runaway" vs "Run Away") -> route to human review rather than risk a duplicate.
+_AMBIGUOUS_TITLE_RATIO = 0.85
 
 # Lossless audio extensions — used to break the lossy retry loop (bug #25)
 _LOSSLESS_EXTENSIONS = {'.flac', '.aiff', '.aif', '.wav', '.alac'}
@@ -274,11 +279,16 @@ def _process_new(db_path: str):
                     track["id"], track["artist"], track["title"], isrc_match["file_path"],
                 )
 
-            # Check if track already exists in Lexicon's database
+            # Check if track already exists in Lexicon's database. Will has a
+            # large existing Lexicon library, so a confident title+artist match
+            # means he ALREADY owns this song — LINK to it (no download, no new
+            # track), regardless of whether Lexicon's file looks lossless. This
+            # is the primary duplicate-safety guardrail and the main reason the
+            # backfill stays fast: most liked songs link here without downloading.
             lexicon_existing = _check_existing_in_lexicon(track)
-            if lexicon_existing and _is_likely_lossless(lexicon_existing.get("file_path", "")):
+            if lexicon_existing:
                 log.info(
-                    "Track %d (%s - %s) already in Lexicon (track_id=%s): %s",
+                    "Track %d (%s - %s) already in Lexicon (track_id=%s): %s — linking, no download",
                     track["id"], track["artist"], track["title"],
                     lexicon_existing["lexicon_track_id"], lexicon_existing["file_path"],
                 )
@@ -298,11 +308,6 @@ def _process_new(db_path: str):
                     {"lexicon_track_id": lexicon_existing["lexicon_track_id"], "file_path": lexicon_existing["file_path"]},
                 )
                 continue
-            elif lexicon_existing:
-                log.info(
-                    "Track %d (%s - %s): found lossy file in Lexicon (%s), skipping to Tidal for lossless",
-                    track["id"], track["artist"], track["title"], lexicon_existing["file_path"],
-                )
 
             # Check if track already exists in the music library on disk
             existing = _check_existing_in_library(track, db_path)
@@ -2253,22 +2258,125 @@ def _ensure_playlist(db_path: str, year: int, month: int, folder_name: str, play
 # Lexicon API helpers (using /v1/ endpoints)
 # ---------------------------------------------------------------------------
 
-def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db_path: str | None = None) -> str | None:
-    """Find a track in Lexicon by artist+title, or import it via file path.
+def _base_title_ratio(a: str, b: str) -> float:
+    """SequenceMatcher ratio on normalized *base* titles (remix/edit suffixes
+    stripped). Used only to detect same-artist near-collisions for review."""
+    na = _normalize_for_comparison(_extract_base_title(a))
+    nb = _normalize_for_comparison(_extract_base_title(b))
+    if not na or not nb:
+        return 0.0
+    return SequenceMatcher(None, na, nb).ratio()
 
-    Duplicate-safety: a new Lexicon track (POST /v1/tracks) is only created when
-    the track has a HARD, ISRC-confirmed match_source. Fuzzy-only matches are
-    raised as ImportNeedsReview and routed to the import-review queue.
+
+def _classify_lexicon_presence(client: httpx.Client, track: dict) -> tuple[str, str | None]:
+    """Thorough existence check: does this liked song already live in Lexicon?
+
+    Runs a multi-strategy title search (full title, base title, punctuation-
+    stripped title, and an artist+title filter) and evaluates every candidate
+    with the robust word-boundary title matcher (_titles_match) and the
+    order-independent artist matcher (_artists_match). Lexicon exposes no ISRC,
+    so this title+artist identity check is the only reliable signal.
+
+    Returns exactly one of:
+      ("link", lexicon_id) - a confident title AND artist match exists; LINK to
+                             it and never create a (duplicate) new track. This is
+                             the guardrail that protects Will's large library.
+      ("ambiguous", None)  - a same-artist candidate whose base title is nearly
+                             identical (>= _AMBIGUOUS_TITLE_RATIO) but is NOT a
+                             confident title match; genuinely uncertain -> review.
+      ("absent", None)     - searches ran and nothing plausible matched; the song
+                             is confidently new -> safe to auto-import (zero dup
+                             risk, because nothing matched).
+      ("unknown", None)    - every Lexicon search errored/was unavailable; we
+                             cannot prove absence -> fail safe to review, never
+                             risk a duplicate on an inconclusive check.
     """
-    # Dup-safety short-circuit: if we already recorded the Lexicon track id for
-    # this track (e.g. matched as 'lexicon_existing' at the 'new' stage), reuse
-    # it rather than re-searching and risking a duplicate import.
+    artist = track.get("artist", "") or ""
+    title = track.get("title", "") or ""
+    if not artist or not title:
+        return ("unknown", None)
+
+    # Build multiple title queries to maximize Lexicon search recall.
+    queries: list[str] = [title]
+    base = _extract_base_title(title)
+    if base and base != title.lower().strip():
+        queries.append(base)
+    stripped = title.replace("'", "").replace("’", "").replace("!", "").replace("?", "")
+    if stripped and stripped != title:
+        queries.append(stripped)
+
+    any_search_ok = False
+    candidates: dict = {}  # lexicon_id -> (lex_title, lex_artist)
+
+    def _collect(params: dict):
+        nonlocal any_search_ok
+        try:
+            resp = client.get("/v1/search/tracks", params=params)
+        except Exception as e:
+            log.warning("Lexicon existence search error (%s): %s", params, e)
+            return
+        if getattr(resp, "status_code", 0) != 200:
+            log.warning("Lexicon existence search HTTP %s (%s)", getattr(resp, "status_code", "?"), params)
+            return
+        any_search_ok = True
+        try:
+            results = resp.json().get("data", {}).get("tracks", [])
+        except Exception:
+            return
+        for t in results:
+            tid = t.get("id")
+            if tid is None:
+                continue
+            candidates[tid] = (t.get("title") or "", t.get("artist") or "")
+
+    seen_q: set[str] = set()
+    for q in queries:
+        if not q or q in seen_q:
+            continue
+        seen_q.add(q)
+        _collect({"filter[title]": q})
+    # Extra recall: the artist+title filtered search
+    _collect({"filter[artist]": artist, "filter[title]": title})
+
+    ambiguous = False
+    for tid, (lex_title, lex_artist) in candidates.items():
+        a_match = _artists_match(artist, lex_artist)
+        t_match = _titles_match(title, lex_title)
+        if t_match and a_match:
+            # Confident identity match -> LINK (protects the library from dupes).
+            return ("link", str(tid))
+        if a_match and not t_match and _base_title_ratio(title, lex_title) >= _AMBIGUOUS_TITLE_RATIO:
+            # Same artist, nearly-identical title, but not a confident match.
+            ambiguous = True
+
+    if ambiguous:
+        return ("ambiguous", None)
+    if any_search_ok:
+        return ("absent", None)
+    return ("unknown", None)
+
+
+def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db_path: str | None = None) -> str | None:
+    """Decide link vs import vs review for a track at the Lexicon-import step.
+
+    Duplicate-safety (Will has a large Lexicon library, so a wrong import is the
+    main risk):
+      * If we already recorded a Lexicon id for this track -> reuse it (LINK).
+      * If Lexicon already indexes THIS exact file path -> LINK.
+      * Otherwise run a thorough existence check (_classify_lexicon_presence):
+          - "link"      -> LINK to the existing track (never create a dup).
+          - "ambiguous" -> ImportNeedsReview (same-artist near-title candidate).
+          - "unknown"   -> ImportNeedsReview (existence check inconclusive).
+          - "absent"    -> confidently new -> POST /v1/tracks to import.
+      * match_source == "manual_import_approved" forces the import even on an
+        ambiguous/inconclusive check (explicit human approval via the review UI).
+    """
+    # Dup-safety short-circuit: reuse a Lexicon id already recorded for this track
+    # (e.g. matched as 'lexicon_existing' at the 'new' stage) instead of searching.
     known_id = str(track.get("lexicon_track_id") or "").strip()
     if known_id and known_id.lower() not in ("none", "null"):
         return known_id
 
-    spotify_title = (track.get("title") or "").lower().strip()
-    spotify_artist = (track.get("artist") or "").lower().split(",")[0].strip()
     artist_raw = track.get("artist", "")
     title_raw = track.get("title", "")
 
@@ -2284,94 +2392,57 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db
         if p and p not in path_prefixes:
             path_prefixes.append(p if p.endswith("/") else p + "/")
 
-    # Search by artist + title
+    # LINK opportunity 1: Lexicon already indexes this exact file path (idempotent
+    # re-processing of an already-imported file).
     try:
         resp = client.get("/v1/search/tracks", params={
             "filter[artist]": artist_raw,
             "filter[title]": title_raw,
         })
         if resp.status_code == 200:
-            data = resp.json()
-            results = data.get("data", {}).get("tracks", [])
-            for t in results:
-                # Path match (check current and legacy path prefixes)
+            for t in resp.json().get("data", {}).get("tracks", []):
                 lex_loc = t.get("location", "")
-                if lex_loc == mac_path:
+                if lex_loc and lex_loc == mac_path:
                     return str(t["id"])
-                # Extract relative path from both and compare
                 for prefix in path_prefixes:
-                    if lex_loc.startswith(prefix) and mac_path.endswith(lex_loc[len(prefix):]):
+                    if lex_loc and lex_loc.startswith(prefix) and mac_path.endswith(lex_loc[len(prefix):]):
                         return str(t["id"])
-                # Fuzzy title match: Spotify "Hot One" matches Lexicon "Hot One (Original Mix)"
-                lex_title = (t.get("title") or "").lower().strip()
-                lex_artist = (t.get("artist") or "").lower().strip()
-                if spotify_title in lex_title and spotify_artist in lex_artist:
-                    return str(t["id"])
-            # If any results at all and artist matches, take first
-            if results:
-                first_artist = (results[0].get("artist") or "").lower()
-                if spotify_artist in first_artist:
-                    return str(results[0]["id"])
-            if not results:
-                log.info("Lexicon search returned no results for: %s - %s", artist_raw, title_raw)
-        else:
-            log.warning("Lexicon search returned HTTP %d for: %s - %s", resp.status_code, artist_raw, title_raw)
     except Exception as e:
-        log.warning("Lexicon search failed for %s - %s: %s", artist_raw, title_raw, e)
+        log.warning("Lexicon path search failed for %s - %s: %s", artist_raw, title_raw, e)
 
-    # Broader fallback: search by title only (no artist filter)
-    try:
-        resp = client.get("/v1/search/tracks", params={"filter[title]": title_raw})
-        if resp.status_code == 200:
-            data = resp.json()
-            results = data.get("data", {}).get("tracks", [])
-            if results:
-                # Pick the result with the closest artist match
-                best_match = None
-                best_score = 0
-                for t in results:
-                    lex_artist = (t.get("artist") or "").lower().strip()
-                    # Score: how much of the spotify artist appears in the lexicon artist
-                    if spotify_artist in lex_artist:
-                        score = len(spotify_artist) / max(len(lex_artist), 1)
-                        if score > best_score:
-                            best_score = score
-                            best_match = t
-                    elif lex_artist in spotify_artist:
-                        score = len(lex_artist) / max(len(spotify_artist), 1)
-                        if score > best_score:
-                            best_score = score
-                            best_match = t
-                if best_match:
-                    log.info("Lexicon broad search matched: %s - %s (score=%.2f)",
-                             best_match.get("artist"), best_match.get("title"), best_score)
-                    return str(best_match["id"])
-    except Exception as e:
-        log.warning("Lexicon broad search failed for title '%s': %s", title_raw, e)
+    # LINK opportunity 2 / import / review: thorough title+artist existence check.
+    decision, lex_id = _classify_lexicon_presence(client, track)
+    if decision == "link":
+        log.info("Lexicon LINK: %s - %s -> existing track %s (no new track created)",
+                 artist_raw, title_raw, lex_id)
+        return lex_id
 
-    # Guard 3: gate the sole duplicate-creating line. Reaching here means the
-    # track was NOT found in Lexicon by path or fuzzy title+artist search. Because
-    # that fuzzy search can MISS an existing entry (special chars, remix suffixes,
-    # metadata drift), auto-importing on a fuzzy miss is exactly how duplicates are
-    # born. We only auto-create a new Lexicon track when the track's identity is
-    # HARD-confirmed by ISRC; anything matched only by fuzzy text (or lacking an
-    # ISRC) is routed to the import-review queue for explicit human approval.
     match_source = (track.get("match_source") or "").strip()
-    if match_source not in _HARD_IMPORT_MATCH_SOURCES:
+    force_import = match_source in _FORCE_IMPORT_MATCH_SOURCES
+
+    if decision == "ambiguous" and not force_import:
         raise ImportNeedsReview(
-            f"refusing to auto-import '{artist_raw} - {title_raw}' "
-            f"(match_source={match_source or 'none'}, isrc={track.get('isrc') or 'none'}): "
-            f"not found in Lexicon by fuzzy search and no hard ISRC match — "
-            f"would create a possibly-duplicate track at {mac_path}"
+            f"ambiguous Lexicon match for '{artist_raw} - {title_raw}' "
+            f"(isrc={track.get('isrc') or 'none'}): a same-artist, near-identical-title "
+            f"track exists but is not a confident match — routing to review to avoid a "
+            f"possible duplicate at {mac_path}"
+        )
+    if decision == "unknown" and not force_import:
+        raise ImportNeedsReview(
+            f"inconclusive Lexicon existence check for '{artist_raw} - {title_raw}' "
+            f"(search unavailable) — routing to review to avoid a possible duplicate at {mac_path}"
         )
 
-    # Import the track file via POST /v1/tracks (with locations array)
+    # decision == "absent" (confidently new) OR explicit human approval -> import.
     try:
         resp = client.post("/v1/tracks", json={"locations": [mac_path]})
         if resp.status_code in (200, 201):
             data = resp.json()
             imported = data.get("data", {}).get("tracks", [])
             if imported:
+                log.info("Lexicon IMPORT: %s - %s -> new track %s (confidently absent%s)",
+                         artist_raw, title_raw, imported[0]["id"],
+                         ", manual-approved" if force_import else "")
                 return str(imported[0]["id"])
             else:
                 log.error("Lexicon import returned empty tracks for file: %s", mac_path)
