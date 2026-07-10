@@ -337,6 +337,63 @@ class TestTitleMatchNoMidWordSubstring(unittest.TestCase):
         self.assertTrue(pp._titles_match("Hey Now - Bonobo Remix", "Hey Now (Bonobo Remix)"))
 
 
+class _FileIndexConn:
+    """Fake DB conn for _check_existing_by_isrc: reports file_index exists, no ISRC
+    hit, and returns the given rows for the fuzzy title+artist LIKE query."""
+
+    def __init__(self, like_rows):
+        self._like_rows = like_rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=()):
+        rows = []
+        if "sqlite_master" in sql:
+            rows = [("file_index",)]
+        elif "WHERE isrc" in sql:
+            rows = []  # no exact ISRC match in file_index
+        elif "title LIKE" in sql:
+            rows = self._like_rows
+
+        class _Cur:
+            def fetchone(_s):
+                return rows[0] if rows else None
+
+            def fetchall(_s):
+                return rows
+
+        return _Cur()
+
+
+class TestFileIndexFuzzyValidation(unittest.TestCase):
+    """The file_index fuzzy path uses a coarse SQL LIKE prefilter ('Drift%' also
+    matches 'Drifting'); each candidate must be confirmed with _titles_match /
+    _artists_match. This is the path that actually re-mis-matched the Bonobo single
+    'Drift' to the file 'Bonobo - Drifting' (match_source=file_index_title_artist)."""
+
+    def test_drift_does_not_match_drifting_file(self):
+        conn = _FileIndexConn(like_rows=[(
+            "/music/Database/Bonobo/Lazarus/Bonobo - Drifting 5M59.flac",
+            "Drifting", "Bonobo")])
+        with mock.patch.object(pp, "get_db", return_value=conn):
+            result = pp._check_existing_by_isrc("/tmp/x.db", {
+                "title": "Drift", "artist": "Bonobo", "isrc": "GBCFB2600207"})
+        self.assertIsNone(result, "'Drift' must not match the 'Drifting' file")
+
+    def test_real_drift_file_still_matches(self):
+        conn = _FileIndexConn(like_rows=[(
+            "/music/Database/Bonobo/Bonobo - Drift.flac", "Drift", "Bonobo")])
+        with mock.patch.object(pp, "get_db", return_value=conn):
+            result = pp._check_existing_by_isrc("/tmp/x.db", {
+                "title": "Drift", "artist": "Bonobo", "isrc": "GBCFB2600207"})
+        self.assertIsNotNone(result)
+        self.assertEqual(result["match_type"], "title_artist")
+
+
 class _RecordingConn:
     """Fake DB connection recording executed SQL; UPDATE returns a rowcount."""
 
