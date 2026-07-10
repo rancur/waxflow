@@ -214,7 +214,7 @@ print(count)
 
 if [ "$DL_FAILED" -gt 10 ] && check_cooldown "reset_dl_failed"; then
     log "ACTION: Resetting $DL_FAILED download-failed tracks"
-    remote_exec "$DOCKER_CMD exec sync-api python3 -c \"
+    remote_exec "$DOCKER_CMD exec waxflow-api python3 -c \"
 import sqlite3
 conn = sqlite3.connect('/app/data/sync.db')
 conn.execute('PRAGMA journal_mode=WAL')
@@ -237,7 +237,7 @@ import json,sys
 print(0)
 " 2>/dev/null || echo "0")
 
-remote_exec "$DOCKER_CMD exec sync-api python3 -c \"
+remote_exec "$DOCKER_CMD exec waxflow-api python3 -c \"
 import sqlite3
 conn = sqlite3.connect('/app/data/sync.db')
 count = conn.execute('''SELECT COUNT(*) FROM tracks
