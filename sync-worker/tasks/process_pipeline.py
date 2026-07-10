@@ -1865,8 +1865,9 @@ def _organize_track(db_path: str, track: dict):
         pipeline_stage="complete",
     )
 
-    # Add to "Recently Added (Sync)" playlist so user can easily select new tracks
-    _add_to_recent_sync_playlist(db_path, lexicon_track_id, track_id)
+    # "Recently Added (Sync)" playlist feature removed per user request
+    # (the user maintains their own Recently Added smartlist in Lexicon).
+    # _add_to_recent_sync_playlist(db_path, lexicon_track_id, track_id)  # disabled
 
     # Inline BPM/key analysis: detect from the audio file and PATCH to Lexicon
     if lexicon_track_id and file_path and os.path.exists(file_path):
@@ -1919,10 +1920,14 @@ def _notify_sync_complete(db_path: str, track: dict, playlist_name: str):
 
 
 def _ensure_recent_sync_playlist(db_path: str):
-    """Create the 'Recently Added (Sync)' playlist in Lexicon if it doesn't exist.
+    """DISABLED: 'Recently Added (Sync)' playlist feature removed per user request.
 
-    Stores the Lexicon playlist ID in app_config under _recent_sync_playlist_id.
+    The user maintains their own Recently Added smartlist in Lexicon, so WaxFlow
+    no longer creates or writes to a 'Recently Added (Sync)' playlist. This function
+    is retained as an inert no-op to avoid breaking any external callers.
     """
+    return  # feature disabled — never create the playlist
+
     playlist_id = get_config(db_path, "_recent_sync_playlist_id")
     if playlist_id:
         return
@@ -1952,10 +1957,13 @@ def _ensure_recent_sync_playlist(db_path: str):
 
 
 def _add_to_recent_sync_playlist(db_path: str, lexicon_track_id: str | None, track_id: int):
-    """Add a synced track to the 'Recently Added (Sync)' playlist.
+    """DISABLED: 'Recently Added (Sync)' playlist feature removed per user request.
 
-    Non-fatal: silently skips if playlist doesn't exist or API fails.
+    The user maintains their own Recently Added smartlist in Lexicon. This is now an
+    inert no-op; WaxFlow no longer adds tracks to any 'Recently Added (Sync)' playlist.
     """
+    return  # feature disabled — never add to the playlist
+
     if not lexicon_track_id:
         return
 
