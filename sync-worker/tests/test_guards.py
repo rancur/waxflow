@@ -306,5 +306,86 @@ class TestGuard2NoAutoEscalation(unittest.TestCase):
         self.assertIn("auto-escalation disabled", src)
 
 
+class TestTitleMatchNoMidWordSubstring(unittest.TestCase):
+    """Regression: `_titles_match` must not treat a shorter title as a match when
+    it only appears as a MID-WORD fragment of the longer one. The 2026 Bonobo
+    single "Drift" (ISRC GBCFB2600207) wrongly matched the Lazarus soundtrack track
+    "Drifting" (ISRC USQX92501692) because raw substring containment made
+    "drift" ⊂ "drifting" True. Lexicon exposes no ISRC, so title matching is the
+    only place this can be caught."""
+
+    def test_drift_does_not_match_drifting(self):
+        self.assertFalse(pp._titles_match("Drift", "Drifting"))
+        self.assertFalse(pp._titles_match("Drifting", "Drift"))
+
+    def test_word_boundary_helper(self):
+        self.assertFalse(pp._contains_at_word_boundary("drift", "drifting"))
+        self.assertTrue(pp._contains_at_word_boundary("drift", "tokyo drift"))
+        self.assertTrue(pp._contains_at_word_boundary("me and you", "me and you reprise"))
+
+    def test_single_shared_word_is_not_enough(self):
+        # "Drift" vs "Tokyo Drift" share one whole word but are different songs;
+        # the word-overlap strategy must not fully satisfy on a single shared word.
+        self.assertFalse(pp._titles_match("Drift", "Tokyo Drift"))
+
+    def test_legit_matches_still_pass(self):
+        # Exact, suffix-variant, and whole-word-contained titles must still match.
+        self.assertTrue(pp._titles_match("Drift", "Drift"))
+        self.assertTrue(pp._titles_match("Drift", "Drift (Original Mix)"))
+        self.assertTrue(pp._titles_match("Sun Will Rise", "Sun Will Rise"))
+        self.assertTrue(pp._titles_match("Outgrown", "Outgrown"))
+        self.assertTrue(pp._titles_match("Hey Now - Bonobo Remix", "Hey Now (Bonobo Remix)"))
+
+
+class _RecordingConn:
+    """Fake DB connection recording executed SQL; UPDATE returns a rowcount."""
+
+    def __init__(self, rowcount=0):
+        self._rowcount = rowcount
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=()):
+        self.executed.append(sql)
+
+        class _R:
+            rowcount = self._rowcount
+        return _R()
+
+
+class TestWaitingRevival(unittest.TestCase):
+    """Issue: April 2026 + June 2026 monthly playlists were never created because
+    every one of those months' tracks was stranded at pipeline_stage='waiting'.
+    In full/download mode `_process_matching` must revive 'waiting' tracks back to
+    'matching'; in scan mode it must NOT (scan mode legitimately parks them)."""
+
+    def test_full_mode_revives_waiting_tracks(self):
+        conn = _RecordingConn(rowcount=26)
+        with mock.patch.object(pp, "get_config", return_value="full"), \
+             mock.patch.object(pp, "get_db", return_value=conn), \
+             mock.patch.object(pp, "get_tracks_by_stage", return_value=[]), \
+             mock.patch.object(pp, "log_activity"):
+            pp._process_matching("/tmp/x.db")
+        revive_stmts = [s for s in conn.executed
+                        if "UPDATE tracks" in s and "pipeline_stage = 'matching'" in s
+                        and "pipeline_stage = 'waiting'" in s]
+        self.assertEqual(len(revive_stmts), 1, "full mode must revive waiting->matching exactly once")
+
+    def test_scan_mode_does_not_revive(self):
+        conn = _RecordingConn(rowcount=0)
+        with mock.patch.object(pp, "get_config", return_value="scan"), \
+             mock.patch.object(pp, "get_db", return_value=conn), \
+             mock.patch.object(pp, "get_tracks_by_stage", return_value=[]), \
+             mock.patch.object(pp, "log_activity"):
+            pp._process_matching("/tmp/x.db")
+        revive_stmts = [s for s in conn.executed if "pipeline_stage = 'waiting'" in s]
+        self.assertEqual(revive_stmts, [], "scan mode must NOT revive waiting tracks")
+
+
 if __name__ == "__main__":
     unittest.main()
