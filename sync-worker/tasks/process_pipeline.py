@@ -408,6 +408,22 @@ def _artists_match(sp_artist: str, lex_artist: str) -> bool:
     return False
 
 
+def _contains_at_word_boundary(needle: str, haystack: str) -> bool:
+    """True if `needle` occurs inside `haystack` as complete word(s), bounded by
+    word boundaries on both sides — NOT as a mid-word fragment.
+
+    This is the guard against the substring false-positive that mis-matched the
+    2026 Bonobo single "Drift" (ISRC GBCFB2600207) to the Lazarus soundtrack track
+    "Drifting" (ISRC USQX92501692): raw ``"drift" in "drifting"`` is True, but
+    ``_contains_at_word_boundary("drift", "drifting")`` is False because "drift"
+    is not a whole word in "drifting". Lexicon exposes no ISRC, so title matching
+    is the only place this can be caught.
+    """
+    if not needle or not haystack:
+        return False
+    return re.search(r"(?:^|\s)" + re.escape(needle) + r"(?:\s|$)", haystack) is not None
+
+
 def _titles_match(sp_title: str, lex_title: str) -> bool:
     """Check if titles match using multiple strategies."""
     # Strategy 1: Normalized full title comparison
@@ -415,9 +431,15 @@ def _titles_match(sp_title: str, lex_title: str) -> bool:
     lex_norm = _normalize_for_comparison(lex_title)
     if sp_norm == lex_norm:
         return True
-    # Substring containment (bidirectional)
+    # Whole-word containment (bidirectional). Word-boundary anchored AND limited to
+    # multi-word phrases: a shorter title matches only when it appears as complete
+    # word(s) in the longer title (never as a mid-word fragment — "drift" must not
+    # match "drifting"), AND the contained title is >= 2 words. A single short word
+    # ("Drift") must NOT match a longer title that merely contains it ("Tokyo
+    # Drift"); single-word titles match only by exact/base equality.
     if sp_norm and lex_norm:
-        if sp_norm in lex_norm or lex_norm in sp_norm:
+        if (len(sp_norm.split()) >= 2 and _contains_at_word_boundary(sp_norm, lex_norm)) or \
+           (len(lex_norm.split()) >= 2 and _contains_at_word_boundary(lex_norm, sp_norm)):
             return True
 
     # Strategy 2: Base title comparison (strip remix/edit suffixes)
@@ -426,16 +448,19 @@ def _titles_match(sp_title: str, lex_title: str) -> bool:
     if sp_base and lex_base and sp_base == lex_base:
         return True
     if sp_base and lex_base:
-        if sp_base in lex_base or lex_base in sp_base:
+        if (len(sp_base.split()) >= 2 and _contains_at_word_boundary(sp_base, lex_base)) or \
+           (len(lex_base.split()) >= 2 and _contains_at_word_boundary(lex_base, sp_base)):
             return True
 
-    # Strategy 3: Word-level matching (80%+ overlap)
+    # Strategy 3: Word-level matching (80%+ overlap). Require at least two words in
+    # the smaller title, otherwise a single shared word (e.g. "Drift" vs "Tokyo
+    # Drift") would fully satisfy the ratio and produce a false match.
     sp_words = set(sp_base.split()) if sp_base else set()
     lex_words = set(lex_base.split()) if lex_base else set()
     if sp_words and lex_words:
         overlap = sp_words & lex_words
         min_len = min(len(sp_words), len(lex_words))
-        if min_len > 0 and len(overlap) / min_len >= 0.80:
+        if min_len >= 2 and len(overlap) / min_len >= 0.80:
             return True
 
     return False
@@ -573,6 +598,29 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
 
 def _process_matching(db_path: str):
     sync_mode = get_config(db_path, "sync_mode") or "scan"
+    # Self-heal: in full/download mode, revive any tracks stranded at 'waiting'.
+    # 'waiting' is set ONLY in scan mode (a track not already in the library, which
+    # scan mode will not download). The sync-mode POST re-queues waiting->matching
+    # on an explicit transition to full, but tracks parked at 'waiting' while the
+    # mode was already full (or flipped in the DB by other means) are otherwise
+    # never pulled by any pipeline stage — they sit forever, so their month's
+    # monthly playlist (which is only created lazily when a track organizes) never
+    # gets created. This was the root cause of the missing April 2026 and June 2026
+    # monthly playlists: every one of those months' tracks was stranded at 'waiting'
+    # (none happened to already be in Lexicon). Reviving here makes full mode
+    # eventually process EVERY track and file it into its liked-date playlist.
+    if sync_mode != "scan":
+        with get_db(db_path) as conn:
+            revived = conn.execute(
+                "UPDATE tracks SET pipeline_stage = 'matching', updated_at = datetime('now') "
+                "WHERE pipeline_stage = 'waiting'"
+            ).rowcount
+        if revived:
+            log.info("Full mode: revived %d stranded 'waiting' track(s) to matching", revived)
+            log_activity(
+                db_path, "waiting_revived", None,
+                f"Full mode revived {revived} stranded 'waiting' track(s) to matching",
+            )
     tracks = get_tracks_by_stage(db_path, "matching", limit=BATCH_MATCH)
     for track in tracks:
         try:
