@@ -11,6 +11,7 @@ from tasks.helpers import (
     log_activity,
     set_config,
 )
+from tasks.nonmusic_filter import DEFAULT_MAX_DURATION_MS, is_nonmusic
 
 log = logging.getLogger("worker.poll_spotify")
 
@@ -93,6 +94,36 @@ def _poll(db_path: str):
             artists = ", ".join(a["name"] for a in track.get("artists", []) if a.get("name"))
             album_info = track.get("album", {})
             album_name = album_info.get("name", "")
+
+            # Non-music filter: keep audiobooks / podcast episodes / spoken-word
+            # out of the DJ library entirely (they must never enter the pipeline,
+            # and — now that Lexicon watch-folder auto-import is active — never get
+            # downloaded into the watch folder). Configurable + auditable.
+            if (get_config(db_path, "nonmusic_filter_enabled") or "1") != "0":
+                try:
+                    max_dur = int(get_config(db_path, "nonmusic_max_duration_ms") or DEFAULT_MAX_DURATION_MS)
+                except (TypeError, ValueError):
+                    max_dur = DEFAULT_MAX_DURATION_MS
+                skip, reason = is_nonmusic(
+                    {
+                        "type": track.get("type"),
+                        "episode": track.get("episode"),
+                        "duration_ms": track.get("duration_ms"),
+                        "title": track.get("name"),
+                        "album": album_name,
+                        "artists": artists,
+                    },
+                    max_duration_ms=max_dur,
+                )
+                if skip:
+                    log.info("Skipping non-music item '%s - %s' (%s)", artists, track.get("name"), reason)
+                    log_activity(
+                        db_path, "nonmusic_skipped", None,
+                        f"Skipped non-music item: {artists} - {track.get('name')} ({reason})",
+                        {"spotify_id": spotify_id, "reason": reason,
+                         "duration_ms": track.get("duration_ms"), "type": track.get("type")},
+                    )
+                    continue
 
             # Get ISRC from external_ids
             external_ids = track.get("external_ids", {})

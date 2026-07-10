@@ -139,6 +139,33 @@ WORKER_HEALTH_STATUS=$(echo "$WORKER_HEALTH" | python3 -c "import json,sys; prin
 
 log "SERVICES: lexicon=$LEXICON_OK tidal_legacy=$TIDARR_OK worker=$WORKER_STATUS worker_health=$WORKER_HEALTH_STATUS"
 
+# ===== CHECK: Lexicon import health (silent empty-import / NAS mount outage) =====
+# The worker canary + empty-import detector write import_health into the API
+# /api/admin/health endpoint. "mount_down" or "lexicon_unreachable" means new
+# imports SILENTLY fail (Lexicon returns HTTP 200 with 0 tracks). This must PAGE,
+# not hide. We do NOT restart containers for it — a restart cannot remount the
+# NAS share on the Lexicon host; only a human remount fixes it.
+HEALTH_JSON=$(curl -s --connect-timeout 5 "$API_URL/api/admin/health" 2>/dev/null || echo "")
+IMPORT_HEALTH=$(echo "$HEALTH_JSON" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('import_health','unknown'))" 2>/dev/null || echo "unknown")
+IMPORT_DETAIL=$(echo "$HEALTH_JSON" | python3 -c "import json,sys; print((json.loads(sys.stdin.read()).get('import_health_detail') or '')[:300])" 2>/dev/null || echo "")
+IMPORT_EMPTY_COUNT=$(echo "$HEALTH_JSON" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('lexicon_import_empty_count') or 0)" 2>/dev/null || echo "0")
+
+log "IMPORT_HEALTH: $IMPORT_HEALTH (empty_imports=$IMPORT_EMPTY_COUNT)"
+
+if [ "$IMPORT_HEALTH" = "mount_down" ] || [ "$IMPORT_HEALTH" = "lexicon_unreachable" ]; then
+    log "CRITICAL: Lexicon import health = $IMPORT_HEALTH — new imports are silently failing. $IMPORT_DETAIL"
+    if check_cooldown "import_health_page"; then
+        # Optional external page (ntfy/Kuma push/webhook). Set WAXFLOW_ALERT_WEBHOOK to enable.
+        if [ -n "${WAXFLOW_ALERT_WEBHOOK:-}" ]; then
+            curl -s -m 5 -X POST "$WAXFLOW_ALERT_WEBHOOK" \
+                -H 'Content-Type: application/json' \
+                -d "{\"event\":\"lexicon_import_critical\",\"status\":\"$IMPORT_HEALTH\",\"detail\":\"$IMPORT_DETAIL\",\"service\":\"waxflow\"}" \
+                >> "$LOG_FILE" 2>&1 || true
+        fi
+        set_cooldown "import_health_page"
+    fi
+fi
+
 # ===== FIX: Worker stalled or unreachable =====
 if [ "$WORKER_HEALTH_STATUS" = "stalled" ] || [ "$WORKER_HEALTH_STATUS" = "unreachable" ]; then
     if check_cooldown "restart_worker_health"; then
@@ -255,6 +282,7 @@ state = {
     'errors': $ERRORS, 'downloading': $DOWNLOADING, 'new': $NEW,
     'organizing': $ORGANIZING, 'complete': $COMPLETE,
     'services': {'lexicon': '$LEXICON_OK', 'tidal_legacy': '$TIDARR_OK', 'tidal_auth': '$TIDARR_AUTH'},
+    'import_health': '$IMPORT_HEALTH', 'import_empty_count': $IMPORT_EMPTY_COUNT,
 }
 with open('$STATE_FILE', 'w') as f:
     json.dump(state, f, indent=2)

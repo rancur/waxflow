@@ -22,6 +22,7 @@ from tasks.backup_lexicon import backup_lexicon
 from tasks.index_library import index_library
 from tasks.analyze_tracks import analyze_tracks
 from tasks.create_playlists import create_playlists
+from tasks.lexicon_health import lexicon_health_check
 from tasks.helpers import get_config, get_db
 
 DB_PATH = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
@@ -221,6 +222,13 @@ async def main():
         ),
         asyncio.create_task(
             run_task("create_playlists", create_playlists, default_interval=30)
+        ),
+        # Proactive Lexicon import-health canary: verifies Lexicon can actually
+        # reach the NAS music mount BEFORE real imports silently fail. Lightweight
+        # (probes one already-indexed file), so a short interval is cheap.
+        asyncio.create_task(
+            run_task("lexicon_health_check", lexicon_health_check,
+                     interval_key="lexicon_canary_interval_seconds", default_interval=900)
         ),
     ]
 

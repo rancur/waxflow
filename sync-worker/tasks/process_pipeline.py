@@ -38,6 +38,22 @@ class ImportNeedsReview(Exception):
     silently creating a possibly-duplicate Lexicon track."""
 
 
+# Machine-parseable token embedded in pipeline_error for empty-import failures so
+# the self-heal monitors (monitor-parity.sh / sls-monitor) can grep for it.
+LEXICON_IMPORT_EMPTY_REASON = "lexicon_import_empty"
+
+
+class LexiconImportEmpty(Exception):
+    """Raised when POST /v1/tracks returns HTTP 200 but imports 0 tracks.
+
+    This is the silent-failure signature of a Lexicon host that has lost access
+    to the NAS music mount (e.g. /Volumes/music): the API reports success but
+    imports NOTHING, so a genuinely-new track never actually lands and — before
+    this was caught — nobody noticed. It must NOT be treated as success or as a
+    generic error; it gets a distinct, loud error state so the mount outage is
+    impossible to miss."""
+
+
 # Match sources that FORCE a new-track import, bypassing the existence-check
 # review gate. Only explicit human approval qualifies: an operator approved the
 # track via the import-review endpoint, which sets match_source to this value.
@@ -1904,6 +1920,31 @@ def _process_organizing(db_path: str):
                 {"match_source": track.get("match_source"), "isrc": track.get("isrc")},
             )
             log.warning("Track %d routed to import-review queue: %s", track["id"], e)
+        except LexiconImportEmpty as e:
+            # Silent-failure signature: Lexicon reported success but imported 0
+            # tracks (NAS music mount unreachable on the Lexicon host). Set a
+            # DISTINCT, clearly-messaged error state and LOUDLY surface it via
+            # the shared import-health recorder (activity log + webhook page +
+            # /api/admin/health field) so this can't hide as a generic error.
+            update_track(
+                db_path, track["id"],
+                lexicon_status="error",
+                pipeline_stage="error",
+                pipeline_error=str(e),
+            )
+            log_activity(
+                db_path, "lexicon_import_empty", track["id"],
+                f"Lexicon import returned 0 tracks (mount likely down): {e}",
+                {"reason": LEXICON_IMPORT_EMPTY_REASON,
+                 "artist": track.get("artist"), "title": track.get("title")},
+            )
+            mac_path = track.get("file_path") or "unknown"
+            try:
+                from tasks.lexicon_health import note_empty_import
+                note_empty_import(db_path, mac_path, source="pipeline")
+            except Exception as notify_err:
+                log.warning("Failed to record import-health from empty import: %s", notify_err)
+            log.error("Track %d: Lexicon import returned 0 tracks — %s", track["id"], e)
         except Exception as e:
             log.error("Organize error for track %d: %s", track["id"], e, exc_info=True)
             update_track(
@@ -2434,24 +2475,30 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db
         )
 
     # decision == "absent" (confidently new) OR explicit human approval -> import.
-    try:
-        resp = client.post("/v1/tracks", json={"locations": [mac_path]})
-        if resp.status_code in (200, 201):
-            data = resp.json()
-            imported = data.get("data", {}).get("tracks", [])
-            if imported:
-                log.info("Lexicon IMPORT: %s - %s -> new track %s (confidently absent%s)",
-                         artist_raw, title_raw, imported[0]["id"],
-                         ", manual-approved" if force_import else "")
-                return str(imported[0]["id"])
-            else:
-                log.error("Lexicon import returned empty tracks for file: %s", mac_path)
-        else:
-            log.error("Lexicon import failed for file: %s - HTTP %d: %s",
-                      mac_path, resp.status_code, resp.text[:300])
-    except Exception as e:
-        log.error("Lexicon import failed for file: %s - %s", mac_path, e)
+    resp = client.post("/v1/tracks", json={"locations": [mac_path]})
+    if resp.status_code in (200, 201):
+        data = resp.json()
+        imported = data.get("data", {}).get("tracks", [])
+        # HARD FAILURE, not success: HTTP 200 with an empty tracks array means
+        # Lexicon imported NOTHING even though it reported success — the
+        # signature of a Lexicon host that has lost the NAS music mount. Treat
+        # it as a distinct, loud failure (LexiconImportEmpty) so the outage
+        # can't hide behind a "success" or a generic error. We also cannot
+        # verify the imported track id, so there is nothing to link.
+        if not imported or not imported[0].get("id"):
+            raise LexiconImportEmpty(
+                f"[{LEXICON_IMPORT_EMPTY_REASON}] Lexicon returned success but imported 0 tracks "
+                f"for '{artist_raw} - {title_raw}' at {mac_path} — the NAS music mount "
+                f"(/Volumes/music) is likely unreachable on the Lexicon host. New imports are "
+                f"silently failing."
+            )
+        log.info("Lexicon IMPORT: %s - %s -> new track %s (confidently absent%s)",
+                 artist_raw, title_raw, imported[0]["id"],
+                 ", manual-approved" if force_import else "")
+        return str(imported[0]["id"])
 
+    log.error("Lexicon import failed for file: %s - HTTP %d: %s",
+              mac_path, resp.status_code, resp.text[:300])
     return None
 
 
