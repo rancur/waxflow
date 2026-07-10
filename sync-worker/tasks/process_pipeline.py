@@ -30,6 +30,26 @@ from tasks.helpers import (
 
 log = logging.getLogger("worker.pipeline")
 
+
+class ImportNeedsReview(Exception):
+    """Raised when a track reaches the Lexicon-import step without a hard,
+    ISRC-confirmed match. The track must be routed to the import-review queue
+    (pipeline_stage='needs_import_review') for human approval instead of
+    silently creating a possibly-duplicate Lexicon track."""
+
+
+# Match sources that establish a HARD (reliable, ISRC-confirmed) track identity.
+# Only these may auto-create a new Lexicon track via POST /v1/tracks. A track
+# matched by fuzzy text search ("search", "file_index_title_artist",
+# "library_existing") or with no ISRC does NOT qualify and is routed to review.
+# "manual_import_approved" is set by an operator via the import-review approve
+# endpoint (explicit human approval).
+_HARD_IMPORT_MATCH_SOURCES = frozenset({
+    "isrc",               # Tidal exact ISRC match
+    "file_index_isrc",    # WaxFlow file_index exact ISRC match
+    "manual_import_approved",  # explicit human approval via review UI/API
+})
+
 # Lossless audio extensions — used to break the lossy retry loop (bug #25)
 _LOSSLESS_EXTENSIONS = {'.flac', '.aiff', '.aif', '.wav', '.alac'}
 
@@ -1677,12 +1697,37 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
 # ---------------------------------------------------------------------------
 
 def _process_organizing(db_path: str):
+    # Guard: scan mode is strictly read-only. The organizing stage is the only
+    # pipeline stage that writes to Lexicon (imports tracks, creates playlists,
+    # tags, fires control actions), so it MUST early-return in scan mode — the
+    # same way _process_matching and _process_downloading already do. Without
+    # this, "scan" was not actually write-free.
+    sync_mode = get_config(db_path, "sync_mode") or "scan"
+    if sync_mode == "scan":
+        return  # Scan mode: never write to Lexicon
+
     tracks = get_tracks_by_stage(db_path, "organizing", limit=BATCH_ORGANIZE)
     synced_count = 0
     for track in tracks:
         try:
             _organize_track(db_path, track)
             synced_count += 1
+        except ImportNeedsReview as e:
+            # Guard 3: the track reached the Lexicon-import step without a hard
+            # (ISRC-confirmed) match, so we refused to create a new Lexicon track.
+            # Route it to the import-review queue instead of erroring/importing.
+            update_track(
+                db_path, track["id"],
+                lexicon_status="skipped",
+                pipeline_stage="needs_import_review",
+                pipeline_error=str(e),
+            )
+            log_activity(
+                db_path, "import_review_required", track["id"],
+                f"Import blocked (no hard ISRC match): {e}",
+                {"match_source": track.get("match_source"), "isrc": track.get("isrc")},
+            )
+            log.warning("Track %d routed to import-review queue: %s", track["id"], e)
         except Exception as e:
             log.error("Organize error for track %d: %s", track["id"], e, exc_info=True)
             update_track(
@@ -2010,7 +2055,19 @@ def _ensure_playlist(db_path: str, year: int, month: int, folder_name: str, play
 # ---------------------------------------------------------------------------
 
 def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db_path: str | None = None) -> str | None:
-    """Find a track in Lexicon by artist+title, or import it via file path."""
+    """Find a track in Lexicon by artist+title, or import it via file path.
+
+    Duplicate-safety: a new Lexicon track (POST /v1/tracks) is only created when
+    the track has a HARD, ISRC-confirmed match_source. Fuzzy-only matches are
+    raised as ImportNeedsReview and routed to the import-review queue.
+    """
+    # Dup-safety short-circuit: if we already recorded the Lexicon track id for
+    # this track (e.g. matched as 'lexicon_existing' at the 'new' stage), reuse
+    # it rather than re-searching and risking a duplicate import.
+    known_id = str(track.get("lexicon_track_id") or "").strip()
+    if known_id and known_id.lower() not in ("none", "null"):
+        return known_id
+
     spotify_title = (track.get("title") or "").lower().strip()
     spotify_artist = (track.get("artist") or "").lower().split(",")[0].strip()
     artist_raw = track.get("artist", "")
@@ -2092,6 +2149,22 @@ def _lexicon_find_or_import(client: httpx.Client, mac_path: str, track: dict, db
                     return str(best_match["id"])
     except Exception as e:
         log.warning("Lexicon broad search failed for title '%s': %s", title_raw, e)
+
+    # Guard 3: gate the sole duplicate-creating line. Reaching here means the
+    # track was NOT found in Lexicon by path or fuzzy title+artist search. Because
+    # that fuzzy search can MISS an existing entry (special chars, remix suffixes,
+    # metadata drift), auto-importing on a fuzzy miss is exactly how duplicates are
+    # born. We only auto-create a new Lexicon track when the track's identity is
+    # HARD-confirmed by ISRC; anything matched only by fuzzy text (or lacking an
+    # ISRC) is routed to the import-review queue for explicit human approval.
+    match_source = (track.get("match_source") or "").strip()
+    if match_source not in _HARD_IMPORT_MATCH_SOURCES:
+        raise ImportNeedsReview(
+            f"refusing to auto-import '{artist_raw} - {title_raw}' "
+            f"(match_source={match_source or 'none'}, isrc={track.get('isrc') or 'none'}): "
+            f"not found in Lexicon by fuzzy search and no hard ISRC match — "
+            f"would create a possibly-duplicate track at {mac_path}"
+        )
 
     # Import the track file via POST /v1/tracks (with locations array)
     try:
