@@ -195,6 +195,70 @@ class TestOrganizeAlreadyInLexicon(unittest.TestCase):
             self._run_organize(track)
 
 
+class TestTidalTokenRefreshBypassesTiddlModel(unittest.TestCase):
+    """Regression: Tidal's token-refresh response no longer includes
+    user.facebookUid, which bundled tiddl marks as a required pydantic field, so
+    tiddl's own refresh raises ValidationError and never writes the new token.
+    _refresh_tidal_token must parse the response directly and succeed anyway."""
+
+    def test_refresh_parses_response_without_facebookuid(self):
+        payload = {
+            "access_token": "NEW_ACCESS_TOKEN",
+            "expires_in": 14400,
+            "refresh_token": "SAME_REFRESH",
+            "user": {  # note: NO facebookUid — the field Tidal dropped
+                "userId": 173461359, "countryCode": "US",
+                "email": "someone@example.com", "acceptedEULA": True,
+            },
+        }
+
+        class _R:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return payload
+
+        class _C:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **k):
+                return _R()
+
+        with mock.patch.object(pp.httpx, "Client", return_value=_C()):
+            out = pp._refresh_tidal_token("SAME_REFRESH")
+        self.assertIsNotNone(out)
+        self.assertEqual(out["access_token"], "NEW_ACCESS_TOKEN")
+        self.assertEqual(out["expires_in"], 14400)
+        self.assertEqual(out["user_id"], "173461359")
+        self.assertEqual(out["country_code"], "US")
+
+    def test_refresh_returns_none_on_http_error(self):
+        class _R:
+            status_code = 401
+            text = "unauthorized"
+
+            def json(self):
+                return {}
+
+        class _C:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **k):
+                return _R()
+
+        with mock.patch.object(pp.httpx, "Client", return_value=_C()):
+            self.assertIsNone(pp._refresh_tidal_token("bad"))
+
+
 class TestGuard1ScanReadOnly(unittest.TestCase):
     """Guard 1: _process_organizing is a no-op in scan mode."""
 
