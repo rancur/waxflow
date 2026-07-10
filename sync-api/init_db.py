@@ -334,7 +334,16 @@ def init():
         ).fetchone()
         if tbl_row and "needs_import_review" not in (tbl_row[0] or ""):
             print("Migrating tracks table to add 'needs_import_review' pipeline stage...")
+            # Other tables (e.g. download_queue) hold FK references to tracks(id).
+            # get_db() opens the connection with PRAGMA foreign_keys=ON, so the
+            # DROP/RENAME table-rebuild would trip "FOREIGN KEY constraint failed".
+            # Disable FK enforcement for the rebuild (SQLite's supported table-
+            # alter procedure) and re-enable it afterward. PRAGMA foreign_keys is a
+            # no-op inside a transaction, so commit any pending work first.
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
             conn.executescript("""
+                DROP TABLE IF EXISTS tracks_new;
                 CREATE TABLE IF NOT EXISTS tracks_new (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     spotify_id TEXT UNIQUE NOT NULL,
@@ -385,6 +394,13 @@ def init():
 
                 ALTER TABLE tracks_new RENAME TO tracks;
             """)
+            conn.commit()
+            # Re-check integrity of the FK references we temporarily bypassed,
+            # then re-enable enforcement.
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_violations:
+                print(f"WARNING: {len(fk_violations)} FK issue(s) after tracks rebuild: {fk_violations[:5]}")
+            conn.execute("PRAGMA foreign_keys=ON")
             print("Migration complete.")
 
     print("Database initialized successfully.")
