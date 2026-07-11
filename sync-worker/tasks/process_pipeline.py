@@ -54,6 +54,33 @@ class LexiconImportEmpty(Exception):
     impossible to miss."""
 
 
+# Default grace window (seconds) for tolerating an empty Lexicon import as a
+# TRANSIENT condition before escalating it to the loud mount-down error. A newly
+# downloaded file lands on the NAS first and only reaches the Lexicon host Mac
+# after Synology Drive replicates /volume1/music -> /Users/willcurran/Music, which
+# takes seconds-to-minutes. During that window a POST /v1/tracks for the Mac-side
+# path legitimately imports 0 tracks because the file is not on the Mac YET. We
+# therefore keep retrying in 'organizing' (self-healing) until the file syncs, and
+# only declare a real outage (mount unreachable) once the file has been empty for
+# longer than this window. Tunable live via app_config key
+# 'lexicon_empty_import_grace_seconds' (no redeploy needed).
+_DEFAULT_EMPTY_IMPORT_GRACE_SECONDS = 1800  # 30 minutes
+
+# Marker embedded in pipeline_error to persist WHEN a track first hit an empty
+# import, so the grace window survives worker restarts (the counter lives in the
+# DB, not memory). Format: "[empty_since:<unix_ts>] <human message>".
+_EMPTY_SINCE_RE = re.compile(r"\[empty_since:(\d+)\]")
+
+
+def _parse_empty_since(err: str | None) -> float | None:
+    """Extract the unix timestamp of the first empty import from a pipeline_error
+    string, or None if no marker is present."""
+    if not err:
+        return None
+    m = _EMPTY_SINCE_RE.search(err)
+    return float(m.group(1)) if m else None
+
+
 # Match sources that FORCE a new-track import, bypassing the existence-check
 # review gate. Only explicit human approval qualifies: an operator approved the
 # track via the import-review endpoint, which sets match_source to this value.
@@ -1921,16 +1948,57 @@ def _process_organizing(db_path: str):
             )
             log.warning("Track %d routed to import-review queue: %s", track["id"], e)
         except LexiconImportEmpty as e:
-            # Silent-failure signature: Lexicon reported success but imported 0
-            # tracks (NAS music mount unreachable on the Lexicon host). Set a
-            # DISTINCT, clearly-messaged error state and LOUDLY surface it via
-            # the shared import-health recorder (activity log + webhook page +
+            # An empty import (HTTP 200, 0 tracks) has TWO possible causes:
+            #   (a) TRANSIENT — the freshly-downloaded file has landed on the NAS
+            #       but Synology Drive has not yet replicated it to the Lexicon
+            #       host Mac, so the Mac-side path Lexicon was asked to import does
+            #       not exist YET. This self-heals the moment the file syncs.
+            #   (b) OUTAGE — the music volume is genuinely unreachable on the Mac
+            #       and imports are silently failing indefinitely.
+            # We distinguish them with a grace window: keep retrying in
+            # 'organizing' (a) for up to lexicon_empty_import_grace_seconds, and
+            # only escalate to the LOUD mount-down error (b) once the file has been
+            # empty for longer than that. The first-seen timestamp is persisted in
+            # pipeline_error so the window survives worker restarts.
+            now = time.time()
+            first_seen = _parse_empty_since(track.get("pipeline_error"))
+            if first_seen is None:
+                first_seen = now
+            grace = _DEFAULT_EMPTY_IMPORT_GRACE_SECONDS
+            try:
+                grace = int(get_config(db_path, "lexicon_empty_import_grace_seconds") or grace)
+            except (TypeError, ValueError):
+                pass
+            elapsed = int(now - first_seen)
+            if elapsed < grace:
+                # TRANSIENT: keep the track in 'organizing' so the next pipeline
+                # cycle re-attempts the import automatically once the file has
+                # synced to the Mac. NOT an error, NOT the loud token — a stuck
+                # import is never silent (the message + timer are visible) but a
+                # normal sync lag does not page anyone.
+                update_track(
+                    db_path, track["id"],
+                    lexicon_status="pending",
+                    pipeline_stage="organizing",
+                    pipeline_error=(
+                        f"[empty_since:{int(first_seen)}] Lexicon import empty — awaiting "
+                        f"Synology Drive sync of file to the Mac ({elapsed}s/{grace}s); auto-retrying"
+                    ),
+                )
+                log.info(
+                    "Track %d: empty import, awaiting Mac file sync (%ds/%ds) — will retry",
+                    track["id"], elapsed, grace,
+                )
+                continue
+            # Grace exhausted -> treat as a genuine OUTAGE. Set a DISTINCT,
+            # clearly-messaged error state and LOUDLY surface it via the shared
+            # import-health recorder (activity log + webhook page +
             # /api/admin/health field) so this can't hide as a generic error.
             update_track(
                 db_path, track["id"],
                 lexicon_status="error",
                 pipeline_stage="error",
-                pipeline_error=str(e),
+                pipeline_error=f"{str(e)} (empty for {elapsed}s > grace {grace}s — file never synced to Mac / mount down)",
             )
             log_activity(
                 db_path, "lexicon_import_empty", track["id"],
@@ -2100,6 +2168,9 @@ def _organize_track(db_path: str, track: dict):
         lexicon_track_id=lexicon_track_id,
         lexicon_playlist_id=lexicon_playlist_id,
         pipeline_stage="complete",
+        # Clear any transient '[empty_since:...]' sync-lag marker now that the
+        # import has succeeded, so a recovered track shows a clean error field.
+        pipeline_error=None,
     )
 
     # "Recently Added (Sync)" playlist feature removed per user request

@@ -525,5 +525,29 @@ class TestWaitingRevival(unittest.TestCase):
         self.assertEqual(revive_stmts, [], "scan mode must NOT revive waiting tracks")
 
 
+class EmptyImportSyncLagMarkerTests(unittest.TestCase):
+    """The direct-import fix POSTs the Mac-local path, which imports 0 tracks while
+    the freshly-downloaded file is still replicating NAS -> Mac via Synology Drive.
+    That transient empty import must be tolerated (retried) for a grace window
+    before it is escalated to the loud mount-down error. The first-seen timestamp
+    is persisted in pipeline_error via a parseable '[empty_since:<ts>]' marker so
+    the window survives worker restarts."""
+
+    def test_parse_empty_since_roundtrip(self):
+        ts = 1783805169
+        err = f"[empty_since:{ts}] Lexicon import empty — awaiting Synology Drive sync"
+        self.assertEqual(pp._parse_empty_since(err), float(ts))
+
+    def test_parse_empty_since_absent(self):
+        self.assertIsNone(pp._parse_empty_since(None))
+        self.assertIsNone(pp._parse_empty_since(""))
+        self.assertIsNone(pp._parse_empty_since("some unrelated error"))
+
+    def test_default_grace_window_is_generous(self):
+        # Must comfortably exceed real Synology Drive NAS->Mac sync lag so a normal
+        # sync delay never false-alarms as a mount outage.
+        self.assertGreaterEqual(pp._DEFAULT_EMPTY_IMPORT_GRACE_SECONDS, 600)
+
+
 if __name__ == "__main__":
     unittest.main()
