@@ -17,6 +17,7 @@ Run inside the worker image (deps: httpx): python -m pytest sync-worker/tests
 
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -87,18 +88,20 @@ class TestEmptyImportDetection(unittest.TestCase):
 
 
 class TestOrganizeRoutesEmptyImport(unittest.TestCase):
-    """_process_organizing must catch LexiconImportEmpty distinctly: error state
-    with the reason token, a loud activity event, and a call into the shared
-    import-health recorder — NOT the generic organize_error path."""
+    """_process_organizing treats an empty import in TWO phases:
+      1. TRANSIENT (within the grace window) — the freshly-downloaded file has not
+         yet synced from the NAS to the Lexicon host Mac. Keep retrying in
+         'organizing' (status 'pending'); do NOT fire the loud error path.
+      2. OUTAGE (grace exhausted) — escalate to the distinct error state with the
+         reason token, a loud activity event, and a call into the shared
+         import-health recorder."""
 
-    def test_empty_import_sets_distinct_error_and_records_health(self):
-        track = {"id": 7, "artist": "A", "title": "T", "file_path": "/Volumes/music/a.flac"}
+    def _run(self, track):
         captured = {}
+        events = []
 
         def fake_update(db_path, tid, **kw):
             captured.update(kw)
-
-        events = []
 
         def fake_log_activity(db_path, ev, tid, msg, details=None):
             events.append(ev)
@@ -112,7 +115,26 @@ class TestOrganizeRoutesEmptyImport(unittest.TestCase):
              mock.patch("tasks.lexicon_health.note_empty_import") as note, \
              mock.patch.object(pp, "_trigger_lexicon_post_processing_batch"):
             pp._process_organizing("/tmp/x.db")
+        return captured, events, note
 
+    def test_first_empty_import_is_transient_retry_not_loud_error(self):
+        # No prior marker -> first sight of an empty import -> treat as sync lag.
+        track = {"id": 7, "artist": "A", "title": "T", "file_path": "/x.flac"}
+        captured, events, note = self._run(track)
+        self.assertEqual(captured.get("lexicon_status"), "pending")
+        self.assertEqual(captured.get("pipeline_stage"), "organizing")
+        # Persists the first-seen marker so the window survives restarts.
+        self.assertIsNotNone(pp._parse_empty_since(captured.get("pipeline_error", "")))
+        # NOT the loud path: no health note, no loud activity event yet.
+        self.assertNotIn("lexicon_import_empty", events)
+        note.assert_not_called()
+
+    def test_empty_past_grace_sets_distinct_error_and_records_health(self):
+        # An old marker (well beyond the default grace) -> genuine outage.
+        old = int(time.time()) - (pp._DEFAULT_EMPTY_IMPORT_GRACE_SECONDS + 2000)
+        track = {"id": 7, "artist": "A", "title": "T", "file_path": "/x.flac",
+                 "pipeline_error": f"[empty_since:{old}] awaiting sync"}
+        captured, events, note = self._run(track)
         self.assertEqual(captured.get("lexicon_status"), "error")
         self.assertEqual(captured.get("pipeline_stage"), "error")
         self.assertIn(pp.LEXICON_IMPORT_EMPTY_REASON, captured.get("pipeline_error", ""))
