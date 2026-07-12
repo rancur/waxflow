@@ -212,7 +212,15 @@ def _build_queries(artist: str, title: str) -> list[str]:
 
 
 def _move_into_library(db_path: str, src_path: str, artist: str, title: str) -> str:
-    """Place a verified file into the library, mirroring the tiddl download path."""
+    """Place a verified file into the music library, mirroring the tiddl download path.
+
+    IMPORTANT (Synology ACL, see _download_track_via_tiddl): /volume1/music carries an
+    inheritable Synology ACL that lets Synology Drive deliver a file to the Lexicon
+    Mac's ~/Music replica. A file created FRESH in the share inherits it, but ANY mode
+    change — os.chmod, or shutil.move/copy2's copystat — strips it to plain POSIX mode
+    and strands the file. So we copy DATA ONLY (shutil.copyfile) + unlink the source,
+    set owner with chown (which preserves the ACL), and deliberately NEVER chmod.
+    """
     safe_artist = sanitize_filename(artist.split(",")[0].strip()) or "Unknown Artist"
     safe_title = sanitize_filename(title) or "Unknown Title"
     dest_dir = os.path.join(MUSIC_LIBRARY_PATH, safe_artist)
@@ -222,14 +230,16 @@ def _move_into_library(db_path: str, src_path: str, artist: str, title: str) -> 
     if os.path.exists(dest):
         base, extension = os.path.splitext(dest)
         dest = f"{base}_slsk{extension}"
-    shutil.move(src_path, dest)
+    shutil.copyfile(src_path, dest)  # data only — dest inherits the share ACL
+    try:
+        os.remove(src_path)
+    except OSError:
+        pass
     uid = int(get_config(db_path, "plex_uid") or "1000")
     gid = int(get_config(db_path, "plex_gid") or "1000")
     try:
         os.chown(dest_dir, uid, gid)
-        os.chown(dest, uid, gid)
-        os.chmod(dest, 0o664)
-        os.chmod(dest_dir, 0o775)
+        os.chown(dest, uid, gid)  # chown preserves the ACL; never chmod (would strip it)
     except OSError as e:
         log.warning("could not chown %s: %s", dest, e)
     return dest
