@@ -1,0 +1,7 @@
+node_modules
+.next
+@eaDir
+**/@eaDir
+.git
+Dockerfile
+.dockerignore
