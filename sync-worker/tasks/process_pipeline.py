@@ -28,10 +28,10 @@ from tasks.helpers import (
     update_track,
 )
 from tasks.soulseek_fallback import (
-    STAGE as SOULSEEK_STAGE,
     already_attempted as _soulseek_already_attempted,
     is_enabled as _soulseek_enabled,
     process_soulseek_fallback,
+    queue_for_fallback as _soulseek_queue,
 )
 
 log = logging.getLogger("worker.pipeline")
@@ -217,20 +217,23 @@ def touch_worker_heartbeat(db_path: str):
 def _route_lossless_gap(db_path: str, track_id: int, error_msg: str) -> bool:
     """Route a track that Tidal couldn't provide as true-lossless.
 
-    If the Soulseek fallback is enabled and this track hasn't already been tried
-    on Soulseek, move it to SOULSEEK_STAGE (the fallback stage sources + verifies a
-    real lossless FLAC). Otherwise fall back to the terminal 'error' state.
-    Returns True if it routed to the Soulseek fallback.
+    If the Soulseek fallback is enabled and this track hasn't already been tried on
+    Soulseek, queue it for the fallback: the track is parked at the allowed 'error'
+    pipeline_stage AND given a queued row in fallback_attempts (the fallback stage
+    scans for those). We deliberately do NOT invent a new pipeline_stage value —
+    tracks.pipeline_stage is CHECK-constrained. Returns True if it queued.
     """
     try:
         if _soulseek_enabled(db_path) and not _soulseek_already_attempted(db_path, track_id):
-            update_track(db_path, track_id, pipeline_stage=SOULSEEK_STAGE, pipeline_error=error_msg)
+            _soulseek_queue(db_path, track_id, error_msg)
+            update_track(db_path, track_id, pipeline_stage="error",
+                         pipeline_error=f"{error_msg} [queued for Soulseek lossless fallback]")
             log_activity(db_path, "soulseek_queued", track_id,
-                         f"Routed to Soulseek lossless fallback: {error_msg}")
-            log.info("Track %d routed to Soulseek fallback (%s)", track_id, error_msg)
+                         f"Queued for Soulseek lossless fallback: {error_msg}")
+            log.info("Track %d queued for Soulseek fallback (%s)", track_id, error_msg)
             return True
     except Exception as e:  # noqa: BLE001 — never let routing break the pipeline
-        log.warning("Track %d: Soulseek routing check failed (%s); using error state", track_id, e)
+        log.warning("Track %d: Soulseek routing/queue failed (%s); using error state", track_id, e)
     return False
 
 
@@ -251,8 +254,8 @@ async def process_pipeline(db_path: str):
     touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_verifying, db_path)
     touch_worker_heartbeat(db_path)
-    # Soulseek fallback: tracks Tidal couldn't provide as true-lossless are routed
-    # to SOULSEEK_STAGE by the match/verify stages; source + verify them here.
+    # Soulseek fallback: tracks Tidal couldn't provide as true-lossless are queued
+    # by the match/verify stages (a fallback_attempts row); source + verify them here.
     await asyncio.to_thread(process_soulseek_fallback, db_path)
     touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_organizing, db_path)
