@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 
@@ -52,7 +53,7 @@ log = logging.getLogger("worker.soulseek_fallback")
 # (that column is CHECK-constrained); the queue lives in fallback_attempts instead.
 STAGE = "soulseek_fallback"
 BATCH = 3                      # tracks per cycle (each may do several peer downloads)
-MAX_CANDIDATES = 6            # peers to try before giving up on a track
+MAX_CANDIDATES = 10          # peers/candidates to try before giving up on a track
 PER_PEER_TIMEOUT_S = 120.0
 
 
@@ -220,8 +221,32 @@ def _expected_size_range(duration_ms: int | None):
     return (max(3_000_000, lo), max(hi, 30_000_000))
 
 
-def rank_candidates(responses: list[dict], duration_ms: int | None) -> list[dict]:
-    """Flatten peer responses to ranked .flac candidates (best download prospect first)."""
+_STOPWORDS = {"the", "a", "an", "of", "and", "&", "feat", "ft", "vs", "remix", "mix",
+              "edit", "vip", "original", "extended", "radio"}
+
+
+def _tokens(*parts: str) -> set[str]:
+    out = set()
+    for p in parts:
+        for w in re.split(r"[^0-9a-z]+", (p or "").lower()):
+            if len(w) >= 3 and w not in _STOPWORDS:
+                out.add(w)
+    return out
+
+
+def rank_candidates(responses: list[dict], duration_ms: int | None,
+                    artist: str = "", title: str = "") -> list[dict]:
+    """Flatten peer responses to ranked .flac candidates (best prospect first).
+
+    RELEVANCE FIRST: on generic titles (e.g. "The Wave") a search returns thousands
+    of unrelated files; ranking purely by peer speed surfaces the wrong track. So we
+    score each candidate by how many artist/title tokens appear in its filename and
+    rank by relevance BEFORE availability (free slot / queue / speed). The duration
+    gate in verify_lossless then rejects any wrong-length version that slips through.
+    """
+    want_artist = _tokens(artist)
+    want_title = _tokens(title)
+    want = want_artist | want_title
     lo, hi = _expected_size_range(duration_ms)
     cands = []
     for r in responses:
@@ -232,6 +257,9 @@ def rank_candidates(responses: list[dict], duration_ms: int | None) -> list[dict
             size = int(f.get("size") or 0)
             if not (lo <= size <= hi):
                 continue
+            fn_tokens = _tokens(fn.replace("\\", "/").split("/")[-1])
+            a = len(want_artist & fn_tokens)
+            t = len(want_title & fn_tokens)
             cands.append({
                 "username": r["username"],
                 "filename": fn,
@@ -239,9 +267,18 @@ def rank_candidates(responses: list[dict], duration_ms: int | None) -> list[dict
                 "free": bool(r.get("hasFreeUploadSlot")),
                 "queue": int(r.get("queueLength") or 9999),
                 "speed": int(r.get("uploadSpeed") or 0),
+                "relevance": a * 2 + t,   # weight artist match higher than title
+                "artist_match": a > 0,
             })
-    # free slot first, then shortest queue, then fastest
-    cands.sort(key=lambda c: (not c["free"], c["queue"], -c["speed"]))
+    # Correctness first: if the ARTIST appears in any candidate filename, keep only
+    # those (drops wrong-artist tracks that merely share a common title word — e.g.
+    # "Paper Labyrinth" vs "Mob Tactics - Labyrinth"). Otherwise fall back to any
+    # title-token match, else keep all. Then rank by relevance / availability.
+    if want_artist and any(c["artist_match"] for c in cands):
+        cands = [c for c in cands if c["artist_match"]]
+    elif want and any(c["relevance"] > 0 for c in cands):
+        cands = [c for c in cands if c["relevance"] > 0]
+    cands.sort(key=lambda c: (-c["relevance"], not c["free"], c["queue"], -c["speed"]))
     return cands
 
 
@@ -310,9 +347,9 @@ def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
     for q in _build_queries(artist, title):
         query_used = q
         responses = client.search(q)
-        if rank_candidates(responses, duration_ms):
+        if rank_candidates(responses, duration_ms, artist, title):
             break
-    cands = rank_candidates(responses, duration_ms)
+    cands = rank_candidates(responses, duration_ms, artist, title)
 
     if not cands:
         _finalize(db_path, fa_id, "no_candidates", 0)
