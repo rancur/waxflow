@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — Phase 0: REAL Lexicon library-DB backup (the safety net)
+
+Closes the scariest gap in the whole system: Will's entire DJ library — tracks,
+playlists, cue points, tags, links — lives in ONE SQLite DB on his Mac
+(`~/Library/Application Support/lexicon/main.db`, WAL, ~150 MB) and had **never been
+backed up**. The old `backup_lexicon.py` only pinged the Lexicon API and *falsely*
+logged "backup verified"; Time Machine skips `~/Music/Database`; Wasabi HyperBackup
+covers music FILES but not this DB. This lands a real, verified, two-location backup
+that gates all later delicate work.
+
+### Added — `scripts/backup-lexicon-db.sh` (the real backup)
+- Runs on the ops Mac (the only host that can SSH both the Lexicon Mac and the NAS).
+  NON-DESTRUCTIVE: only reads the DB, only writes new files; never quits Lexicon or
+  restarts anything.
+- Consistent **SQLite online backup** (`sqlite3 "file:$DB?mode=ro" ".backup"`) — no
+  lock, no app-quit, captures live WAL-committed state. Verifies
+  `PRAGMA integrity_check == ok` **and** `Track > 0`, then gzips.
+- Two rotated copies (`KEEP=14`): **Mac** `~/WaxFlow-Backups/lexicon-db/` and **NAS**
+  `/volume1/homes/willcurran/WaxFlow-Backups/lexicon-db/`; NAS copy verified by
+  `gunzip -t` + sha256 match.
+- Low-perf: `nice -n 19` throughout; **defers the NAS push while a HyperBackup runs**
+  (Mac copy still taken, next run retries). Streams over `ssh cat` (Synology scp/sftp
+  subsystem is disabled). Fail-loud heartbeat JSON + log under `~/.waxflow/logs/`.
+- Scheduled daily via LaunchAgent `com.openclaw.waxflow-lexicon-backup` (plist template
+  added); also run manually before any delicate op.
+
+### Changed — `tasks/backup_lexicon.py` is now honest
+- No longer INSERTs a phantom "backup verified" row from an API ping. Records a
+  truthful `lexicon_api_probe` liveness event only and points at the external real
+  backup. `scripts/backup-lexicon.sh` annotated as a container-side no-op fast-path.
+
+### Verified
+- Initial backup taken 2026-07-12: `integrity_check = ok`; Track≈5714, Playlist 310,
+  Cuepoint 28777, LinkTrackPlaylist 47345; two sha-matched copies (Mac + NAS).
+
 ## Unreleased — v3 Feature 4: Plex/Plexamp mirror (additive, inert)
 
 Mirrors what WaxFlow syncs into Lexicon over to the Plex server that runs **on the NAS**

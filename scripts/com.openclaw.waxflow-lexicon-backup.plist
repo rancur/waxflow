@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily REAL Lexicon DB backup (scripts/backup-lexicon-db.sh).
+  Runs on the ops Mac (openclaw). Install:
+    cp scripts/com.openclaw.waxflow-lexicon-backup.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.waxflow-lexicon-backup.plist
+  Also run manually before any delicate WaxFlow library operation:
+    scripts/backup-lexicon-db.sh
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/openclaw</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.openclaw.waxflow-lexicon-backup</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/openclaw/spotify-lexicon-sync/scripts/backup-lexicon-db.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>13</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/Users/openclaw/.openclaw/logs/waxflow-lexicon-backup.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/openclaw/.openclaw/logs/waxflow-lexicon-backup.log</string>
+</dict>
+</plist>
