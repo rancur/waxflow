@@ -109,6 +109,54 @@ def queue_for_fallback(db_path: str, track_id: int, reason: str) -> None:
         )
 
 
+def reject_nonlossless_for_import(db_path: str, track: dict) -> bool:
+    """Import-gate guard: REFUSE to import any file that is not genuinely lossless.
+
+    This is a hard, path-independent guarantee protecting Will's lossless standard.
+    The organizing stage is the single chokepoint that writes files into Lexicon, but
+    tracks can reach it WITHOUT a passing lossless verify (observed live: verify-failed
+    lossy AAC tracks were re-imported to 'complete' during concurrent recovery, and the
+    self-heal 're-queue complete-but-unlinked' path resets tracks straight to
+    'organizing'). This guard re-checks the actual file at the import gate and, if it
+    is not a genuinely-lossless container, refuses the import and routes the track to
+    the Soulseek fallback instead (queued for a verified-lossless FLAC).
+
+    Returns True if the track was REJECTED (caller must skip importing it), else False.
+    """
+    file_path = track.get("file_path")
+    # Nothing on disk to mis-import (pure Lexicon link, or mount momentarily down):
+    # let the normal organizing path handle it — do not block.
+    if not file_path or not os.path.exists(file_path):
+        return False
+    # Trust a prior genuine-lossless verdict (fast path for the common case).
+    if track.get("verify_is_genuine_lossless") == 1:
+        return False
+    # Definitive check: probe the actual file. A lossless container passes.
+    try:
+        from tasks.lossless_verify import ffprobe_audio, LOSSLESS_CODECS
+        probe = ffprobe_audio(file_path)
+        if probe["codec"] in LOSSLESS_CODECS and probe["sample_rate"] >= 44100:
+            return False  # genuinely lossless — allow import
+    except Exception as e:  # noqa: BLE001 — never block an import on a probe error
+        log.warning("import-guard probe failed for %s: %s — allowing", file_path, e)
+        return False
+    # Non-lossless file about to be imported — refuse and route to Soulseek.
+    track_id = track["id"]
+    codec = (probe or {}).get("codec", "unknown")
+    reason = f"refused non-lossless import (codec={codec}) of {os.path.basename(file_path)}"
+    if is_enabled(db_path) and not already_attempted(db_path, track_id):
+        queue_for_fallback(db_path, track_id, reason)
+    update_track(
+        db_path, track_id,
+        pipeline_stage="error", verify_status="fail", verify_is_genuine_lossless=0,
+        pipeline_error=f"{reason} [queued for Soulseek lossless fallback]",
+    )
+    log_activity(db_path, "import_rejected_nonlossless", track_id, reason,
+                 {"file_path": file_path, "codec": codec})
+    log.warning("Track %d: REFUSED non-lossless import (%s) -> routed to Soulseek", track_id, file_path)
+    return True
+
+
 def _finalize(db_path: str, fa_id: int, status: str, result_count: int = 0,
               error: str | None = None):
     with get_db(db_path) as conn:

@@ -32,6 +32,7 @@ from tasks.soulseek_fallback import (
     is_enabled as _soulseek_enabled,
     process_soulseek_fallback,
     queue_for_fallback as _soulseek_queue,
+    reject_nonlossless_for_import as _reject_nonlossless_for_import,
 )
 
 log = logging.getLogger("worker.pipeline")
@@ -1991,6 +1992,12 @@ def _process_organizing(db_path: str):
     tracks = get_tracks_by_stage(db_path, "organizing", limit=BATCH_ORGANIZE)
     synced_count = 0
     for track in tracks:
+        # Lossless import gate (hard, path-independent): never import a file that is
+        # not genuinely lossless, regardless of how the track reached 'organizing'
+        # (self-heal re-queue, re-import, backfill, ...). Refuse + route to the
+        # Soulseek fallback. Protects Will's lossless standard at the single chokepoint.
+        if _reject_nonlossless_for_import(db_path, track):
+            continue
         try:
             _organize_track(db_path, track)
             synced_count += 1
