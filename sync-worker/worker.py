@@ -238,7 +238,11 @@ async def main():
         # a tiny batch, so it stays gentle on the NAS. Never removes a lossy without a
         # verified-lossless replacement.
         asyncio.create_task(
-            run_task("lossless_upgrade", run_lossless_upgrade,
+            # run_lossless_upgrade is a SYNC function (returns None); run_task awaits its
+            # result, so call it via asyncio.to_thread — this both makes it awaitable
+            # (fixes "NoneType can't be used in 'await'") and keeps its blocking network
+            # I/O off the event loop.
+            run_task("lossless_upgrade", lambda db: asyncio.to_thread(run_lossless_upgrade, db),
                      interval_key="lossless_upgrade_loop_interval_seconds", default_interval=21600)
         ),
     ]

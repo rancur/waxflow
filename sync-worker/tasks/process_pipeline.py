@@ -1860,19 +1860,31 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
     sample_rate = int(audio_stream.get("sample_rate", 0))
     bit_depth = int(audio_stream.get("bits_per_raw_sample") or audio_stream.get("bits_per_sample") or 0)
 
-    # Chromaprint
+    # Trusted match sources: the file IS the correct recording (matched by ISRC or
+    # found in the existing library), so the recording identity is already confirmed.
+    # The acoustic fingerprint (fpcalc) is ONLY used to score identity via duration and
+    # is discarded for trusted matches (score forced to 1.0 below) — yet fpcalc reads the
+    # ENTIRE file, which over the SMB mount is the dominant cost when verifying Will's
+    # large existing lossless library (the bulk of the liked-songs backfill). Skip it for
+    # trusted matches. ffprobe (above) still runs for EVERY track, so the hard lossless
+    # codec/sample-rate gate is unchanged.
+    match_source = track.get("match_source") or ""
+    trusted_match = match_source in ("file_index_isrc", "isrc", "lexicon_existing", "library_existing")
+
+    # Chromaprint (untrusted matches only — needed to score recording identity).
     chromaprint = None
     fp_duration = None
-    try:
-        fpcalc_result = subprocess.run(
-            ["fpcalc", "-json", file_path], capture_output=True, text=True, timeout=60,
-        )
-        if fpcalc_result.returncode == 0:
-            fp_data = json.loads(fpcalc_result.stdout)
-            chromaprint = fp_data.get("fingerprint")
-            fp_duration = fp_data.get("duration")
-    except Exception as e:
-        log.warning("fpcalc failed for track %d: %s", track_id, e)
+    if not trusted_match:
+        try:
+            fpcalc_result = subprocess.run(
+                ["fpcalc", "-json", file_path], capture_output=True, text=True, timeout=60,
+            )
+            if fpcalc_result.returncode == 0:
+                fp_data = json.loads(fpcalc_result.stdout)
+                chromaprint = fp_data.get("fingerprint")
+                fp_duration = fp_data.get("duration")
+        except Exception as e:
+            log.warning("fpcalc failed for track %d: %s", track_id, e)
 
     lossless_codecs = ("flac", "alac", "wav", "aiff", "pcm_s16be", "pcm_s24be", "pcm_s32be",
                        "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le",
@@ -1883,11 +1895,6 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
     fp_match_score = None
     duration_diff = None
     spotify_duration_ms = track.get("duration_ms") or 0
-
-    # Trusted match sources: the file IS the correct recording (matched by ISRC or
-    # found in existing library).  Skip strict duration-based fingerprint scoring.
-    match_source = track.get("match_source") or ""
-    trusted_match = match_source in ("file_index_isrc", "isrc", "lexicon_existing", "library_existing")
 
     if trusted_match:
         # For trusted matches the recording identity is already confirmed.
