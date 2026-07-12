@@ -240,16 +240,32 @@ print(0)
 remote_exec "$DOCKER_CMD exec waxflow-api python3 -c \"
 import sqlite3
 conn = sqlite3.connect('/app/data/sync.db')
-count = conn.execute('''SELECT COUNT(*) FROM tracks
-    WHERE pipeline_stage='complete' AND lexicon_track_id IS NULL AND file_path IS NOT NULL''').fetchone()[0]
+# LOSSLESS GUARD: only re-import complete-but-unlinked tracks whose file is genuinely
+# lossless. Re-queuing a verify-FAILED lossy track to 'organizing' would re-import
+# lossy audio into Will's library (observed 2026-07-11: Labyrinth / Shai Hulud VIP).
+LOSSLESS = '''(verify_is_genuine_lossless = 1 OR lower(file_path) LIKE '%.flac' OR lower(file_path) LIKE '%.wav' OR lower(file_path) LIKE '%.aiff' OR lower(file_path) LIKE '%.aif' OR lower(file_path) LIKE '%.alac')'''
+base = '''pipeline_stage='complete' AND lexicon_track_id IS NULL AND file_path IS NOT NULL'''
+count = conn.execute('SELECT COUNT(*) FROM tracks WHERE ' + base + ' AND ' + LOSSLESS).fetchone()[0]
 if count > 5:
-    r = conn.execute('''UPDATE tracks SET pipeline_stage='organizing', lexicon_status='pending',
-        lexicon_track_id=NULL, updated_at=datetime('now')
-        WHERE pipeline_stage='complete' AND lexicon_track_id IS NULL AND file_path IS NOT NULL''')
+    r = conn.execute('''UPDATE tracks SET pipeline_stage='organizing', lexicon_status='pending', lexicon_track_id=NULL, updated_at=datetime('now') WHERE ''' + base + ' AND ' + LOSSLESS)
     conn.commit()
-    print(f'FIXED: Reset {r.rowcount} unlinked tracks to organizing')
+    print('FIXED: Reset ' + str(r.rowcount) + ' unlinked LOSSLESS tracks to organizing')
 else:
-    print(f'OK: {count} unlinked tracks (within tolerance)')
+    print('OK: ' + str(count) + ' unlinked lossless tracks (within tolerance)')
+# Any complete-but-unlinked NON-lossless track is a lossless-standard violation: park
+# it at error and queue it for the Soulseek lossless fallback (never re-import lossy).
+bad = conn.execute('SELECT id FROM tracks WHERE ' + base + ' AND NOT ' + LOSSLESS).fetchall()
+routed = 0
+for row in bad:
+    tid = row[0]
+    already = conn.execute('''SELECT 1 FROM fallback_attempts WHERE track_id=? AND source='soulseek' LIMIT 1''', (tid,)).fetchone()
+    if not already:
+        conn.execute('''INSERT INTO fallback_attempts (track_id, source, status, search_query) VALUES (?, 'soulseek', 'queued', 'self-heal: complete-but-unlinked non-lossless')''', (tid,))
+    conn.execute('''UPDATE tracks SET pipeline_stage='error', lexicon_status='pending', pipeline_error='self-heal: refused non-lossless re-import [queued for Soulseek]', updated_at=datetime('now') WHERE id=?''', (tid,))
+    routed += 1
+if routed:
+    conn.commit()
+    print('GUARD: routed ' + str(routed) + ' non-lossless unlinked track(s) to Soulseek fallback')
 conn.close()
 \"" >> "$LOG_FILE" 2>&1 || true
 

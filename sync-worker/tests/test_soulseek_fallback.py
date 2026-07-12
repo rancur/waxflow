@@ -1,7 +1,9 @@
 """Tests for the Soulseek fallback decision logic (no network required)."""
 
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -196,6 +198,99 @@ class TestConstraintSafeQueue(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute("UPDATE tracks SET pipeline_stage='soulseek_fallback' WHERE id=7")
         conn.close()
+
+
+def _have_ffmpeg():
+    return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+@unittest.skipUnless(_have_ffmpeg(), "ffmpeg/ffprobe required")
+class TestImportGuard(unittest.TestCase):
+    """The import-gate guard must REFUSE non-lossless files and route them to
+    Soulseek — the hard protection for Will's lossless standard."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="guard_")
+        cls.flac = os.path.join(cls.tmp, "good.flac")
+        cls.m4a = os.path.join(cls.tmp, "lossy.m4a")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                        "-i", "anoisesrc=d=3:c=pink:r=44100", "-ac", "2",
+                        "-ar", "44100", "-sample_fmt", "s16", cls.flac], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", cls.flac,
+                        "-c:a", "aac", "-b:a", "256k", cls.m4a], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        self.db = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(self.db)
+        conn.executescript("""
+            CREATE TABLE app_config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+                track_id INTEGER, message TEXT, details TEXT,
+                created_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE fallback_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, track_id INTEGER NOT NULL,
+                source TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                search_query TEXT, result_count INTEGER,
+                attempted_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY, artist TEXT, title TEXT, duration_ms INTEGER,
+                file_path TEXT, verify_status TEXT, verify_is_genuine_lossless INTEGER,
+                pipeline_error TEXT, updated_at TEXT,
+                pipeline_stage TEXT NOT NULL DEFAULT 'organizing'
+                    CHECK(pipeline_stage IN ('new','matching','downloading','verifying',
+                        'organizing','complete','error','waiting','ignored','needs_import_review')));
+        """)
+        conn.commit(); conn.close()
+
+    def tearDown(self):
+        try:
+            os.remove(self.db)
+        except OSError:
+            pass
+
+    def _track(self, **kw):
+        conn = sqlite3.connect(self.db)
+        cols = ",".join(kw); qs = ",".join("?" * len(kw))
+        conn.execute(f"INSERT INTO tracks ({cols}) VALUES ({qs})", tuple(kw.values()))
+        conn.commit()
+        row = conn.execute("SELECT * FROM tracks WHERE id=?", (kw["id"],))
+        row.row_factory = None
+        d = dict(zip([c[0] for c in row.description], row.fetchone()))
+        conn.close()
+        return d
+
+    def test_lossless_flac_allowed(self):
+        t = self._track(id=1, artist="A", title="B", file_path=self.flac,
+                        verify_is_genuine_lossless=0, pipeline_stage="organizing")
+        self.assertFalse(sf.reject_nonlossless_for_import(self.db, t))
+
+    def test_lossy_m4a_rejected_and_queued(self):
+        t = self._track(id=2, artist="Mob Tactics", title="Labyrinth", file_path=self.m4a,
+                        verify_is_genuine_lossless=0, pipeline_stage="organizing")
+        self.assertTrue(sf.reject_nonlossless_for_import(self.db, t))
+        conn = sqlite3.connect(self.db)
+        stage = conn.execute("SELECT pipeline_stage FROM tracks WHERE id=2").fetchone()[0]
+        fa = conn.execute("SELECT status FROM fallback_attempts WHERE track_id=2 AND source='soulseek'").fetchone()
+        conn.close()
+        self.assertEqual(stage, "error")          # refused import, parked at error
+        self.assertEqual(fa[0], "queued")         # routed to Soulseek
+
+    def test_missing_file_not_blocked(self):
+        t = self._track(id=3, artist="A", title="B", file_path="/nope/missing.flac",
+                        verify_is_genuine_lossless=0, pipeline_stage="organizing")
+        self.assertFalse(sf.reject_nonlossless_for_import(self.db, t))
+
+    def test_trusted_lossless_flag_fast_path(self):
+        # already-verified genuine lossless is allowed without re-probing
+        t = self._track(id=4, artist="A", title="B", file_path=self.m4a,
+                        verify_is_genuine_lossless=1, pipeline_stage="organizing")
+        self.assertFalse(sf.reject_nonlossless_for_import(self.db, t))
 
 
 if __name__ == "__main__":
