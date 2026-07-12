@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import sqlite3
+import time
 from datetime import datetime, timezone
 
 from tasks.helpers import (
@@ -14,6 +16,37 @@ from tasks.helpers import (
 from tasks.nonmusic_filter import DEFAULT_MAX_DURATION_MS, is_nonmusic
 
 log = logging.getLogger("worker.poll_spotify")
+
+# How many times to retry a write that hits SQLite "database is locked" before
+# giving up. During a full backfill the poll issues a burst of INSERTs while the
+# pipeline is concurrently writing (downloads/verifies/organizes), so the shared
+# sync.db can be write-locked longer than the base busy_timeout. Without this the
+# poll task would crash mid-walk on a transient lock and the whole backfill would
+# abort (and, before resumability below, restart from offset 0). We retry with a
+# short escalating backoff so a bulk backfill grinds through under load instead.
+_LOCK_RETRY_ATTEMPTS = 12
+_LOCK_RETRY_BASE_DELAY = 0.25
+
+
+def _with_db_retry(db_path: str, func):
+    """Run func(conn) inside a get_db transaction, retrying on 'database is locked'.
+
+    Only OperationalError whose message mentions a lock is retried; every other
+    error propagates immediately. Returns whatever func returns.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        try:
+            with get_db(db_path) as conn:
+                return func(conn)
+        except sqlite3.OperationalError as e:
+            last_exc = e
+            if "locked" in str(e).lower() and attempt < _LOCK_RETRY_ATTEMPTS - 1:
+                time.sleep(_LOCK_RETRY_BASE_DELAY * (attempt + 1))
+                continue
+            raise
+    if last_exc:
+        raise last_exc
 
 
 def _poll(db_path: str):
@@ -37,16 +70,35 @@ def _poll(db_path: str):
     backfill = get_config(db_path, "backfill_all_liked") == "1"
     effective_cutoff = None if backfill else last_poll
 
-    log.info(
-        "Polling Spotify liked songs (mode=%s, last poll: %s)",
-        "FULL-BACKFILL" if backfill else "incremental", last_poll or "never",
-    )
-
     new_count = 0
     scanned = 0
-    offset = 0
     limit = 50
     done = False
+    # True only when the walk reaches the natural end of the library. A backfill
+    # that exits early on a Spotify API error must NOT clear the one-shot flag —
+    # it needs to resume next cycle from the persisted offset.
+    walk_complete = False
+
+    # Resumable backfill: the worker can be restarted (redeploys, crashes, or a
+    # transient lock that still slips past the retry) mid-walk. Rather than
+    # restart the whole ~5.5k-track walk from offset 0 every time — which wastes
+    # API calls re-scanning already-present pages and, under load, may never
+    # reach the deep (older) pages before the next restart — we persist the page
+    # offset in app_config and resume from it. Dedup still protects against any
+    # double-processing. The cursor is cleared on clean completion. Incremental
+    # polls always start at 0 (they short-circuit at the last-poll cutoff fast).
+    offset = 0
+    if backfill:
+        try:
+            offset = int(get_config(db_path, "backfill_offset") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+
+    log.info(
+        "Polling Spotify liked songs (mode=%s, last poll: %s%s)",
+        "FULL-BACKFILL" if backfill else "incremental", last_poll or "never",
+        f", resuming at offset {offset}" if backfill and offset else "",
+    )
 
     while not done:
         try:
@@ -60,6 +112,7 @@ def _poll(db_path: str):
 
         items = results.get("items", [])
         if not items:
+            walk_complete = True
             break
 
         for item in items:
@@ -71,6 +124,7 @@ def _poll(db_path: str):
             # the entire history is walked.
             if effective_cutoff and added_at and added_at <= effective_cutoff:
                 done = True
+                walk_complete = True
                 break
 
             track = item.get("track")
@@ -158,8 +212,10 @@ def _poll(db_path: str):
                     )
                     continue
 
-            # Insert new track
-            with get_db(db_path) as conn:
+            # Insert new track (lock-resilient: a bulk backfill races the pipeline
+            # for the shared sync.db, so retry transient "database is locked").
+            def _insert(conn, _added=added_at, _sid=spotify_id, _track=track,
+                        _artists=artists, _album=album_name, _isrc=isrc):
                 conn.execute(
                     """INSERT INTO tracks
                     (spotify_id, spotify_uri, spotify_added_at, title, artist, album,
@@ -167,18 +223,20 @@ def _poll(db_path: str):
                      download_status, verify_status, lexicon_status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', 'pending', 'pending', 'pending', 'pending')""",
                     (
-                        spotify_id,
-                        track.get("uri"),
-                        added_at,
-                        track.get("name"),
-                        artists,
-                        album_name,
-                        track.get("duration_ms"),
-                        isrc,
-                        track.get("popularity"),
+                        _sid,
+                        _track.get("uri"),
+                        _added,
+                        _track.get("name"),
+                        _artists,
+                        _album,
+                        _track.get("duration_ms"),
+                        _isrc,
+                        _track.get("popularity"),
                     ),
                 )
-                track_db_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            track_db_id = _with_db_retry(db_path, _insert)
 
             log_activity(
                 db_path,
@@ -191,19 +249,33 @@ def _poll(db_path: str):
 
         offset += limit
 
+        # Persist the resumable cursor after each fully-processed page so a
+        # restart mid-backfill continues from here instead of from 0.
+        if backfill:
+            try:
+                set_config(db_path, "backfill_offset", str(offset))
+            except sqlite3.OperationalError:
+                pass  # best-effort; a missed checkpoint only costs a re-scan
+
         # Spotify returns total, check if we've gone past it
         total = results.get("total", 0)
         if offset >= total:
+            walk_complete = True
             break
 
     # Update last poll timestamp
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     set_config(db_path, "last_spotify_poll", now)
 
-    # Clear the one-shot backfill flag once the full history has been walked, so
-    # subsequent polls return to fast incremental mode.
-    if backfill:
+    # Clear the one-shot backfill flag ONLY when the full history was actually
+    # walked to the end. If the walk exited early (e.g. a Spotify API error),
+    # leave the flag set and the offset persisted so the next poll resumes and
+    # finishes the backfill instead of silently dropping to incremental with a
+    # partial library.
+    if backfill and walk_complete:
         set_config(db_path, "backfill_all_liked", "0")
+        # Clear the resumable cursor so the next explicit backfill starts fresh.
+        set_config(db_path, "backfill_offset", "0")
         log.info(
             "Full backfill complete: scanned %d liked songs, imported %d new tracks",
             scanned, new_count,
@@ -211,6 +283,12 @@ def _poll(db_path: str):
         log_activity(
             db_path, "backfill_complete", None,
             f"Spotify full backfill complete: scanned {scanned}, imported {new_count} new tracks",
+        )
+    elif backfill and not walk_complete:
+        log.warning(
+            "Backfill did not reach end (exited at offset %d); flag left set to resume "
+            "next cycle. Scanned %d, imported %d so far.",
+            offset, scanned, new_count,
         )
     elif new_count > 0:
         log.info("Imported %d new tracks from Spotify (scanned %d)", new_count, scanned)

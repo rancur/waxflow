@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.6.1 — Resumable, lock-resilient Spotify liked-songs backfill
+
+Makes the full liked-songs backfill actually **complete** under real load. WaxFlow's
+DB held only ~998 of Will's ~5,550 all-time Spotify likes: the incremental poller
+stops at the first track added at/before `last_spotify_poll` (likes come back
+newest-first), so once that cutoff is set it never walks back into older history.
+The one-shot `backfill_all_liked` mode (which ignores the cutoff and paginates the
+whole library) existed but, when triggered, could not finish — the burst of INSERTs
+raced the pipeline's concurrent writes and the poll task crashed on
+`database is locked`, and every worker restart re-walked from offset 0.
+
+### Fixed
+- **Lock-resilient inserts:** backfill INSERTs now retry transient
+  `database is locked` (short escalating backoff) instead of crashing the poll task
+  and aborting the walk. Unrelated `OperationalError`s still propagate immediately.
+- **Resumable backfill:** the page offset is checkpointed to `app_config`
+  (`backfill_offset`) after each page and resumed on restart, so redeploys/crashes
+  continue the walk instead of restarting from 0.
+- **Completion-gated flag clear:** the one-shot `backfill_all_liked` flag is cleared
+  only when the walk reaches the end of the library. A backfill that exits early on a
+  Spotify API error keeps the flag set (and the offset persisted) so the next cycle
+  resumes and finishes, rather than silently dropping to incremental with a partial
+  library. Each track is still inserted with its real `spotify_added_at`.
+
+Dedup/link-vs-import-vs-review guards are unchanged (existing tests green): the
+backfill relies on them to LINK most likes to Will's existing Lexicon library
+without downloading or duplicating.
+
 ## 2.6.0 — Direct-to-library import (bypass watch/incoming/Done) + sync-lag tolerance
 
 Fixes the root cause of "new songs never enter the Lexicon library": imports were
