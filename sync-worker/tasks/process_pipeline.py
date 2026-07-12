@@ -27,6 +27,12 @@ from tasks.helpers import (
     set_config,
     update_track,
 )
+from tasks.soulseek_fallback import (
+    STAGE as SOULSEEK_STAGE,
+    already_attempted as _soulseek_already_attempted,
+    is_enabled as _soulseek_enabled,
+    process_soulseek_fallback,
+)
 
 log = logging.getLogger("worker.pipeline")
 
@@ -208,6 +214,26 @@ def touch_worker_heartbeat(db_path: str):
         pass  # heartbeat is best-effort; never fail the pipeline on it
 
 
+def _route_lossless_gap(db_path: str, track_id: int, error_msg: str) -> bool:
+    """Route a track that Tidal couldn't provide as true-lossless.
+
+    If the Soulseek fallback is enabled and this track hasn't already been tried
+    on Soulseek, move it to SOULSEEK_STAGE (the fallback stage sources + verifies a
+    real lossless FLAC). Otherwise fall back to the terminal 'error' state.
+    Returns True if it routed to the Soulseek fallback.
+    """
+    try:
+        if _soulseek_enabled(db_path) and not _soulseek_already_attempted(db_path, track_id):
+            update_track(db_path, track_id, pipeline_stage=SOULSEEK_STAGE, pipeline_error=error_msg)
+            log_activity(db_path, "soulseek_queued", track_id,
+                         f"Routed to Soulseek lossless fallback: {error_msg}")
+            log.info("Track %d routed to Soulseek fallback (%s)", track_id, error_msg)
+            return True
+    except Exception as e:  # noqa: BLE001 — never let routing break the pipeline
+        log.warning("Track %d: Soulseek routing check failed (%s); using error state", track_id, e)
+    return False
+
+
 async def process_pipeline(db_path: str):
     """Run one cycle of the pipeline processor."""
     # Organize FIRST so tracks already staged for Lexicon (e.g. already-owned
@@ -224,6 +250,10 @@ async def process_pipeline(db_path: str):
     await asyncio.to_thread(_process_downloading, db_path)
     touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_verifying, db_path)
+    touch_worker_heartbeat(db_path)
+    # Soulseek fallback: tracks Tidal couldn't provide as true-lossless are routed
+    # to SOULSEEK_STAGE by the match/verify stages; source + verify them here.
+    await asyncio.to_thread(process_soulseek_fallback, db_path)
     touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_organizing, db_path)
     touch_worker_heartbeat(db_path)
@@ -865,12 +895,14 @@ def _match_track(db_path: str, track: dict):
                 VALUES (?, 'tidal', 'no_match', ?, 0)""",
                 (track_id, f"{artist} {title}"),
             )
-        update_track(
-            db_path, track_id,
-            match_status="failed",
-            pipeline_stage="error",
-            pipeline_error="No Tidal match found",
-        )
+        # Tidal has no match — try the Soulseek lossless fallback before giving up.
+        update_track(db_path, track_id, match_status="failed")
+        if not _route_lossless_gap(db_path, track_id, "No Tidal match found"):
+            update_track(
+                db_path, track_id,
+                pipeline_stage="error",
+                pipeline_error="No Tidal match found",
+            )
         log_activity(db_path, "match_failed", track_id, f"No match found for: {artist} - {title}")
         log.warning("Track %d: no match for '%s - %s'", track_id, artist, title)
 
@@ -1909,6 +1941,15 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
          "fp_match_score": fp_match_score, "reasons": reasons},
     )
     log.info("Track %d verified: %s (codec=%s)", track_id, verify_status, codec)
+
+    # If the ONLY problem is that Tidal's copy isn't genuinely lossless (not a wrong
+    # track), try to source a verified-lossless FLAC via the Soulseek fallback
+    # instead of terminating at 'error'. Wrong-track mismatches are left at 'error'.
+    if (not verify_pass) and (not is_lossless) and (not is_mismatched):
+        _route_lossless_gap(
+            db_path, track_id,
+            f"Tidal copy not lossless (codec={codec}, sr={sample_rate}); sourcing via Soulseek",
+        )
 
 
 # ---------------------------------------------------------------------------
