@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.8.1 — Match Review: fix 500 + side-by-side audio preview
+
+Fixes the intermittent `API error: 500` in Match Review and adds an A/B audio
+preview (Spotify + matched local file) to each review card. API-and-web only; the
+worker soak is untouched.
+
+### Fixed — Match Review 500
+- **Root cause:** `sync-api/db.py` opened SQLite with WAL but no `busy_timeout`, so
+  while the worker soak held a write lock the API's approve/reject write raised
+  `database is locked` immediately → 500. Added `sqlite3.connect(..., timeout=30)`
+  and `PRAGMA busy_timeout=5000` so the API waits for the lock instead of erroring.
+- **Resilience:** `/api/matching/review` now guards per-row serialization in a
+  try/except — one malformed row (e.g. a NULL in a required column) is skipped and
+  logged instead of 500-ing the whole review list. Response includes `skipped`.
+
+### Added — Side-by-side audio preview in Match Review
+- **`GET /api/matching/{track_id}/file`** streams the matched local audio file with
+  HTTP Range support (Starlette `FileResponse` → 206, seekable `<audio>`), a correct
+  audio content-type, and path-safety: the resolved real path must stay inside
+  `MUSIC_LIBRARY_PATH` (rejects `..`/symlink escape with 403).
+- **Web:** each review card now shows two players side by side — a Spotify **embed
+  iframe** (`open.spotify.com/embed/track/{id}`, reliable despite 2024 preview_url
+  removals) labeled "Spotify" with an "Open in Spotify" link, and an `<audio>`
+  labeled "Your file" pointed at the stream endpoint. Both degrade gracefully when
+  the Spotify id or local file is missing.
+
 ## Unreleased — Phase 3: Sleep-tolerant sync + real-time flow-on-like
 
 Makes the sync survive the Lexicon Mac going to sleep, and cuts like→Lexicon latency
