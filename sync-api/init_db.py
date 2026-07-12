@@ -435,6 +435,119 @@ def init():
             conn.execute("ALTER TABLE tracks ADD COLUMN last_upgrade_check TEXT")
             print("Added tracks.last_upgrade_check column.")
 
+    # Migration: WaxFlow v3 additive foundation (Phase A).
+    #
+    # Mirrors sync-worker/tasks/v3_schema.ensure_v3_schema VERBATIM so the API-side
+    # init and the worker converge on the same schema. ADDITIVE-ONLY and INERT: new
+    # tables (CREATE IF NOT EXISTS) + two nullable tracks columns (guarded ADD COLUMN).
+    # No tracks rebuild, no CHECK-constraint change, no data migration. Idempotent.
+    # The legacy fallback_attempts table is intentionally left intact; source_attempts
+    # is the forward per-source attempt log.
+    with get_db() as conn:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS wanted (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER REFERENCES tracks(id),
+            state TEXT NOT NULL DEFAULT 'wanted',
+            quality_target TEXT,
+            reason TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TEXT,
+            last_attempt_at TEXT,
+            last_source TEXT,
+            best_result_json TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS source_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER REFERENCES tracks(id),
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error TEXT,
+            search_query TEXT,
+            result_count INTEGER,
+            attempt_no INTEGER NOT NULL DEFAULT 1,
+            backoff_seconds INTEGER,
+            next_retry_at TEXT,
+            attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS purchase_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER REFERENCES tracks(id),
+            source TEXT NOT NULL,
+            url TEXT,
+            format_hint TEXT,
+            price TEXT,
+            confidence REAL,
+            dedup_key TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            first_generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_refreshed_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS import_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER REFERENCES tracks(id),
+            mac_path TEXT,
+            playlist_target TEXT,
+            op TEXT NOT NULL DEFAULT 'import',
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            held_reason TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS plex_sync (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER REFERENCES tracks(id),
+            playlist_id INTEGER REFERENCES playlists(id),
+            rating_key TEXT,
+            scan_state TEXT NOT NULL DEFAULT 'pending',
+            last_scanned_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS direct_write_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER REFERENCES tracks(id),
+            schema_version TEXT,
+            backup_path TEXT,
+            op TEXT,
+            before_json TEXT,
+            after_json TEXT,
+            fallback_used INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS mac_availability (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reachable INTEGER,
+            smb_mounted INTEGER,
+            api_ok INTEGER,
+            detail TEXT,
+            sampled_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_links_dedup
+            ON purchase_links(dedup_key);
+        CREATE INDEX IF NOT EXISTS idx_source_attempts_track_source
+            ON source_attempts(track_id, source);
+        CREATE INDEX IF NOT EXISTS idx_wanted_track ON wanted(track_id);
+        CREATE INDEX IF NOT EXISTS idx_import_queue_state ON import_queue(state);
+        """)
+    with get_db() as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracks)").fetchall()}
+        if "sourceability" not in cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN sourceability TEXT")
+            print("Added tracks.sourceability column.")
+        if "wanted_id" not in cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN wanted_id INTEGER")
+            print("Added tracks.wanted_id column.")
+
     print("Database initialized successfully.")
 
 

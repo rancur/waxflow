@@ -27,10 +27,16 @@ from tasks.helpers import (
     set_config,
     update_track,
 )
-from tasks.soulseek_fallback import (
+# Source-plugin abstraction (WaxFlow v3 Phase A). The Tidal + Soulseek call-sites
+# below route through these thin adapters instead of the inline functions, with NO
+# behavior change: the adapters delegate to the same implementations that still live
+# here / in soulseek_fallback. See tasks/sources/. Soulseek's surface is re-exported
+# by the sources.soulseek facade, so importing it from there is the abstraction seam.
+from tasks.sources import soulseek as _soulseek_source
+from tasks.sources import tidal as _tidal_source
+from tasks.sources.soulseek import (
     already_attempted as _soulseek_already_attempted,
     is_enabled as _soulseek_enabled,
-    process_soulseek_fallback,
     queue_for_fallback as _soulseek_queue,
     reject_nonlossless_for_import as _reject_nonlossless_for_import,
 )
@@ -262,7 +268,7 @@ async def process_pipeline(db_path: str):
     touch_worker_heartbeat(db_path)
     # Soulseek fallback: tracks Tidal couldn't provide as true-lossless are queued
     # by the match/verify stages (a fallback_attempts row); source + verify them here.
-    await asyncio.to_thread(process_soulseek_fallback, db_path)
+    await asyncio.to_thread(_soulseek_source.run_fallback, db_path)
     touch_worker_heartbeat(db_path)
     await asyncio.to_thread(_process_organizing, db_path)
     touch_worker_heartbeat(db_path)
@@ -781,7 +787,7 @@ def _match_track(db_path: str, track: dict):
     # Strategy 1: Search Tidal by ISRC
     if isrc:
         try:
-            results = _tidal_search(isrc)
+            results = _tidal_source.search_raw(isrc)
             # Check ALL results for matching ISRC (not just the first)
             for item in results:
                 if item.get("isrc", "").upper() == isrc.upper():
@@ -818,7 +824,7 @@ def _match_track(db_path: str, track: dict):
             if matched:
                 break
             try:
-                results = _tidal_search(query)
+                results = _tidal_source.search_raw(query)
                 spotify_norm = _normalize_title(title)
 
                 best_candidate = None
@@ -1444,7 +1450,7 @@ def _download_track(db_path: str, track: dict):
                     VALUES (?, 'tiddl', 'downloading', ?, datetime('now'), NULL)""",
                     (track_id, attempts),
                 )
-            dest_path = _download_track_via_tiddl(db_path, track)
+            dest_path = _tidal_source.acquire_raw(db_path, track)
             download_source = "tiddl"
         except Exception as tiddl_err:
             log.warning("Track %d: tiddl failed (%s), checking legacy fallback", track_id, tiddl_err)

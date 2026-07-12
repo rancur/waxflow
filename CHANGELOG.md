@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.8.0 — v3 Phase A foundation (additive schema + source-plugin abstraction)
+
+Foundation for the WaxFlow v3 build. Everything here is **additive and inert**: new
+tables/columns and new modules behind default-off flags, wired into **nothing** in the
+live worker loop yet. No runtime behavior changes — the Tidal/Soulseek refactor is a
+pure, characterization-proven pass-through. It "bakes in" at the next coordinated deploy.
+
+### Added — additive v3 schema (`tasks/v3_schema.ensure_v3_schema`, mirrored in `init_db.py`)
+- Seven new tables (all `CREATE TABLE IF NOT EXISTS`): `wanted`, `source_attempts`,
+  `purchase_links`, `import_queue`, `plex_sync`, `direct_write_audit`, `mac_availability`,
+  plus supporting indexes.
+- Two new **nullable** `tracks` columns (guarded `ALTER TABLE ADD COLUMN`): `sourceability`,
+  `wanted_id`.
+- **Additive-only**: no `tracks` rebuild, no CHECK-constraint change, no data migration.
+  Idempotent (safe to re-run). The legacy `fallback_attempts` table is left **intact** —
+  `source_attempts` is the forward per-source attempt log.
+
+### Added — source-plugin abstraction (`tasks/sources/`)
+- `base.py`: `SourceCapability` enum, `TrackQuery`/`SourceResult` dataclasses, the `Source`
+  base class, and a shared `SourceBackoff` helper (exponential backoff on `source_attempts`).
+- `registry.py`: `all_sources()`, `acquire_sources()`/`link_sources()` (priority-sorted),
+  `get_source()`, `enabled_acquire_sources()`; enable/disable per source via `app_config`.
+- `tidal.py` / `soulseek.py`: wrap the **existing** Tidal (`_tidal_search` +
+  `_download_track_via_tiddl`) and Soulseek (`soulseek_fallback`) logic behind the `Source`
+  interface. The pipeline's call-sites now route through these adapters with **zero**
+  behavior change (the adapters delegate to the same implementations).
+
+### Tests
+- +35 tests (schema creation/idempotency + init_db mirror, registry ordering/backoff/toggle,
+  and **characterization** tests proving the source adapters are byte-identical to the
+  inline Tidal/Soulseek code — same returns, same HTTP requests, same subprocess argv/dest).
+
 ## 2.7.0 — Lossy-only auto-upgrade re-check
 
 Some liked tracks are kept as a **lossy** copy because, at import time, no genuinely
