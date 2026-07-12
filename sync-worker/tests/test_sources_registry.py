@@ -65,22 +65,35 @@ def _set_config(path: str, key: str, value: str):
 class TestRegistry(unittest.TestCase):
     def test_all_sources_present(self):
         names = {s.name for s in registry.all_sources()}
-        self.assertEqual(names, {"tidal", "soulseek"})
+        # Phase A acquire sources + Phase 4 buy-link stores.
+        self.assertEqual(
+            names, {"tidal", "soulseek", "qobuz", "beatport", "bandcamp"}
+        )
 
     def test_acquire_sources_priority_order(self):
         ordered = registry.acquire_sources()
+        # Only Tidal + Soulseek acquire audio (the stores are link-only).
         self.assertEqual([s.name for s in ordered], ["tidal", "soulseek"])
         # priorities strictly ascending
         prios = [s.priority for s in ordered]
         self.assertEqual(prios, sorted(prios))
         self.assertLess(prios[0], prios[1])
 
-    def test_link_sources_empty_in_phase_a(self):
-        # No SEARCH_LINK sources yet (Beatport/Qobuz/Bandcamp are Phase B).
-        self.assertEqual(registry.link_sources(), [])
+    def test_link_sources_registered_phase4(self):
+        # Phase 4 adds Beatport/Qobuz/Bandcamp as SEARCH_LINK (buy-link) sources.
+        names = [s.name for s in registry.link_sources()]
+        self.assertEqual(set(names), {"qobuz", "beatport", "bandcamp"})
+        # priority-sorted (qobuz 30 < beatport 40 < bandcamp 50)
+        self.assertEqual(names, ["qobuz", "beatport", "bandcamp"])
+
+    def test_link_sources_never_acquire(self):
+        # HARD CONSTRAINT: buy-link stores must NOT advertise ACQUIRE (no purchase).
+        for s in registry.link_sources():
+            self.assertNotIn(SourceCapability.ACQUIRE, s.capabilities)
+            self.assertIn(SourceCapability.SEARCH_LINK, s.capabilities)
 
     def test_capabilities(self):
-        for s in registry.all_sources():
+        for s in registry.acquire_sources():
             self.assertIn(SourceCapability.ACQUIRE, s.capabilities)
             self.assertIn(SourceCapability.LOSSLESS, s.capabilities)
 
