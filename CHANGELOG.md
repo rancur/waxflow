@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased — v3 Feature 4: Plex/Plexamp mirror (additive, inert)
+
+Mirrors what WaxFlow syncs into Lexicon over to the Plex server that runs **on the NAS**
+(`http://192.168.1.221:32400`, same `/volume1/music` tree) so the monthly `MM. Month YYYY`
+playlists show up in Plexamp. **Additive and inert**: gated behind the default-off
+`plex_sync_enabled` flag and **not wired** into `worker.py`'s loop (Phase C wires it in a
+quiet window). A READ-ONLY consumer of audio files — it only writes Plex's own playlist/scan
+state and the WaxFlow `plex_sync` cache table; it never moves or rewrites a file.
+
+### Added — `tasks/plex_client.py` (thin httpx Plex client, no `plexapi` dep)
+- `X-Plex-Token` + JSON client wrapping only the endpoints the mirror needs: list sections,
+  paginate a music section's tracks, **path-scoped** library refresh, section search, and
+  audio-playlist list/items/create/add/remove. Constructor takes an injectable transport so
+  tests drive real request shapes through a mock Plex server.
+
+### Added — `tasks/plex_sync.py` (mirror task)
+- **Scan**: targeted `PUT /library/sections/{id}/refresh?path=…` per unique parent directory,
+  batched/debounced (`plex_scan_batch`, default 25). **Never** a global full scan (storm risk).
+- **Match**: WaxFlow track → Plex `ratingKey` by file **path first** (container `/music/…` ==
+  Plex `/volume1/music/…`), falling back to a normalized artist+title search; result cached in
+  `plex_sync`.
+- **Mirror**: reconciles ALL `MM. Month YYYY` monthly playlists into Plex audio playlists so
+  membership **equals** the monthly list (create/add/remove). Fully idempotent — a second run
+  makes zero changes and creates no duplicate memberships.
+
+### Added — config (`init_db.py`, all default-off/generic)
+- `plex_sync_enabled` (`0`), `plex_url`, `plex_music_section_id` (empty, env-seeded like
+  `lexicon_api_url`), `plex_music_container_prefix` (`/music`), `plex_music_server_prefix`
+  (`/volume1/music`), `plex_scan_batch` (`25`). The **`plex_token` is never committed** — it is
+  self-generated from the server's `Preferences.xml`, stored in 1Password
+  ("Plex — WaxFlow token (Barry)"), and seeded into the live `app_config` out of band.
+
+### Tests — `tests/test_plex_sync.py`
+- Mock Plex server (`httpx.MockTransport`): path-scoped scan (dedups dirs, never global; batch
+  cap), path+fuzzy matching, playlist create/reconcile (add missing + remove stale), and
+  idempotency (run-twice → no changes, no duplicates). Disabled/unconfigured gate is a no-op.
+
 ## 2.8.0 — v3 Phase A foundation (additive schema + source-plugin abstraction)
 
 Foundation for the WaxFlow v3 build. Everything here is **additive and inert**: new
