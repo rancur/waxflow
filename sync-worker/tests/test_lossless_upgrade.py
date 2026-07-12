@@ -181,7 +181,8 @@ class TestAttemptUpgrade(unittest.TestCase):
 
     def test_swap_on_verified_lossless_found(self):
         new_path = "/music/Mob Tactics/Mob Tactics - Labyrinth.flac"
-        with mock.patch.object(lu, "_source_verified_lossless", return_value=(new_path, "soulseek")), \
+        with mock.patch.object(lu, "_lexicon_can_relocate", return_value=True), \
+             mock.patch.object(lu, "_source_verified_lossless", return_value=(new_path, "soulseek")), \
              mock.patch.object(lu, "_relocate_in_lexicon", return_value=True):
             result = lu._attempt_upgrade(self.db, _row(self.db, 1))
         self.assertEqual(result, "upgraded")
@@ -194,7 +195,8 @@ class TestAttemptUpgrade(unittest.TestCase):
         self.assertIsNotNone(row["last_upgrade_check"])
 
     def test_never_removes_lossy_when_nothing_found(self):
-        with mock.patch.object(lu, "_source_verified_lossless", return_value=None):
+        with mock.patch.object(lu, "_lexicon_can_relocate", return_value=True), \
+             mock.patch.object(lu, "_source_verified_lossless", return_value=None):
             result = lu._attempt_upgrade(self.db, _row(self.db, 1))
         self.assertEqual(result, "none")
         row = _row(self.db, 1)
@@ -212,7 +214,8 @@ class TestAttemptUpgrade(unittest.TestCase):
         with open(staged, "wb") as f:
             f.write(b"fake-flac-bytes")
         try:
-            with mock.patch.object(lu, "_source_verified_lossless", return_value=(staged, "tidal")), \
+            with mock.patch.object(lu, "_lexicon_can_relocate", return_value=True), \
+                 mock.patch.object(lu, "_source_verified_lossless", return_value=(staged, "tidal")), \
                  mock.patch.object(lu, "_relocate_in_lexicon", return_value=False):
                 result = lu._attempt_upgrade(self.db, _row(self.db, 1))
             self.assertEqual(result, "staged")
@@ -224,6 +227,45 @@ class TestAttemptUpgrade(unittest.TestCase):
         finally:
             if os.path.exists(staged):
                 os.remove(staged)
+
+    def test_blocked_when_lexicon_cannot_relocate(self):
+        # Lexicon exposes no editable location: never source/download a copy we cannot
+        # install. Keep the lossy untouched, advance only the throttle, no swap.
+        with mock.patch.object(lu, "_lexicon_can_relocate", return_value=False), \
+             mock.patch.object(lu, "_source_verified_lossless") as src:
+            result = lu._attempt_upgrade(self.db, _row(self.db, 1))
+        self.assertEqual(result, "blocked")
+        src.assert_not_called()                                    # no wasted download
+        row = _row(self.db, 1)
+        self.assertTrue(row["file_path"].endswith(".m4a"))         # lossy kept
+        self.assertEqual(row["verify_is_genuine_lossless"], 0)
+        self.assertEqual(row["lossless_upgrade_pending"], 1)       # still pending
+        self.assertIsNotNone(row["last_upgrade_check"])            # throttle advanced
+
+
+class TestIterTracksEnvelopes(unittest.TestCase):
+    def test_singular_track_envelope(self):
+        # Live GET /v1/track?id=<n> returns {"data": {"track": {...}}} (SINGULAR).
+        data = {"data": {"track": {"id": 42, "location": "/Volumes/music/x.flac"}}}
+        got = list(lu._iter_tracks(data))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["id"], 42)
+
+    def test_plural_tracks_envelope(self):
+        data = {"data": {"tracks": [{"id": 1}, {"id": 2}]}}
+        self.assertEqual([t["id"] for t in lu._iter_tracks(data)], [1, 2])
+
+    def test_location_confirm_reads_back_singular(self):
+        # _lexicon_location_is must confirm a match from the singular envelope.
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {"data": {"track": {"id": 7, "location": "/Volumes/music/y.flac"}}}
+        class _Client:
+            def get(self, *a, **k):
+                return _Resp()
+        self.assertTrue(lu._lexicon_location_is(_Client(), "7", "/Volumes/music/y.flac"))
+        self.assertFalse(lu._lexicon_location_is(_Client(), "7", "/Volumes/music/other.flac"))
 
 
 class TestRunLoopGuards(unittest.TestCase):
