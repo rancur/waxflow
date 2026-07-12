@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.6.2 — Downloaded tracks actually reach Lexicon (Synology ACL + SMB delivery)
+
+Fixes the show-critical bug where freshly-**downloaded** tracks never reached the
+Lexicon Mac (April & June 2026 completely missing, May partial) while **linked**
+tracks appeared fine.
+
+### Root cause
+The worker placed each finished download with `shutil.move` + `os.chmod`. On the
+Synology NAS, the `/volume1/music` share carries an inheritable
+`user:SynologyDrive:allow` ACL that a fresh file inherits — but **any mode change
+(`os.chmod`, or `shutil.move`/`copy2`'s `copystat`) strips that ACL and converts
+the file to POSIX "Linux mode", which Synology Drive Server cannot see.** Stranded
+files never synced to the Mac, so Lexicon could not import them. Linked tracks need
+no file move, so they were unaffected. A month was "completely missing" when all of
+its likes needed downloads. (Proven empirically 2026-07-11: identical file WITH
+chmod = "Linux mode" + not synced; WITHOUT chmod = inherited ACL + synced.)
+
+### Fixed
+- **ACL-preserving placement:** `_download_track_via_tiddl` now uses a data-only
+  `shutil.copyfile` + `os.remove` (never `shutil.move`) and drops the `os.chmod`
+  calls. `os.chown` (which does NOT strip the ACL) still sets the Plex owner. Fresh
+  downloads keep the inherited Synology ACL and propagate to the Mac's `~/Music`
+  Synology replica.
+- **Live SMB delivery for Lexicon import:** default `lexicon_library_path` is now
+  `/Volumes/music` (and `lexicon_input_path` `/Volumes/music/Input`) — the Mac's
+  live SMB view of the NAS share. SMB reflects the NAS filesystem instantly (no
+  sync lag, no ACL/change-event dependency), so downloads are importable the moment
+  they are written. A self-healing launchd agent keeps `/Volumes/music` mounted.
+- **Regression guard:** extracted `_container_to_mac_path()` with tests pinning the
+  `/music -> /Volumes/music` mapping (the exact bug), and updated the import-health
+  canary + grace-window docs to the SMB delivery model.
+
 ## 2.6.1 — Resumable, lock-resilient Spotify liked-songs backfill
 
 Makes the full liked-songs backfill actually **complete** under real load. WaxFlow's
