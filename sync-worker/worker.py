@@ -26,6 +26,7 @@ from tasks.lexicon_health import lexicon_health_check
 from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.plex_sync import plex_sync
 from tasks.mac_availability import sample_availability
+from tasks.hunter import hunter
 from tasks.v3_schema import ensure_v3_schema
 from tasks.helpers import get_config, get_db
 
@@ -283,6 +284,16 @@ async def main():
         asyncio.create_task(
             run_task("mac_availability", sample_availability,
                      interval_key="mac_availability_interval_seconds", default_interval=60)
+        ),
+        # Phase 4 — Missing-track HUNTER (v3 Feature #2). Radarr/Sonarr-style loop
+        # that re-attempts unsourced (error-stage) tracks across every enabled
+        # ACQUIRE source and (re)generates buy-links for the ones that stay
+        # unfindable. Gated by the hunter_enabled app_config flag (default OFF), so
+        # it is a cheap no-op until the batched deploy flips it on. NEVER purchases;
+        # a hit is handed back to the normal pipeline for the real download/import.
+        asyncio.create_task(
+            run_task("hunter", hunter,
+                     interval_key="hunter_interval_seconds", default_interval=10800)
         ),
     ]
 

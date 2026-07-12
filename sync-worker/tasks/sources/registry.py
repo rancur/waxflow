@@ -13,15 +13,24 @@ by the live worker loop yet.
 
 from __future__ import annotations
 
+from tasks.sources.bandcamp import BandcampSource
 from tasks.sources.base import Source, SourceCapability
+from tasks.sources.beatport import BeatportSource
+from tasks.sources.qobuz import QobuzSource
 from tasks.sources.soulseek import SoulseekSource
 from tasks.sources.tidal import TidalSource
 
 # Static registry. Instances are cheap + stateless (all state lives in the DB), so
 # a module-level singleton list is fine.
+#
+# ACQUIRE sources (Tidal, Soulseek) come first by priority; the Phase 4 SEARCH_LINK
+# stores (Qobuz/Beatport/Bandcamp) generate buy-links only and NEVER auto-purchase.
 _REGISTRY: list[Source] = [
     TidalSource(),
     SoulseekSource(),
+    QobuzSource(),
+    BeatportSource(),
+    BandcampSource(),
 ]
 
 
@@ -61,3 +70,12 @@ def enabled_acquire_sources(db_path: str) -> list[Source]:
         s for s in acquire_sources()
         if s.is_enabled(db_path) and s.is_available(db_path)
     ]
+
+
+def enabled_link_sources(db_path: str) -> list[Source]:
+    """SEARCH_LINK (buy-link) sources that are enabled, priority-sorted.
+
+    These never acquire audio — they only produce buy/search links — so availability
+    is just the enable toggle.
+    """
+    return [s for s in link_sources() if s.is_enabled(db_path)]

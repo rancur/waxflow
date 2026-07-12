@@ -14,6 +14,7 @@ from routes.admin import router as admin_router
 from routes.spotify import router as spotify_router
 from routes.tidal import router as tidal_router
 from routes.status import router as status_router
+from routes.wanted import router as wanted_router
 
 app = FastAPI(
     title="WaxFlow API",
@@ -43,6 +44,7 @@ app.include_router(admin_router)
 app.include_router(spotify_router)
 app.include_router(tidal_router)
 app.include_router(status_router)
+app.include_router(wanted_router)
 
 
 @app.get("/")
