@@ -2258,21 +2258,53 @@ def _organize_track(db_path: str, track: dict):
             }
             _playlist_cache_time = time.time()
 
-        # 3. Add track to playlist (only if not already present)
-        if lexicon_playlist_id and lexicon_track_id:
-            if _lexicon_track_in_playlist(client, lexicon_playlist_id, lexicon_track_id):
-                log.info("Track %d (lexicon_id=%s) already in playlist %s, skipping add",
-                         track_id, lexicon_track_id, playlist_name)
-            else:
-                try:
-                    _lexicon_add_to_playlist(client, lexicon_playlist_id, lexicon_track_id)
-                except Exception as e:
-                    log.error("Track %d found in Lexicon but playlist add failed: %s", track_id, e)
-                    raise
+        # 3+4. File the track into its playlist and tag it.
+        #
+        # For a LINK-ONLY track (already_in_lexicon: a real lexicon_track_id, file already
+        # present, no import/move) these two writes are the whole job — and the per-track
+        # HTTP round-trips here are the ~500/hr bottleneck. When direct-write is enabled AND
+        # a LOCAL Lexicon SQLite DB is reachable (lexicon_local_db_path set — only true where
+        # the worker runs on / beside the Lexicon host), do them as two direct SQLite writes
+        # (10x+). The flag defaults OFF and lexicon_local_db_path is unset in prod, so this is
+        # inert until the planned redeploy: the API path below is the always-present fallback.
+        did_direct = False
+        if already_in_lexicon and lexicon_playlist_id and lexicon_track_id:
+            try:
+                from tasks.lexicon_direct_write import (
+                    is_direct_write_enabled, apply_link_only_writes, LinkSpec,
+                )
+                local_db = get_config(db_path, "lexicon_local_db_path")
+                if local_db and is_direct_write_enabled(db_path):
+                    apply_link_only_writes(local_db, [LinkSpec(
+                        lexicon_track_id=int(lexicon_track_id),
+                        playlist_id=int(lexicon_playlist_id),
+                        spotify_id=spotify_id,
+                        waxflow_track_id=track_id,
+                    )])
+                    did_direct = True
+                    log.info("Track %d filed via DIRECT-WRITE (playlist %s)", track_id, playlist_name)
+            except Exception as e:
+                # Never let direct-write failure strand a track — fall back to the API path.
+                log.warning("Track %d direct-write failed, falling back to API path: %s", track_id, e)
+                did_direct = False
 
-        # 4. Tag with [sls:spotify_id]
-        if lexicon_track_id:
-            _lexicon_tag_track(client, lexicon_track_id, spotify_id)
+        if not did_direct:
+            # --- Safe API path (fallback + default) ---
+            # 3. Add track to playlist (only if not already present)
+            if lexicon_playlist_id and lexicon_track_id:
+                if _lexicon_track_in_playlist(client, lexicon_playlist_id, lexicon_track_id):
+                    log.info("Track %d (lexicon_id=%s) already in playlist %s, skipping add",
+                             track_id, lexicon_track_id, playlist_name)
+                else:
+                    try:
+                        _lexicon_add_to_playlist(client, lexicon_playlist_id, lexicon_track_id)
+                    except Exception as e:
+                        log.error("Track %d found in Lexicon but playlist add failed: %s", track_id, e)
+                        raise
+
+            # 4. Tag with [sls:spotify_id]
+            if lexicon_track_id:
+                _lexicon_tag_track(client, lexicon_track_id, spotify_id)
 
     update_track(
         db_path, track_id,
