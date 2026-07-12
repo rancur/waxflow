@@ -2,7 +2,7 @@
 
 When Tidal (tiddl) cannot deliver a genuinely-lossless copy of a liked track —
 either there is no Tidal match, or the Tidal copy is lossy AAC and fails the verify
-stage — the track is routed here (pipeline_stage='soulseek_fallback'). This stage:
+stage — the track is queued here. This stage:
 
   1. searches slskd for the track (artist + title),
   2. ranks true-.flac candidates and tries them best-first (multi-peer, because the
@@ -13,13 +13,19 @@ stage — the track is routed here (pipeline_stage='soulseek_fallback'). This st
   5. on PASS: files the file into the library exactly like a Tidal download
      (/music/<Artist>/<Artist> - <Title>.flac, chowned) and hands it to the normal
      'verifying' -> 'organizing' import path,
-  6. on FAIL / no lossless candidate: records the attempt and terminates the track
-     at 'error' (never imports a fake).
+  6. on FAIL / no lossless candidate: leaves the track at 'error' (never imports a fake).
+
+Queue model (why no new pipeline_stage): the tracks table's ``pipeline_stage`` has a
+CHECK constraint, so we do NOT invent a new stage value. Instead a track that Tidal
+couldn't provide as lossless is parked at the existing 'error' stage AND given a row
+in ``fallback_attempts`` with ``source='soulseek', status='queued'``. This stage
+drains queued rows; on completion the row is finalised (success / all_failed /
+no_candidates) so a track is only ever attempted once.
 
 Everything is behind the app_config flag ``soulseek_fallback_enabled`` (default on).
-slskd endpoint/credentials come from env (see slskd_client). All slskd P2P egress is
-through the sabnzbd VPN on pi-dl; this module only speaks the LAN REST API + file
-server.
+slskd endpoint/credentials come from app_config (env fallback); see build_client.
+All slskd P2P egress is through the sabnzbd VPN on pi-dl; this module only speaks the
+LAN REST API + file server.
 """
 
 from __future__ import annotations
@@ -33,7 +39,6 @@ from tasks.helpers import (
     MUSIC_LIBRARY_PATH,
     get_config,
     get_db,
-    get_tracks_by_stage,
     log_activity,
     sanitize_filename,
     update_track,
@@ -43,6 +48,8 @@ from tasks.slskd_client import SlskdClient
 
 log = logging.getLogger("worker.soulseek_fallback")
 
+# Retained for backwards-compat / logging only. NOT written to tracks.pipeline_stage
+# (that column is CHECK-constrained); the queue lives in fallback_attempts instead.
 STAGE = "soulseek_fallback"
 BATCH = 3                      # tracks per cycle (each may do several peer downloads)
 MAX_CANDIDATES = 6            # peers to try before giving up on a track
@@ -77,6 +84,8 @@ def is_enabled(db_path: str) -> bool:
 
 
 def already_attempted(db_path: str, track_id: int) -> bool:
+    """True if this track already has ANY Soulseek fallback_attempts row (queued or
+    finalised) — prevents re-queuing the same track."""
     with get_db(db_path) as conn:
         row = conn.execute(
             "SELECT 1 FROM fallback_attempts WHERE track_id = ? AND source = 'soulseek' LIMIT 1",
@@ -85,15 +94,47 @@ def already_attempted(db_path: str, track_id: int) -> bool:
     return row is not None
 
 
-def _record_attempt(db_path: str, track_id: int, status: str, query: str,
-                    result_count: int = 0, error: str | None = None):
+def queue_for_fallback(db_path: str, track_id: int, reason: str) -> None:
+    """Park a track for the Soulseek fallback by inserting a queued attempt row.
+
+    The track itself stays at the allowed 'error' pipeline_stage (set by the caller);
+    this row is what the fallback stage scans for. Idempotent-ish: guarded by
+    already_attempted() at the call site.
+    """
     with get_db(db_path) as conn:
         conn.execute(
-            """INSERT INTO fallback_attempts
-               (track_id, source, status, error, search_query, result_count)
-               VALUES (?, 'soulseek', ?, ?, ?, ?)""",
-            (track_id, status, error, query, result_count),
+            """INSERT INTO fallback_attempts (track_id, source, status, search_query)
+               VALUES (?, 'soulseek', 'queued', ?)""",
+            (track_id, reason),
         )
+
+
+def _finalize(db_path: str, fa_id: int, status: str, result_count: int = 0,
+              error: str | None = None):
+    with get_db(db_path) as conn:
+        conn.execute(
+            """UPDATE fallback_attempts
+               SET status = ?, result_count = ?, error = ?, attempted_at = datetime('now')
+               WHERE id = ?""",
+            (status, result_count, error, fa_id),
+        )
+
+
+def _queued_tracks(db_path: str, limit: int) -> list[dict]:
+    """Tracks with a queued Soulseek fallback row, oldest first (5s settle guard)."""
+    with get_db(db_path) as conn:
+        rows = conn.execute(
+            """SELECT t.*, fa.id AS _fa_id
+               FROM tracks t
+               JOIN fallback_attempts fa
+                 ON fa.track_id = t.id AND fa.source = 'soulseek' AND fa.status = 'queued'
+               WHERE (t.updated_at IS NULL OR t.updated_at < datetime('now', '-5 seconds'))
+               GROUP BY t.id
+               ORDER BY t.created_at ASC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def _expected_size_range(duration_ms: int | None):
@@ -171,27 +212,27 @@ def _move_into_library(db_path: str, src_path: str, artist: str, title: str) -> 
 
 def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
     track_id = track["id"]
+    fa_id = track["_fa_id"]
     artist = track.get("artist", "") or ""
     title = track.get("title", "") or ""
     duration_ms = track.get("duration_ms") or 0
     query_used = f"{artist} {title}".strip()
 
     if not client.is_logged_in():
-        log.warning("slskd not logged in — leaving track %d at %s for next cycle", track_id, STAGE)
-        return  # transient: try again next cycle (do NOT burn the attempt)
+        log.warning("slskd not logged in — leaving track %d queued for next cycle", track_id)
+        return  # transient: try again next cycle (leave the queued row in place)
 
     # search across query variants until we have candidates
     responses = []
     for q in _build_queries(artist, title):
         query_used = q
         responses = client.search(q)
-        cands = rank_candidates(responses, duration_ms)
-        if cands:
+        if rank_candidates(responses, duration_ms):
             break
     cands = rank_candidates(responses, duration_ms)
 
     if not cands:
-        _record_attempt(db_path, track_id, "no_candidates", query_used, 0)
+        _finalize(db_path, fa_id, "no_candidates", 0)
         update_track(db_path, track_id, pipeline_stage="error",
                      pipeline_error="Soulseek: no lossless FLAC candidates found")
         log_activity(db_path, "soulseek_no_candidates", track_id,
@@ -241,7 +282,7 @@ def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
 
             # PASS — file into library and hand to the normal verify/import path
             dest = _move_into_library(db_path, local, artist, title)
-            _record_attempt(db_path, track_id, "success", query_used, len(cands))
+            _finalize(db_path, fa_id, "success", len(cands))
             update_track(
                 db_path, track_id,
                 download_status="complete",
@@ -262,7 +303,7 @@ def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
             return
 
         # exhausted candidates without a verified-lossless pass
-        _record_attempt(db_path, track_id, "all_failed", query_used, len(cands))
+        _finalize(db_path, fa_id, "all_failed", len(cands))
         update_track(db_path, track_id, pipeline_stage="error",
                      pipeline_error=f"Soulseek: tried {tried} peer(s), none delivered a verified-lossless FLAC")
         log_activity(db_path, "soulseek_all_failed", track_id,
@@ -278,18 +319,19 @@ def process_soulseek_fallback(db_path: str) -> None:
     # scan mode is read-only; never source/import in scan mode
     if (get_config(db_path, "sync_mode") or "scan") == "scan":
         return
-    tracks = get_tracks_by_stage(db_path, STAGE, limit=BATCH)
+    tracks = _queued_tracks(db_path, BATCH)
     if not tracks:
         return
     client = build_client(db_path)
     if not client.configured:
-        log.warning("slskd not configured (SLSKD_URL/SLSKD_API_KEY) — cannot run fallback")
+        log.warning("slskd not configured (slskd_url/slskd_api_key) — cannot run fallback")
         return
     for track in tracks:
         try:
             _process_one(db_path, track, client)
         except Exception as e:  # noqa: BLE001
             log.error("Soulseek fallback error for track %d: %s", track["id"], e, exc_info=True)
+            _finalize(db_path, track["_fa_id"], "error", 0, str(e)[:300])
             update_track(db_path, track["id"], pipeline_stage="error",
                          pipeline_error=f"Soulseek fallback error: {e}")
             log_activity(db_path, "soulseek_error", track["id"], f"Fallback failed: {e}")
