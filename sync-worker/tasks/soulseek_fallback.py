@@ -49,6 +49,26 @@ MAX_CANDIDATES = 6            # peers to try before giving up on a track
 PER_PEER_TIMEOUT_S = 120.0
 
 
+def build_client(db_path: str) -> SlskdClient:
+    """Build an slskd client from app_config (DB), falling back to env defaults.
+
+    Config keys (app_config): slskd_url, slskd_api_key, slskd_files_url,
+    slskd_files_user, slskd_files_password. Storing them in the DB (like the Spotify
+    tokens) lets the running worker pick up config without a container recreate. Any
+    key left unset falls back to the SLSKD_* environment defaults in SlskdClient.
+    """
+    def cfg(k):
+        v = get_config(db_path, k)
+        return v if (v is not None and v != "") else None
+    return SlskdClient(
+        base=cfg("slskd_url"),
+        api_key=cfg("slskd_api_key"),
+        files_url=cfg("slskd_files_url"),
+        files_user=cfg("slskd_files_user"),
+        files_password=cfg("slskd_files_password"),
+    )
+
+
 def is_enabled(db_path: str) -> bool:
     val = get_config(db_path, "soulseek_fallback_enabled")
     if val is None:
@@ -261,7 +281,7 @@ def process_soulseek_fallback(db_path: str) -> None:
     tracks = get_tracks_by_stage(db_path, STAGE, limit=BATCH)
     if not tracks:
         return
-    client = SlskdClient()
+    client = build_client(db_path)
     if not client.configured:
         log.warning("slskd not configured (SLSKD_URL/SLSKD_API_KEY) — cannot run fallback")
         return
