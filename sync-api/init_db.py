@@ -135,8 +135,15 @@ def init():
             ('lexicon_post_processing', 'analyze,cues,tags,cloud'),
             ('sync_mode', 'scan'),
             ('webhook_url', ''),
-            ('lexicon_library_path', '/music/library'),
-            ('lexicon_input_path', '/music/downloads'),
+            -- Path PREFIX the Lexicon host Mac uses to read the NAS music tree.
+            -- The worker writes to container /music (== NAS /volume1/music), which
+            -- the Mac reads over an SMB mount at /Volumes/music (live, instant —
+            -- no sync lag or ACL dependency). Downloads ALSO propagate to the Mac's
+            -- Synology-Drive replica (~/Music) because finished files keep the
+            -- inherited Synology ACL (see the _download_track_via_tiddl delivery
+            -- note: chmod would strip that ACL and strand the file).
+            ('lexicon_library_path', '/Volumes/music'),
+            ('lexicon_input_path', '/Volumes/music/Input'),
             ('tidal_download_quality', 'max'),
             ('downloads_path', '/downloads'),
             ('lexicon_api_url', ''),

@@ -8,15 +8,20 @@ WaxFlow's import health has two failure modes, both of which used to be silent:
      success. The reactive detector in process_pipeline raises LexiconImportEmpty
      and calls ``note_empty_import`` here.
 
-  2. Watch-folder path (current architecture). Lexicon watches a folder
-     (/Users/willcurran/Music/Input) that Synology Drive syncs down from the NAS
-     (container ``/downloads`` -> NAS /volume1/music/Input). WaxFlow stages files
-     onto the NAS; Synology Drive replicates them to the Mac; Lexicon auto-imports.
-     The proactive ``run_canary`` verifies the NAS-side dependencies of THAT flow:
-       * the staging/watch dir is writable by WaxFlow (else downloads can't land), and
+  2. Delivery path (current architecture, 2026-07-11). The worker writes finished
+     audio into container ``/music`` (== NAS /volume1/music). The Lexicon host Mac
+     reads that SAME tree over an SMB mount at /Volumes/music (live — no sync lag),
+     and WaxFlow imports each file by its Mac-side path. Finished files also keep
+     the inherited Synology ACL so they propagate to the Mac's ~/Music replica.
+     ROOT-CAUSE NOTE: a chmod on a finished file strips that Synology ACL, turning
+     it into "Linux mode" that Synology Drive Server cannot see — the exact reason
+     Apr/Jun downloads never reached Lexicon (proven 2026-07-11). The worker now
+     copies data only and never chmods, so the ACL survives.
+     The proactive ``run_canary`` verifies the NAS-side dependencies of the flow:
+       * the delivery dir the worker writes to is writable by WaxFlow, and
        * Lexicon's API is reachable (the link/organize/playlist step still needs it).
-     It cannot see the Mac side (Synology Drive sync + Lexicon's watcher), so those
-     remain the human-owned links in the chain — flagged, not silently assumed.
+     It cannot see the Mac side (SMB mount + Lexicon), so an actual empty import
+     (mode 1) remains the authoritative mount-down signal.
 
 ``record_import_health`` is the single place that persists the signal to
 app_config (read by the API /api/admin/health endpoint and the self-heal
@@ -46,7 +51,7 @@ EMPTY_COUNT_KEY = "lexicon_import_empty_count"
 # Statuses that mean "new imports will fail" -> page LOUD.
 CRITICAL_STATUSES = frozenset({"mount_down", "lexicon_unreachable", "watch_dir_unwritable"})
 
-DEFAULT_WATCH_DIR = "/downloads"  # container path == NAS Input == Lexicon watch folder
+DEFAULT_WATCH_DIR = "/music"  # container path == NAS /volume1/music == Mac /Volumes/music (SMB). Where downloads land.
 
 
 def _now_iso() -> str:

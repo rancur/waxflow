@@ -87,11 +87,48 @@ class TestEmptyImportDetection(unittest.TestCase):
         self.assertEqual(result, "4242")
 
 
+class TestContainerToMacPath(unittest.TestCase):
+    """Delivery-path contract: the worker writes to container /music (== NAS
+    /volume1/music); the Lexicon Mac reads that tree over SMB at /Volumes/music.
+    A regression here is exactly the Apr/Jun bug (downloads never reached Lexicon),
+    so pin the mapping."""
+
+    def test_music_file_maps_to_smb_library_path(self):
+        mac = pp._container_to_mac_path(
+            "/music/AC Slater/AC Slater - Connect.m4a",
+            "/Volumes/music", "/Volumes/music/Input", "/downloads",
+        )
+        self.assertEqual(mac, "/Volumes/music/AC Slater/AC Slater - Connect.m4a")
+
+    def test_trailing_slash_on_library_path_is_normalized(self):
+        mac = pp._container_to_mac_path(
+            "/music/Artist/Song.flac",
+            "/Volumes/music/", "/Volumes/music/Input", "/downloads",
+        )
+        self.assertEqual(mac, "/Volumes/music/Artist/Song.flac")
+
+    def test_downloads_file_maps_to_input_path(self):
+        mac = pp._container_to_mac_path(
+            "/downloads/tracks/Artist/Song.flac",
+            "/Volumes/music", "/Volumes/music/Input", "/downloads",
+        )
+        self.assertEqual(mac, "/Volumes/music/Input/tracks/Artist/Song.flac")
+
+    def test_music_prefix_wins_when_not_under_downloads(self):
+        # Files under /music must NEVER be mapped through the Input prefix.
+        mac = pp._container_to_mac_path(
+            "/music/Bonobo/Bonobo - Me and You.flac",
+            "/Volumes/music", "/Volumes/music/Input", "/downloads",
+        )
+        self.assertTrue(mac.startswith("/Volumes/music/Bonobo/"))
+
+
 class TestOrganizeRoutesEmptyImport(unittest.TestCase):
     """_process_organizing treats an empty import in TWO phases:
-      1. TRANSIENT (within the grace window) — the freshly-downloaded file has not
-         yet synced from the NAS to the Lexicon host Mac. Keep retrying in
-         'organizing' (status 'pending'); do NOT fire the loud error path.
+      1. TRANSIENT (within the grace window) — the SMB mount on the Lexicon host
+         Mac is momentarily down/remounting, so the just-written file is not
+         readable YET. Keep retrying in 'organizing' (status 'pending'); do NOT
+         fire the loud error path.
       2. OUTAGE (grace exhausted) — escalate to the distinct error state with the
          reason token, a loud activity event, and a call into the shared
          import-health recorder."""

@@ -61,14 +61,19 @@ class LexiconImportEmpty(Exception):
 
 
 # Default grace window (seconds) for tolerating an empty Lexicon import as a
-# TRANSIENT condition before escalating it to the loud mount-down error. A newly
-# downloaded file lands on the NAS first and only reaches the Lexicon host Mac
-# after Synology Drive replicates /volume1/music -> /Users/willcurran/Music, which
-# takes seconds-to-minutes. During that window a POST /v1/tracks for the Mac-side
-# path legitimately imports 0 tracks because the file is not on the Mac YET. We
-# therefore keep retrying in 'organizing' (self-healing) until the file syncs, and
-# only declare a real outage (mount unreachable) once the file has been empty for
-# longer than this window. Tunable live via app_config key
+# TRANSIENT condition before escalating it to the loud mount-down error.
+#
+# DELIVERY MODEL (2026-07-11): the worker writes finished audio into container
+# '/music' (== NAS /volume1/music). The Lexicon Mac reads that same tree over an
+# SMB mount at /Volumes/music (lexicon_library_path) — LIVE, so a just-written file
+# is visible immediately, no sync lag. Finished files also keep their inherited
+# Synology ACL so they propagate to the Mac's ~/Music replica (a chmod would strip
+# that ACL and strand the file — the root cause of the Apr/Jun misses).
+#
+# The main reason a POST /v1/tracks imports 0 tracks is that the SMB mount is
+# momentarily down/remounting. We keep retrying in 'organizing' (self-healing)
+# while the Mac-side mount agent remounts, and only declare a real outage once the
+# file has been empty for longer than this window. Tunable live via app_config key
 # 'lexicon_empty_import_grace_seconds' (no redeploy needed).
 _DEFAULT_EMPTY_IMPORT_GRACE_SECONDS = 1800  # 30 minutes
 
@@ -1059,16 +1064,30 @@ def _download_track_via_tiddl(db_path: str, track: dict) -> str:
             base, extension = os.path.splitext(dest)
             dest = f"{base}_{tidal_id}{extension}"
 
-        shutil.move(downloaded, dest)
+        # Place the file into the music library with a data-only copy + unlink, NOT
+        # shutil.move. This is load-bearing for delivery on the Synology NAS:
+        #
+        #   /volume1/music carries an INHERITABLE Synology ACL
+        #   (user:SynologyDrive:allow ... fd) that grants Synology Drive Server the
+        #   right to see + sync a file to the Lexicon Mac's ~/Music replica. A file
+        #   CREATED FRESH in the share inherits that ACL. But ANY mode change —
+        #   os.chmod, or shutil.move/copy2's copystat — converts the file to plain
+        #   POSIX "Linux mode", STRIPPING the Synology ACL. A stripped file is
+        #   invisible to Synology Drive and never reaches the Mac. THIS is why fresh
+        #   downloads (Apr/Jun) never landed while linked tracks did. (Proven
+        #   empirically 2026-07-11: identical file WITH chmod = "Linux mode" + not
+        #   synced; WITHOUT chmod = inherited ACL + synced.) os.chown does NOT strip
+        #   the ACL, so we still set owner; we deliberately never chmod.
+        shutil.copyfile(downloaded, dest)  # data only — dest inherits the share ACL
+        os.remove(downloaded)
 
-        # Fix ownership to match PlexMediaServer UID/GID on NAS (configurable via Settings)
+        # Set owner to PlexMediaServer UID/GID (configurable). chown preserves the
+        # inherited Synology ACL; do NOT chmod (chmod would strip it and strand it).
         _PLEX_UID = int(get_config(db_path, "plex_uid") or "1000")
         _PLEX_GID = int(get_config(db_path, "plex_gid") or "1000")
         try:
             os.chown(dest_dir, _PLEX_UID, _PLEX_GID)
             os.chown(dest, _PLEX_UID, _PLEX_GID)
-            os.chmod(dest, 0o664)
-            os.chmod(dest_dir, 0o775)
         except OSError as chown_err:
             log.warning("Could not fix ownership for %s: %s", dest, chown_err)
 
@@ -2072,6 +2091,31 @@ def _process_organizing(db_path: str):
         _trigger_lexicon_post_processing_batch(db_path, synced_count)
 
 
+def _container_to_mac_path(
+    file_path: str,
+    lexicon_library_path: str,
+    lexicon_input_path: str,
+    downloads_dir: str,
+) -> str:
+    """Translate a worker-container file path into the path the Lexicon host Mac
+    reads it by, so POST /v1/tracks points at a file Lexicon can actually open.
+
+    Delivery model (2026-07-11): the worker writes finished audio into container
+    ``/music`` (== NAS /volume1/music), which the Mac reads over the SMB mount at
+    ``lexicon_library_path`` (/Volumes/music) — LIVE, no sync lag. A separate
+    upload/staging flow lands in ``/downloads`` (== NAS /volume1/music/Input),
+    read at ``lexicon_input_path``. Map by container prefix:
+
+        /downloads/<rel>  -> <lexicon_input_path>/<rel>
+        /music/<rel>      -> <lexicon_library_path>/<rel>
+    """
+    if downloads_dir and file_path.startswith(downloads_dir):
+        relative_path = os.path.relpath(file_path, downloads_dir)
+        return f"{lexicon_input_path.rstrip('/')}/{relative_path}"
+    relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
+    return f"{lexicon_library_path.rstrip('/')}/{relative_path}"
+
+
 def _organize_track(db_path: str, track: dict):
     """Import a track into Lexicon and add it to the appropriate monthly playlist."""
     track_id = track["id"]
@@ -2134,15 +2178,10 @@ def _organize_track(db_path: str, track: dict):
             # mapping or import needed; just file it into the playlist below.
             lexicon_track_id = str(existing_lexicon_id)
         else:
-            # Map container paths to the path prefix Lexicon sees on the host Mac:
-            #   /music/...      -> <lexicon_library_path>/...   (e.g. /music/library)
-            #   /downloads/...  -> <lexicon_input_path>/...     (e.g. /music/downloads)
-            if file_path.startswith(downloads_dir):
-                relative_path = os.path.relpath(file_path, downloads_dir)
-                mac_path = f"{lexicon_input_path}/{relative_path}"
-            else:
-                relative_path = os.path.relpath(file_path, MUSIC_LIBRARY_PATH)
-                mac_path = f"{lexicon_library_path}/{relative_path}"
+            # Map the worker's container path to the path the Lexicon host Mac reads.
+            mac_path = _container_to_mac_path(
+                file_path, lexicon_library_path, lexicon_input_path, downloads_dir
+            )
 
             # Search Lexicon for the track by file path
             lexicon_track_id = _lexicon_find_or_import(client, mac_path, track, db_path=db_path)
