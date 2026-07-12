@@ -46,6 +46,7 @@ from tasks.helpers import (
     get_config,
     get_db,
     log_activity,
+    set_config,
     update_track,
 )
 from tasks.lossless_verify import verify_lossless
@@ -354,12 +355,32 @@ def _relocate_in_lexicon(db_path: str, track: dict, dest: str) -> bool:
 
     try:
         with httpx.Client(base_url=lexicon_api, timeout=60) as client:
-            client.patch(
+            resp = client.patch(
                 "/v1/track",
                 json={"id": int(lexicon_track_id), "edits": {"location": mac_path}},
             )
+            # Lexicon's v1 API rejects a ``location`` edit outright (HTTP 400
+            # "'location' is not editable") and silently ignores unknown edit keys —
+            # verified live against the running library. There is no /relocate or
+            # /relink endpoint either. So an in-place file swap is not currently
+            # expressible through the API. Detect that explicitly, persist a capability
+            # flag so the re-check loop stops wastefully re-sourcing lossless copies it
+            # cannot install, and fail closed (keep the lossy — never a false upgrade).
+            body = (resp.text or "").lower()
+            if resp.status_code >= 400 or "not editable" in body:
+                set_config(db_path, "lexicon_relocate_capable", "0")
+                log.warning(
+                    "lossless_upgrade: Lexicon API cannot relocate track %s in place "
+                    "(HTTP %s: %s) — no editable location / relocate endpoint. Keeping "
+                    "lossy; will not re-source until Lexicon exposes a relocate path.",
+                    lexicon_track_id, resp.status_code, (resp.text or "")[:120],
+                )
+                return False
             # Confirm the relocate actually took effect before trusting it.
-            return _lexicon_location_is(client, lexicon_track_id, mac_path)
+            if _lexicon_location_is(client, lexicon_track_id, mac_path):
+                set_config(db_path, "lexicon_relocate_capable", "1")
+                return True
+            return False
     except Exception as e:  # noqa: BLE001
         log.info("lexicon relocate failed for track id %s: %s", lexicon_track_id, e)
         return False
@@ -390,13 +411,23 @@ def _lexicon_location_is(client, lexicon_track_id: str, mac_path: str) -> bool:
 
 
 def _iter_tracks(data):
-    """Yield track dicts from the various Lexicon response envelope shapes."""
+    """Yield track dicts from the various Lexicon response envelope shapes.
+
+    Live Lexicon (v1) single-track read ``GET /v1/track?id=<n>`` returns the SINGULAR
+    envelope ``{"data": {"track": {...}}}`` — verified against the running library. The
+    search endpoint returns the PLURAL ``{"data": {"tracks": [...]}}``. Both are handled
+    here so the relocate read-back can confirm a track id/location either way.
+    """
     if isinstance(data, dict):
         d = data.get("data", data)
         if isinstance(d, dict):
             tracks = d.get("tracks")
             if isinstance(tracks, list):
                 yield from tracks
+                return
+            single = d.get("track")
+            if isinstance(single, dict):
+                yield single
                 return
             if d.get("id") is not None:
                 yield d
@@ -414,12 +445,70 @@ def _safe_remove(path: str | None) -> None:
         pass
 
 
+# ----------------------------------------------------------------------- capability
+def _lexicon_can_relocate(db_path: str, track: dict) -> bool:
+    """Cheap probe: does this Lexicon accept a track ``location`` edit at all?
+
+    Lexicon v1 currently answers ``PATCH /v1/track {edits:{location}}`` with HTTP 400
+    "'location' is not editable" (verified live), and exposes no /relocate endpoint — so
+    an in-place lossless swap is impossible and there is no point downloading a
+    replacement we cannot install. This probe does a NO-OP location edit (the track's own
+    current location) so it costs one GET + one PATCH and mutates nothing: HTTP 200 means
+    the capability exists, HTTP 400 / "not editable" means it does not. The result is
+    cached in ``lexicon_relocate_capable`` and the probe naturally re-enables the feature
+    the day Lexicon starts accepting location edits.
+    """
+    lexicon_track_id = str(track.get("lexicon_track_id") or "").strip()
+    if not lexicon_track_id or lexicon_track_id.lower() in ("none", "null"):
+        return False
+    try:
+        import httpx
+
+        from tasks.helpers import LEXICON_API_URL
+    except Exception:  # noqa: BLE001
+        return False
+    lexicon_api = get_config(db_path, "lexicon_api_url") or LEXICON_API_URL
+    try:
+        with httpx.Client(base_url=lexicon_api, timeout=30) as client:
+            r = client.get("/v1/track", params={"id": int(lexicon_track_id)})
+            if r.status_code != 200:
+                return False
+            current = None
+            for t in _iter_tracks(r.json()):
+                if str(t.get("id")) == lexicon_track_id:
+                    current = t.get("location")
+                    break
+            if not current:
+                return False
+            pr = client.patch(
+                "/v1/track",
+                json={"id": int(lexicon_track_id), "edits": {"location": current}},
+            )
+            capable = pr.status_code < 400 and "not editable" not in (pr.text or "").lower()
+            set_config(db_path, "lexicon_relocate_capable", "1" if capable else "0")
+            return capable
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ----------------------------------------------------------------------- orchestration
 def _attempt_upgrade(db_path: str, track: dict) -> str:
-    """Re-check one lossy-kept track. Returns 'upgraded' | 'staged' | 'none'."""
+    """Re-check one lossy-kept track. Returns 'upgraded' | 'staged' | 'none' | 'blocked'."""
     track_id = track["id"]
     artist = track.get("artist") or ""
     title = track.get("title") or ""
+
+    # Do not burn Tidal/Soulseek bandwidth sourcing a lossless copy we cannot install:
+    # if Lexicon cannot relocate a track's file in place, keep the lossy and move on. The
+    # probe re-enables automatically if Lexicon ever gains an editable location.
+    if not _lexicon_can_relocate(db_path, track):
+        _touch_check(db_path, track_id)
+        log.info(
+            "lossless_upgrade: Lexicon relocate unavailable; kept lossy for %s - %s "
+            "(deferred, not re-sourced)",
+            artist, title,
+        )
+        return "blocked"
 
     sourced = _source_verified_lossless(db_path, track)
     if not sourced:
