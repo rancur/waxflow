@@ -120,15 +120,40 @@ def _finalize(db_path: str, fa_id: int, status: str, result_count: int = 0,
         )
 
 
+def _supersede_stale_queue(db_path: str) -> int:
+    """Finalise queued rows whose track has since LEFT the 'error' holding stage.
+
+    A track is parked at 'error' when queued for Soulseek. If something else (e.g. the
+    self-heal re-queue, or the normal pipeline) has since moved it on (complete /
+    verifying / organizing), the fallback must NOT fight that state machine — mark the
+    queued row 'superseded' so it is not reprocessed. Returns the number superseded.
+    """
+    with get_db(db_path) as conn:
+        cur = conn.execute(
+            """UPDATE fallback_attempts
+               SET status = 'superseded', attempted_at = datetime('now')
+               WHERE source = 'soulseek' AND status = 'queued'
+                 AND track_id IN (SELECT id FROM tracks WHERE pipeline_stage <> 'error')"""
+        )
+        return cur.rowcount
+
+
 def _queued_tracks(db_path: str, limit: int) -> list[dict]:
-    """Tracks with a queued Soulseek fallback row, oldest first (5s settle guard)."""
+    """Tracks genuinely parked at 'error' awaiting the Soulseek fallback, oldest first.
+
+    Only 'error'-stage tracks are eligible: that is exactly the holding state the
+    routing sets when it queues a track. A queued track that has moved to another
+    stage is handled by _supersede_stale_queue (never reprocessed here). The 5s
+    settle guard avoids racing a just-updated row.
+    """
     with get_db(db_path) as conn:
         rows = conn.execute(
             """SELECT t.*, fa.id AS _fa_id
                FROM tracks t
                JOIN fallback_attempts fa
                  ON fa.track_id = t.id AND fa.source = 'soulseek' AND fa.status = 'queued'
-               WHERE (t.updated_at IS NULL OR t.updated_at < datetime('now', '-5 seconds'))
+               WHERE t.pipeline_stage = 'error'
+                 AND (t.updated_at IS NULL OR t.updated_at < datetime('now', '-5 seconds'))
                GROUP BY t.id
                ORDER BY t.created_at ASC
                LIMIT ?""",
@@ -319,6 +344,9 @@ def process_soulseek_fallback(db_path: str) -> None:
     # scan mode is read-only; never source/import in scan mode
     if (get_config(db_path, "sync_mode") or "scan") == "scan":
         return
+    superseded = _supersede_stale_queue(db_path)
+    if superseded:
+        log.info("Soulseek: superseded %d queued row(s) whose track left 'error'", superseded)
     tracks = _queued_tracks(db_path, BATCH)
     if not tracks:
         return

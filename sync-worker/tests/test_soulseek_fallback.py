@@ -171,6 +171,24 @@ class TestConstraintSafeQueue(unittest.TestCase):
         self.assertEqual(queued[0]["id"], 7)
         self.assertIn("_fa_id", queued[0])
 
+    def test_only_error_stage_tracks_are_eligible(self):
+        # queued track that is genuinely parked at 'error' IS eligible
+        sf.queue_for_fallback(self.db, 7, "Tidal not lossless")
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE tracks SET updated_at='2000-01-01' WHERE id=7"); conn.commit(); conn.close()
+        self.assertEqual([t["id"] for t in sf._queued_tracks(self.db, 10)], [7])
+        # if something moves it off 'error' (e.g. self-heal imported it), it is NOT
+        # reprocessed and its queued row is superseded (don't fight the state machine)
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE tracks SET pipeline_stage='complete' WHERE id=7"); conn.commit(); conn.close()
+        self.assertEqual(sf._queued_tracks(self.db, 10), [])
+        n = sf._supersede_stale_queue(self.db)
+        self.assertEqual(n, 1)
+        conn = sqlite3.connect(self.db)
+        st = conn.execute("SELECT status FROM fallback_attempts WHERE track_id=7").fetchone()[0]
+        conn.close()
+        self.assertEqual(st, "superseded")
+
     def test_soulseek_fallback_is_not_an_allowed_stage(self):
         # Guard the assumption behind the queue model: if someone adds the stage to
         # the constraint later, this test flags that the queue model can be simplified.
