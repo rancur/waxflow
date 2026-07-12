@@ -2011,6 +2011,31 @@ def _process_organizing(db_path: str):
     if sync_mode == "scan":
         return  # Scan mode: never write to Lexicon
 
+    # Phase 3 — sleep-tolerant offline queue (gated by offline_queue_enabled,
+    # default OFF -> inert until the batched deploy). When enabled we consult
+    # Mac/Lexicon availability BEFORE touching Lexicon:
+    #   * unavailable (Mac asleep or Lexicon quit) -> ENQUEUE the organizing tracks
+    #     into import_queue and park them in 'organizing' (no error flood, no lost
+    #     work). Everything non-Lexicon (poll/match/download) keeps running.
+    #   * available -> DRAIN any queued items first (idempotent, oldest-first) so a
+    #     wake catches the backlog up, then fall through to normal processing.
+    try:
+        from tasks.offline_queue import (
+            is_offline_queue_enabled, enqueue_organizing, drain,
+        )
+        if is_offline_queue_enabled(db_path):
+            from tasks.mac_availability import probe
+            avail = probe(db_path)
+            if not avail.lexicon_available:
+                enqueue_organizing(db_path, held_reason=avail.state)
+                log.info("organizing: Lexicon unavailable (%s) — work held in import_queue", avail.state)
+                return
+            # Lexicon is back — drain the durable queue through the safe path first.
+            drain(db_path, _organize_track)
+    except Exception as e:
+        # Never let the offline-queue layer break the normal path; fall through.
+        log.warning("offline_queue layer error (continuing on normal path): %s", e)
+
     tracks = get_tracks_by_stage(db_path, "organizing", limit=BATCH_ORGANIZE)
     synced_count = 0
     for track in tracks:

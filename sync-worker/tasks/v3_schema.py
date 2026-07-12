@@ -54,6 +54,15 @@ V3_TRACK_COLUMNS = (
     ("wanted_id", "INTEGER"),
 )
 
+# Nullable columns added to the existing ``import_queue`` table for Phase 3
+# (sleep-tolerant drain). A guarded, nullable ADD COLUMN is cheap + non-locking and
+# needs no table rebuild — so a DB whose import_queue predates Phase 3 gains the
+# backoff cursor without a migration. next_retry_at holds the earliest time a failed
+# queued item may be re-attempted (exponential backoff).
+V3_IMPORT_QUEUE_COLUMNS = (
+    ("next_retry_at", "TEXT"),
+)
+
 # All CREATE-IF-NOT-EXISTS DDL. Kept in one script so it applies atomically and
 # reads as the canonical shape of the v3 tables. Mirrored verbatim in init_db.py.
 _V3_DDL = """
@@ -121,6 +130,7 @@ CREATE TABLE IF NOT EXISTS import_queue (
     state TEXT NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
     held_reason TEXT,
+    next_retry_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -192,3 +202,12 @@ def ensure_v3_schema(db_path: str) -> None:
             if name not in cols:
                 conn.execute(f"ALTER TABLE tracks ADD COLUMN {name} {decl}")
                 log.info("schema: added tracks.%s", name)
+
+    # Guarded, nullable ADD COLUMNs on import_queue (Phase 3 backoff cursor). Same
+    # cheap/non-locking additive pattern; a no-op once present.
+    with get_db(db_path) as conn:
+        iq_cols = {r[1] for r in conn.execute("PRAGMA table_info(import_queue)").fetchall()}
+        for name, decl in V3_IMPORT_QUEUE_COLUMNS:
+            if name not in iq_cols:
+                conn.execute(f"ALTER TABLE import_queue ADD COLUMN {name} {decl}")
+                log.info("schema: added import_queue.%s", name)

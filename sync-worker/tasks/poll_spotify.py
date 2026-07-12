@@ -6,6 +6,8 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
+from spotipy.exceptions import SpotifyException
+
 from tasks.helpers import (
     get_config,
     get_db,
@@ -49,6 +51,39 @@ def _with_db_retry(db_path: str, func):
         raise last_exc
 
 
+# Rate-limit safety for the tighter (real-time) poll. Spotify has NO push/webhook
+# for saved/liked tracks, so "real-time" is a short-interval poll; a short interval
+# means we must respect 429s cleanly instead of hammering. On HTTP 429 Spotify
+# returns a Retry-After header (seconds) — honour it, with a small bounded number of
+# retries and a sane cap, so a rate-limit blip pauses the walk instead of erroring it.
+_RATELIMIT_MAX_RETRIES = 3
+_RATELIMIT_MAX_SLEEP = 30
+
+
+def _saved_tracks_with_ratelimit(sp, *, limit: int, offset: int):
+    """current_user_saved_tracks with Retry-After-aware 429 backoff."""
+    for attempt in range(_RATELIMIT_MAX_RETRIES + 1):
+        try:
+            return sp.current_user_saved_tracks(limit=limit, offset=offset)
+        except SpotifyException as e:
+            status = getattr(e, "http_status", None)
+            if status == 429 and attempt < _RATELIMIT_MAX_RETRIES:
+                retry_after = 1
+                try:
+                    hdrs = getattr(e, "headers", None) or {}
+                    retry_after = int(hdrs.get("Retry-After", 1))
+                except (TypeError, ValueError):
+                    retry_after = 1
+                sleep_for = min(_RATELIMIT_MAX_SLEEP, max(1, retry_after))
+                log.warning(
+                    "Spotify 429 rate-limited (offset %d); sleeping %ds (Retry-After=%s)",
+                    offset, sleep_for, retry_after,
+                )
+                time.sleep(sleep_for)
+                continue
+            raise
+
+
 def _poll(db_path: str):
     """Synchronous poll implementation (runs in thread)."""
     sp = get_spotify_client(db_path)
@@ -72,7 +107,21 @@ def _poll(db_path: str):
 
     new_count = 0
     scanned = 0
-    limit = 50
+    # Change-detection page size. A FULL backfill walks the whole history, so it
+    # uses big pages for throughput. An INCREMENTAL poll only needs to see the
+    # newest few likes since last_poll — liked songs come back newest-first and the
+    # loop breaks at the first track at/before last_poll — so a small page makes a
+    # "nothing new" tight poll cost a SINGLE tiny API call. That is what lets the
+    # poll interval drop to ~30-60s (real-time flow-on-like) without hammering the
+    # API or burning rate limit. Configurable via app_config.spotify_incremental_page_size.
+    if backfill:
+        limit = 50
+    else:
+        try:
+            limit = int(get_config(db_path, "spotify_incremental_page_size") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(50, limit))
     done = False
     # True only when the walk reaches the natural end of the library. A backfill
     # that exits early on a Spotify API error must NOT clear the one-shot flag —
@@ -102,7 +151,7 @@ def _poll(db_path: str):
 
     while not done:
         try:
-            results = sp.current_user_saved_tracks(limit=limit, offset=offset)
+            results = _saved_tracks_with_ratelimit(sp, limit=limit, offset=offset)
         except Exception as e:
             log.error("Spotify API error at offset %d: %s", offset, e)
             # If it's an auth error, try to note it

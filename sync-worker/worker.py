@@ -25,6 +25,7 @@ from tasks.create_playlists import create_playlists
 from tasks.lexicon_health import lexicon_health_check
 from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.plex_sync import plex_sync
+from tasks.mac_availability import sample_availability
 from tasks.v3_schema import ensure_v3_schema
 from tasks.helpers import get_config, get_db
 
@@ -101,6 +102,15 @@ class HealthHandler(BaseHTTPRequestHandler):
                         "SELECT pipeline_stage, COUNT(*) FROM tracks GROUP BY pipeline_stage"
                     ).fetchall()
                     stages = {r[0]: r[1] for r in rows}
+                    # Phase 3 offline-queue heartbeat: queued / drained / errored.
+                    try:
+                        qrows = conn.execute(
+                            "SELECT state, COUNT(*) FROM import_queue GROUP BY state"
+                        ).fetchall()
+                        if qrows:
+                            stages["import_queue"] = {r[0]: r[1] for r in qrows}
+                    except Exception:
+                        pass
             else:
                 stages = {}
         except Exception:
@@ -264,6 +274,15 @@ async def main():
         asyncio.create_task(
             run_task("plex_sync", plex_sync,
                      interval_key="plex_sync_interval_seconds", default_interval=1800)
+        ),
+        # Phase 3 — Mac/Lexicon availability sampler. Cheap, read-only network probe
+        # that records a rolling mac_availability history and distinguishes
+        # "Mac asleep" from "Lexicon quit". Pure observability (never enqueues/holds/
+        # drains), so it is safe to run regardless of the offline_queue_enabled flag;
+        # the offline queue in process_pipeline consults live availability itself.
+        asyncio.create_task(
+            run_task("mac_availability", sample_availability,
+                     interval_key="mac_availability_interval_seconds", default_interval=60)
         ),
     ]
 
