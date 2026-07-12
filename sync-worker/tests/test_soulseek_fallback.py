@@ -65,6 +65,32 @@ class TestRankCandidates(unittest.TestCase):
         self.assertEqual(cands[0]["username"], "free_fast")   # free + fastest first
         self.assertEqual(cands[-1]["username"], "busy")       # no free slot last
 
+    def test_relevance_beats_speed_on_generic_title(self):
+        # generic title "The Wave": a fast peer with a WRONG file must NOT outrank a
+        # slower peer whose filename matches the artist+title.
+        dur = 210_000
+        responses = [
+            self._resp("fast_wrong", "va\\Various - The Micro Draft Wave.flac", 25_000_000,
+                       free=True, queue=0, speed=99999),
+            self._resp("slow_right", "s\\Sosa - The Wave.flac", 30_000_000,
+                       free=True, queue=0, speed=10),
+        ]
+        cands = sf.rank_candidates(responses, dur, artist="SOSA", title="The Wave")
+        # artist ("sosa") appears only in slow_right -> wrong-artist "wave" file is
+        # filtered out entirely (correctness over speed).
+        self.assertEqual([c["username"] for c in cands], ["slow_right"])
+        self.assertTrue(cands[0]["artist_match"])
+        self.assertEqual(cands[0]["relevance"], 3)             # artist(*2) + title(1)
+
+    def test_pure_junk_dropped_when_relevant_exists(self):
+        dur = 210_000
+        responses = [
+            self._resp("junk", "x\\Completely Unrelated Song.flac", 25_000_000, speed=99999),
+            self._resp("right", "s\\Sosa - The Wave.flac", 30_000_000, speed=10),
+        ]
+        cands = sf.rank_candidates(responses, dur, artist="SOSA", title="The Wave")
+        self.assertEqual([c["username"] for c in cands], ["right"])  # zero-token junk dropped
+
 
 class TestQueries(unittest.TestCase):
     def test_build_queries_variants(self):

@@ -137,7 +137,7 @@ def spectral_cutoff(path: str, sample_rate: int, cliff_db: float = DEFAULT_CLIFF
 def verify_lossless(
     path: str,
     expected_duration_ms: int | None = None,
-    duration_tolerance_s: float = 8.0,
+    duration_tolerance_s: float = 4.0,
     cliff_db: float = DEFAULT_CLIFF_DB,
 ) -> dict:
     """Run the full gate. Returns a dict with 'passed' (bool), 'reasons' (list),
