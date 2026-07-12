@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.7.0 — Lossy-only auto-upgrade re-check
+
+Some liked tracks are kept as a **lossy** copy because, at import time, no genuinely
+lossless copy existed anywhere — Tidal offered only lossy AAC and Soulseek had no FLAC
+(e.g. "Mob Tactics - Labyrinth", "Annix x Mefjus - Shai Hulud VIP"). Will's standard is
+lossless everywhere it is obtainable, so rather than leave those lossy forever, WaxFlow
+now keeps the lossy as a placeholder and periodically **re-checks** whether a lossless
+copy has since appeared — swapping it in automatically if one has.
+
+### Added
+- **Marker + detection** (`tasks/lossless_upgrade.py`): two lightweight columns on
+  `tracks` — `lossless_upgrade_pending` (0/1) and `last_upgrade_check` (ISO ts), added
+  idempotently (`ALTER TABLE ADD COLUMN`, no table rebuild, mirrored in `init_db.py`).
+  `mark_pending()` conservatively flags `complete` tracks that are **not** genuinely
+  lossless (verified-lossy, or a plainly lossy file extension). A track whose file looks
+  lossless, or is `is_protected`, is never marked.
+- **Throttled periodic re-check** wired into the worker loop: each track is re-checked at
+  most once every N days (default 7) and each cycle processes a small bounded batch
+  (default 2). Off in `scan` mode and behind `lossless_upgrade_enabled`. NAS-friendly by
+  design (slow loop + per-track throttle + tiny batch).
+- **Re-source through the existing gate:** a due track is re-attempted through a fresh
+  Tidal-lossless search+download and then the Soulseek fallback, **every candidate gated
+  by `lossless_verify`** (same fake-FLAC/lossy protection as the live pipeline).
+- **In-place swap, dedup-safe:** on a verified-lossless source, the **existing** Lexicon
+  track is relocated to the new file in place (same track id — no new track, so no
+  duplicate), self-verified by reading the location back, then the marker is cleared.
+
+### Guarantee
+- **Never leaves Will with neither:** a lossy track is never removed or demoted unless a
+  genuinely-lossless replacement has been sourced, verified, **and** confirmably installed
+  in Lexicon. If nothing lossless is found, or the relocate can't be confirmed, the lossy
+  is kept untouched and the freshly-sourced copy is discarded — no false "upgraded" state.
+- New tests cover the marker, the throttle, the swap-on-lossless-found path, and the
+  never-remove-without-replacement guard (14 tests).
+
+> Committed but **not** deployed to the running image (NAS was under HyperBackup + a
+> backfill was finishing). Bakes in at the next coordinated `docker compose build`.
+
 ## 2.6.2 — Downloaded tracks actually reach Lexicon (Synology ACL + SMB delivery)
 
 Fixes the show-critical bug where freshly-**downloaded** tracks never reached the

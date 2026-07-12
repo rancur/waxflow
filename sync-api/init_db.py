@@ -47,6 +47,11 @@ def init():
             pipeline_error TEXT,
             is_protected INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
+            -- Lossy-only auto-upgrade re-check markers (see tasks/lossless_upgrade.py):
+            -- a track kept lossy because no lossless existed at import time is flagged
+            -- pending and periodically re-sourced; last_upgrade_check throttles the pass.
+            lossless_upgrade_pending INTEGER NOT NULL DEFAULT 0,
+            last_upgrade_check TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -171,7 +176,12 @@ def init():
             ('auto_playlists_interval_seconds', '86400'),
             ('auto_playlists_last_run', ''),
             ('auto_playlists_created_ids', '{}'),
-            ('auto_playlists_rebuild', '0');
+            ('auto_playlists_rebuild', '0'),
+            -- Lossy-only auto-upgrade re-check (tasks/lossless_upgrade.py)
+            ('lossless_upgrade_enabled', '1'),
+            ('lossless_upgrade_interval_days', '7'),
+            ('lossless_upgrade_batch', '2'),
+            ('lossless_upgrade_loop_interval_seconds', '21600');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed
@@ -409,6 +419,21 @@ def init():
                 print(f"WARNING: {len(fk_violations)} FK issue(s) after tracks rebuild: {fk_violations[:5]}")
             conn.execute("PRAGMA foreign_keys=ON")
             print("Migration complete.")
+
+    # Migration: add the lossy-only auto-upgrade marker columns to an existing DB.
+    # Nullable/defaulted ADD COLUMN needs no table rebuild and is idempotent (guarded
+    # by table_info). Mirrors tasks/lossless_upgrade.ensure_schema so both the API-side
+    # init and the worker converge on the same schema.
+    with get_db() as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracks)").fetchall()}
+        if "lossless_upgrade_pending" not in cols:
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN lossless_upgrade_pending INTEGER NOT NULL DEFAULT 0"
+            )
+            print("Added tracks.lossless_upgrade_pending column.")
+        if "last_upgrade_check" not in cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN last_upgrade_check TEXT")
+            print("Added tracks.last_upgrade_check column.")
 
     print("Database initialized successfully.")
 
