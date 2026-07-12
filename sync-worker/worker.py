@@ -24,6 +24,8 @@ from tasks.analyze_tracks import analyze_tracks
 from tasks.create_playlists import create_playlists
 from tasks.lexicon_health import lexicon_health_check
 from tasks.lossless_upgrade import run_lossless_upgrade
+from tasks.plex_sync import plex_sync
+from tasks.v3_schema import ensure_v3_schema
 from tasks.helpers import get_config, get_db
 
 DB_PATH = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
@@ -195,6 +197,14 @@ async def main():
 
     log.info("Database found. Starting task loops.")
 
+    # Apply the additive v3 schema (CREATE TABLE IF NOT EXISTS / guarded ADD
+    # COLUMN). Idempotent + non-locking; needed so the Plex mirror's plex_sync
+    # cache table exists. Safe to run on every start.
+    try:
+        await asyncio.to_thread(ensure_v3_schema, DB_PATH)
+    except Exception as e:
+        log.warning("ensure_v3_schema failed (continuing): %s", e)
+
     # Launch all task loops concurrently
     tasks = [
         asyncio.create_task(
@@ -244,6 +254,16 @@ async def main():
             # I/O off the event loop.
             run_task("lossless_upgrade", lambda db: asyncio.to_thread(run_lossless_upgrade, db),
                      interval_key="lossless_upgrade_loop_interval_seconds", default_interval=21600)
+        ),
+        # Plex / Plexamp mirror (v3 Feature 4). Reconciles each "MM. Month YYYY"
+        # monthly playlist into a Plex audio playlist so they show in Plexamp.
+        # Gated by the plex_sync_enabled app_config flag (default off) and skips
+        # cleanly when unconfigured, so it is a no-op until token/section/url are
+        # seeded. READ-ONLY on audio files; only writes Plex playlists + the
+        # plex_sync cache. Idempotent.
+        asyncio.create_task(
+            run_task("plex_sync", plex_sync,
+                     interval_key="plex_sync_interval_seconds", default_interval=1800)
         ),
     ]
 
