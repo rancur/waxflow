@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased — Phase 3: Sleep-tolerant sync + real-time flow-on-like
+
+Makes the sync survive the Lexicon Mac going to sleep, and cuts like→Lexicon latency
+from the 300s poll to minutes. Reuses the v3 scaffold tables (`mac_availability`,
+`import_queue`) — no schema rebuild. All new behaviour is behind default-OFF config
+flags, so it is INERT until the batched deploy flips it on. Non-destructive: only
+enqueues + applies via the existing safe organize path (incl. the Phase 2
+direct-write when enabled); never deletes.
+
+### Added — `tasks/mac_availability.py` (availability detector)
+- One detector for "is it safe to push Lexicon work right now", recording rolling
+  samples into `mac_availability`. Distinguishes **asleep** (Mac unreachable — TCP
+  reachability port closed) from **lexicon_down** (Mac up, TCP open, but Lexicon API
+  not answering) from **available** (API 200). Reuses the canary's `/v1/playlists`
+  probe. Registered as a cheap 60s worker sampler (pure observability).
+
+### Added — `tasks/offline_queue.py` (durable offline import queue)
+- When Lexicon is unavailable, organizing tracks are ENQUEUED into `import_queue`
+  (durable in sync.db) and left parked in `organizing` — the NAS side (poll/match/
+  download) keeps running; no error flood, no lost work. On wake, `drain()` applies
+  each item oldest-first through the safe `_organize_track` path, idempotently
+  (playlist membership check / INSERT OR IGNORE / diff-guarded comment ⇒ no
+  double-apply), with exponential backoff on failure and a clean stop if Lexicon is
+  lost mid-drain. Survives worker restarts (queue is on disk). Gated by
+  `offline_queue_enabled` (default off). Heartbeat counts on `/stats`.
+
+### Changed — `tasks/poll_spotify.py` (real-time flow-on-like)
+- Spotify's Web API has **no push/webhook for saved/liked tracks** (confirmed), so
+  "real-time" = a tighter poll with cheap change-detection: incremental polls use a
+  small configurable page (`spotify_incremental_page_size`, default 20) and break at
+  the newest-first cutoff, so a "nothing new" tight poll costs a **single tiny API
+  call**. Interval stays configurable (`spotify_poll_interval_seconds`) — drop to
+  ~30-60s at deploy for minutes-not-hours latency. Added Retry-After-aware 429
+  backoff so a short interval can't hammer the API. Full backfill still uses big pages.
+
+### Schema — additive only
+- `import_queue.next_retry_at` (nullable) added via guarded ADD COLUMN in
+  `v3_schema.ensure_v3_schema` + mirrored in `sync-api/init_db.py`. Cheap, non-locking,
+  idempotent — no table rebuild.
+
+### Tests
+- `test_mac_availability.py`, `test_offline_queue.py`, `test_poll_fastpoll.py` cover
+  asleep/lexicon-down/available detection, enqueue/drain idempotency, restart-survival,
+  backoff + mid-drain loss, and tighter-poll change-detection + 429 backoff.
+
 ## Unreleased — Phase 0: REAL Lexicon library-DB backup (the safety net)
 
 Closes the scariest gap in the whole system: Will's entire DJ library — tracks,

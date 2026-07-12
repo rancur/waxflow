@@ -509,6 +509,7 @@ def init():
             state TEXT NOT NULL DEFAULT 'pending',
             attempts INTEGER NOT NULL DEFAULT 0,
             held_reason TEXT,
+            next_retry_at TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -559,6 +560,10 @@ def init():
         if "wanted_id" not in cols:
             conn.execute("ALTER TABLE tracks ADD COLUMN wanted_id INTEGER")
             print("Added tracks.wanted_id column.")
+        iq_cols = {r[1] for r in conn.execute("PRAGMA table_info(import_queue)").fetchall()}
+        if "next_retry_at" not in iq_cols:
+            conn.execute("ALTER TABLE import_queue ADD COLUMN next_retry_at TEXT")
+            print("Added import_queue.next_retry_at column.")
 
     print("Database initialized successfully.")
 
