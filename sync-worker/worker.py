@@ -23,6 +23,7 @@ from tasks.index_library import index_library
 from tasks.analyze_tracks import analyze_tracks
 from tasks.create_playlists import create_playlists
 from tasks.lexicon_health import lexicon_health_check
+from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.helpers import get_config, get_db
 
 DB_PATH = os.environ.get("SLS_DB_PATH", "/app/data/sync.db")
@@ -229,6 +230,16 @@ async def main():
         asyncio.create_task(
             run_task("lexicon_health_check", lexicon_health_check,
                      interval_key="lexicon_canary_interval_seconds", default_interval=900)
+        ),
+        # Lossy-only auto-upgrade re-check: tracks kept as lossy because no lossless
+        # existed at import time are periodically re-sourced through the Tidal +
+        # Soulseek + lossless_verify gate and swapped to lossless if one appears. The
+        # task runs on a slow loop and internally throttles each track to ~weekly and
+        # a tiny batch, so it stays gentle on the NAS. Never removes a lossy without a
+        # verified-lossless replacement.
+        asyncio.create_task(
+            run_task("lossless_upgrade", run_lossless_upgrade,
+                     interval_key="lossless_upgrade_loop_interval_seconds", default_interval=21600)
         ),
     ]
 
