@@ -1259,6 +1259,15 @@ def _process_downloading(db_path: str):
     if sync_mode == "scan":
         return  # Scan mode: no downloads
 
+    # Operational throttle (full mode only): pause NEW downloads without going scan-mode
+    # (scan also disables organizing, the Lexicon-linking stage). A single Tidal/Soulseek
+    # download costs ~40s and up to BATCH_DOWNLOAD run per cycle, which head-of-line-blocks
+    # the fast library-LINK path. During a bulk parity drive we pause downloads so the
+    # ~thousands of already-owned (library-matched) tracks link at full speed, then unpause
+    # to source the genuine-new tail. Off by default; set app_config downloads_paused=1.
+    if str(get_config(db_path, "downloads_paused") or "0").strip() in ("1", "true", "yes", "on"):
+        return
+
     # When tiddl is available, use it directly (primary path)
     if _TIDDL_AVAILABLE:
         _ensure_tidal_auth()
