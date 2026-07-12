@@ -1,6 +1,14 @@
 #!/bin/bash
-# Backup Lexicon DJ database before sync operations
-# Called by the sync-worker before any Lexicon writes
+# Backup Lexicon DJ database before sync operations (container-side fast-path).
+#
+# NOTE: The Lexicon DB lives on Will's MAC (~/Library/Application Support/
+# lexicon/main.db), which this container CANNOT reach — so in normal operation
+# this script finds no local DB and is a no-op. The REAL, verified, two-location
+# backup is scripts/backup-lexicon-db.sh, which runs on the ops Mac (SSHes the
+# Lexicon Mac for a consistent sqlite3 online backup + pushes to the NAS). Run
+# THAT before any delicate library operation. This script only helps in the
+# unusual case where the DB is bind-mounted into the container via
+# LEXICON_DB_PATH.
 
 set -euo pipefail
 
