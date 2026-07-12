@@ -330,6 +330,15 @@ export default function MatchingPage() {
                   />
                 </div>
 
+                {/* Side-by-side audio preview — A/B the Spotify track vs. the matched file */}
+                <AudioPreview
+                  spotifyId={track.spotify_id}
+                  spotifyArtist={c.spotify_artist}
+                  spotifyTitle={c.spotify_title}
+                  trackId={trackId}
+                  filePath={c.file_path}
+                />
+
                 {/* Side-by-side comparison */}
                 <div className="grid md:grid-cols-2 gap-4">
                   {/* Spotify side */}
@@ -448,6 +457,84 @@ export default function MatchingPage() {
           })}
         </div>
       )}
+    </div>
+  )
+}
+
+function AudioPreview({
+  spotifyId,
+  spotifyArtist,
+  spotifyTitle,
+  trackId,
+  filePath,
+}: {
+  spotifyId?: string
+  spotifyArtist?: string
+  spotifyTitle?: string
+  trackId?: number
+  filePath?: string
+}) {
+  const [fileError, setFileError] = useState(false)
+  const spotifyOpenUrl = spotifyId
+    ? `https://open.spotify.com/track/${spotifyId}`
+    : `https://open.spotify.com/search/${encodeURIComponent(`${spotifyArtist || ''} ${spotifyTitle || ''}`.trim())}`
+
+  return (
+    <div className="grid md:grid-cols-2 gap-4 mb-5">
+      {/* Spotify player */}
+      <div className="bg-slate-800/40 rounded-lg p-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-green-500"></span>
+            <span className="text-xs font-semibold text-green-400 uppercase tracking-wider">Spotify</span>
+          </div>
+          <a
+            href={spotifyOpenUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-slate-500 hover:text-green-400 transition-colors"
+          >
+            Open in Spotify {'↗'}
+          </a>
+        </div>
+        {spotifyId ? (
+          <iframe
+            title={`Spotify preview ${spotifyId}`}
+            src={`https://open.spotify.com/embed/track/${spotifyId}`}
+            width="100%"
+            height="80"
+            frameBorder="0"
+            allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+            loading="lazy"
+            className="rounded-md"
+          />
+        ) : (
+          <p className="text-xs text-slate-500 py-4 text-center">No Spotify track id available</p>
+        )}
+      </div>
+
+      {/* Local file player */}
+      <div className="bg-slate-800/40 rounded-lg p-3">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
+          <span className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Your file</span>
+        </div>
+        {filePath && trackId != null && !fileError ? (
+          <audio
+            controls
+            preload="none"
+            className="w-full mt-4"
+            src={`/api/matching/${trackId}/file`}
+            onError={() => setFileError(true)}
+          >
+            Your browser does not support audio playback.
+          </audio>
+        ) : (
+          <p className="text-xs text-slate-500 py-4 text-center">
+            {filePath ? 'File could not be played (missing or unsupported)' : 'No matched file on disk'}
+          </p>
+        )}
+      </div>
     </div>
   )
 }

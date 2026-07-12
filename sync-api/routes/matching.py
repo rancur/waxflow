@@ -1,11 +1,19 @@
 import json
+import logging
+import mimetypes
+import os
 import re
 import unicodedata
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from db import get_db
 from models import TrackOut, ManualMatchRequest
 from routes.tracks import row_to_track
+
+logger = logging.getLogger("waxflow.matching")
+
+MUSIC_ROOT = os.path.realpath(os.environ.get("MUSIC_LIBRARY_PATH", "/music"))
 
 router = APIRouter(prefix="/api/matching", tags=["matching"])
 
@@ -79,9 +87,21 @@ async def review_matches():
             }
 
             tracks = []
+            skipped = 0
             for r in rows:
-                t = row_to_track(r)
-                track_out = TrackOut(**t)
+                try:
+                    t = row_to_track(r)
+                    track_out = TrackOut(**t)
+                except Exception as row_err:
+                    # A single malformed row (e.g. a NULL in a required column or a
+                    # serialization error) must never 500 the whole review list.
+                    skipped += 1
+                    try:
+                        bad_id = r["id"]
+                    except Exception:
+                        bad_id = "?"
+                    logger.warning("review_matches: skipping unserializable track id=%s: %s", bad_id, row_err)
+                    continue
 
                 # Compute duration difference
                 spotify_duration_s = round((t.get("duration_ms") or 0) / 1000.0, 1)
@@ -134,9 +154,63 @@ async def review_matches():
                 }
                 tracks.append(comparison)
 
-            return {"tracks": tracks, "total": len(tracks), "stats": stats}
+            return {"tracks": tracks, "total": len(tracks), "stats": stats, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Extensions we allow the browser <audio> element to stream, mapped to a
+# reliable content-type (mimetypes can be unset for flac on some platforms).
+_AUDIO_CONTENT_TYPES = {
+    ".flac": "audio/flac",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".wav": "audio/wav",
+    ".aiff": "audio/aiff",
+    ".aif": "audio/aiff",
+    ".wma": "audio/x-ms-wma",
+    ".alac": "audio/mp4",
+}
+
+
+@router.get("/{track_id}/file")
+async def stream_matched_file(track_id: int, request: Request):
+    """Stream the matched local audio file for A/B preview in Match Review.
+
+    Range-capable (Starlette FileResponse handles HTTP Range -> 206 for a
+    seekable <audio> element) and path-safe: the resolved real path MUST stay
+    inside the music root, so a crafted/legacy file_path can never traverse out.
+    """
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT file_path FROM tracks WHERE id = ?", (track_id,)
+            ).fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Track not found")
+    file_path = row["file_path"]
+    if not file_path:
+        raise HTTPException(status_code=404, detail="No matched file for this track")
+
+    # Path safety: resolve to a real absolute path and confirm containment in the
+    # music root. Reject symlink escape and ".." traversal.
+    real = os.path.realpath(file_path)
+    if real != MUSIC_ROOT and not real.startswith(MUSIC_ROOT + os.sep):
+        logger.warning("stream_matched_file: rejected out-of-root path track=%s path=%s", track_id, file_path)
+        raise HTTPException(status_code=403, detail="File is outside the music library")
+    if not os.path.isfile(real):
+        raise HTTPException(status_code=404, detail="Matched file no longer exists on disk")
+
+    ext = os.path.splitext(real)[1].lower()
+    media_type = _AUDIO_CONTENT_TYPES.get(ext) or mimetypes.guess_type(real)[0] or "application/octet-stream"
+    return FileResponse(real, media_type=media_type, filename=os.path.basename(real))
 
 
 @router.get("/import-review")
