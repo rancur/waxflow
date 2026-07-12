@@ -181,7 +181,19 @@ def init():
             ('lossless_upgrade_enabled', '1'),
             ('lossless_upgrade_interval_days', '7'),
             ('lossless_upgrade_batch', '2'),
-            ('lossless_upgrade_loop_interval_seconds', '21600');
+            ('lossless_upgrade_loop_interval_seconds', '21600'),
+            -- Plex / Plexamp mirror (tasks/plex_sync.py) — INERT by default.
+            -- plex_token is NEVER committed here (secret): it is seeded into the
+            -- live app_config from 1Password ("Plex — WaxFlow token (Barry)").
+            -- plex_url / plex_music_section_id are environment-specific and left
+            -- empty like lexicon_api_url; they are seeded at enable time. The
+            -- path prefixes are generic (container /music == NAS /volume1/music).
+            ('plex_sync_enabled', '0'),
+            ('plex_url', ''),
+            ('plex_music_section_id', ''),
+            ('plex_music_container_prefix', '/music'),
+            ('plex_music_server_prefix', '/volume1/music'),
+            ('plex_scan_batch', '25');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed
