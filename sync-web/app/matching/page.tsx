@@ -128,8 +128,19 @@ function matchSourceLabel(source: string | undefined): string {
     fingerprint: 'Acoustic Fingerprint',
     file_index: 'File Index',
     tidal_search: 'Tidal Search',
+    musicbrainz_isrc: 'MusicBrainz (alt-ISRC fallback)',
+    musicbrainz_search: 'MusicBrainz (metadata fallback)',
+    acoustid: 'AcoustID Fingerprint (fallback)',
   }
   return labels[source] || source
+}
+
+// A recovered match came from a secondary source (not Spotify): MusicBrainz
+// re-resolution or AcoustID fingerprinting. Flag it so Will knows it was rescued
+// from a "no match" rather than confirmed against the live Spotify track.
+function isFallbackSource(source: string | undefined): boolean {
+  if (!source) return false
+  return source.startsWith('musicbrainz') || source === 'acoustid'
 }
 
 function truncatePath(path: string | undefined, maxLen = 50): string {
@@ -293,6 +304,14 @@ export default function MatchingPage() {
                       <span className={`text-lg font-bold tabular-nums ${confidenceColor(confidence)}`}>
                         {confidencePercent(confidence)}%
                       </span>
+                      {isFallbackSource(c.match_source) && (
+                        <span
+                          className="ml-2 inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30 align-middle"
+                          title={`Recovered from a "no match" via ${matchSourceLabel(c.match_source)} — not confirmed against the live Spotify track. Approve to source it.`}
+                        >
+                          {'✨'} FALLBACK
+                        </span>
+                      )}
                     </div>
                   </div>
 

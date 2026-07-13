@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.9.0 — Backup identification fallback for "no match" tracks (MusicBrainz + AcoustID scaffold)
+
+Recovers liked tracks that show **"no match"** in Match Review because Spotify
+removed the song, WITHOUT depending on the live Spotify track — using only the
+metadata WaxFlow cached at like-time (ISRC, title, artist, album, duration_ms).
+Answers the companion question in the runbook: rejecting a match keeps the file on
+disk (only the DB `file_path` pointer is cleared), re-arms the track from `new`, and
+never touches Lexicon.
+
+### Added — MusicBrainz metadata/ISRC re-resolution fallback (`tasks/metadata_fallback.py`)
+- New worker task (default **ON**, `metadata_fallback_enabled`) that scans unmatched
+  tracks (`match_status='failed' / pipeline_stage='error'`) and re-resolves each via
+  **MusicBrainz** (free, keyless): ISRC → recording → canonical title/artist + the
+  recording's **full ISRC set across every release**; falls back to a duration-tie-
+  broken recording search when the cached ISRC isn't catalogued.
+- Re-attempts a match with the enriched metadata in priority order: **(0) already-owned
+  local file** under `/music` (alt-ISRC then canonical name — the highest-value,
+  Tidal-independent, no-download recovery), **(1) Tidal by alternate ISRC**, **(2) Tidal
+  by canonical name**. A track pulled from Spotify under one ISRC frequently still
+  exists locally or on Tidal under a different release/ISRC of the same recording.
+- Recovered matches are surfaced in **Match Review** (`match_status='mismatched'`,
+  `match_source='musicbrainz_local' | 'musicbrainz_isrc' | 'musicbrainz_search'`) as
+  fallback-sourced proposals for human approve/reject — **never auto-imported**.
+- Non-destructive (proposes a match; never deletes/moves files or writes Lexicon),
+  idempotent + non-looping (one `source_attempts(source='musicbrainz')` row per track
+  with exponential backoff), and **hunter-safe** (a `wanted` row `state='review'`
+  shields the proposal from the missing-track hunter's re-arm).
+
+### Added — Acoustic-fingerprint fallback scaffold (`tasks/acoustid_fallback.py`)
+- Chromaprint/AcoustID identification of local candidate files, **config-gated and OFF**
+  (`acoustid_fallback_enabled`). `fpcalc` is present in the worker image; provisioning
+  is complete except for a free AcoustID key — seed `acoustid_api_key` in `app_config`
+  and flip the flag (both read live, **no redeploy**) to activate. No key is fabricated;
+  the task is an explicit logged no-op until provisioned.
+
+### Web
+- Match Review labels the new fallback sources and shows a **FALLBACK** badge so a
+  recovered match is never mistaken for a live-Spotify-confirmed one. (Ships on the
+  next web build; recovered matches surface regardless.)
+
 ## 2.8.1 — Match Review: fix 500 + side-by-side audio preview
 
 Fixes the intermittent `API error: 500` in Match Review and adds an A/B audio

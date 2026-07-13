@@ -193,7 +193,22 @@ def init():
             ('plex_music_section_id', ''),
             ('plex_music_container_prefix', '/music'),
             ('plex_music_server_prefix', '/volume1/music'),
-            ('plex_scan_batch', '25');
+            ('plex_scan_batch', '25'),
+            -- Metadata/ISRC re-resolution fallback (tasks/metadata_fallback.py).
+            -- Recovers "no match" tracks (removed from Spotify) via MusicBrainz
+            -- ISRC->recording->alternate-ISRCs, then re-matches Tidal and proposes
+            -- the hit in Match Review. Read-only externally + non-destructive, so
+            -- ON by default. musicbrainz_user_agent is a courtesy identifier only.
+            ('metadata_fallback_enabled', '1'),
+            ('metadata_fallback_batch', '8'),
+            ('metadata_fallback_interval_seconds', '3600'),
+            ('musicbrainz_user_agent', 'WaxFlow/2.9 (https://github.com/rancur/waxflow)'),
+            -- Acoustic-fingerprint fallback (tasks/acoustid_fallback.py). fpcalc is
+            -- in the image; provide a free AcoustID key here + flip enabled to
+            -- activate (both read live, no redeploy). OFF until provisioned.
+            ('acoustid_fallback_enabled', '0'),
+            ('acoustid_api_key', ''),
+            ('acoustid_fallback_interval_seconds', '7200');
         """)
     # Migration: add 'waiting' to pipeline_stage CHECK constraint
     # SQLite can't ALTER CHECK constraints, so we recreate the table if needed
