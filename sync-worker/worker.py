@@ -27,6 +27,8 @@ from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.plex_sync import plex_sync
 from tasks.mac_availability import sample_availability
 from tasks.hunter import hunter
+from tasks.metadata_fallback import metadata_fallback
+from tasks.acoustid_fallback import acoustid_fallback
 from tasks.v3_schema import ensure_v3_schema
 from tasks.helpers import get_config, get_db
 
@@ -294,6 +296,24 @@ async def main():
         asyncio.create_task(
             run_task("hunter", hunter,
                      interval_key="hunter_interval_seconds", default_interval=10800)
+        ),
+        # Metadata/ISRC re-resolution fallback (MusicBrainz). Recovers "no match"
+        # tracks (Spotify removed the song) by re-resolving the cached ISRC /
+        # title+artist against MusicBrainz for canonical metadata + ALTERNATE ISRCs,
+        # then re-matching Tidal and surfacing hits in Match Review as
+        # fallback-sourced proposals for human approval. Read-only externally,
+        # non-destructive, idempotent (per-track source_attempts guard). Default ON.
+        asyncio.create_task(
+            run_task("metadata_fallback", metadata_fallback,
+                     interval_key="metadata_fallback_interval_seconds", default_interval=3600)
+        ),
+        # Acoustic-fingerprint fallback (Chromaprint/AcoustID). SCAFFOLD: fpcalc is
+        # present in the image but no AcoustID key is provisioned, so this is an
+        # explicit no-op until acoustid_api_key is seeded + acoustid_fallback_enabled
+        # is flipped (both read live — no redeploy). Default OFF.
+        asyncio.create_task(
+            run_task("acoustid_fallback", acoustid_fallback,
+                     interval_key="acoustid_fallback_interval_seconds", default_interval=7200)
         ),
     ]
 
