@@ -243,6 +243,27 @@ class TestCanary(unittest.TestCase):
         out = _CanaryHarness(write_ok=False, lexicon_ok=False).run()
         self.assertEqual(out["status"], "watch_dir_unwritable")
 
+    def test_stuck_empty_imports_force_mount_down_not_ok(self):
+        # Real imports looping empty (file on NAS, Lexicon imports 0 tracks) are
+        # the authoritative Mac-side mount signal — e.g. the share remounted at
+        # /Volumes/music-1 after sleep/wake. The canary must NOT overwrite that
+        # with "ok" just because the container can write and the API answers
+        # (the 2026-07-20 masking bug).
+        h = _CanaryHarness(write_ok=True, lexicon_ok=True)
+        with mock.patch.object(lh, "_stuck_empty_imports", return_value=(2, 600)):
+            out = h.run()
+        self.assertEqual(out["status"], "mount_down")
+        self.assertFalse(out["ok"])
+        self.assertEqual(h.recorded[-1]["status"], "mount_down")
+        self.assertEqual(h.recorded[-1]["ok"], False)
+
+    def test_no_stuck_empty_imports_still_ok(self):
+        h = _CanaryHarness(write_ok=True, lexicon_ok=True)
+        with mock.patch.object(lh, "_stuck_empty_imports", return_value=(0, 0)):
+            out = h.run()
+        self.assertEqual(out["status"], "ok")
+        self.assertTrue(out["ok"])
+
 
 class TestWatchDirWritable(unittest.TestCase):
     """Real filesystem behaviour of the staging-dir write check."""
