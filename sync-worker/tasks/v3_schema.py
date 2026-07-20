@@ -34,8 +34,8 @@ log = logging.getLogger("worker.v3_schema")
 
 # Bumped whenever the additive v3 schema surface changes. Recorded in
 # direct_write_audit rows so a written-back change can be tied to the schema it
-# was produced under. Phase A == 1.
-V3_SCHEMA_VERSION = 1
+# was produced under. Phase A == 1. Phase 3 sleep-tolerance catch-up counter == 2.
+V3_SCHEMA_VERSION = 2
 
 # The new tables introduced by the v3 foundation. Exposed for tests + tooling.
 V3_TABLES = (
@@ -49,9 +49,13 @@ V3_TABLES = (
 )
 
 # The new (nullable) columns added to the existing ``tracks`` table.
+# catchup_attempts: bounded revival counter for the Phase-3 sleep-tolerance
+# catch-up pass (tasks/import_catchup.py) — caps how many times a sleep-orphaned
+# download is re-armed for import so a genuinely-broken track can't loop forever.
 V3_TRACK_COLUMNS = (
     ("sourceability", "TEXT"),
     ("wanted_id", "INTEGER"),
+    ("catchup_attempts", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Nullable columns added to the existing ``import_queue`` table for Phase 3

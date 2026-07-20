@@ -26,6 +26,7 @@ from tasks.lexicon_health import lexicon_health_check
 from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.plex_sync import plex_sync
 from tasks.mac_availability import sample_availability
+from tasks.import_catchup import import_catchup
 from tasks.hunter import hunter
 from tasks.metadata_fallback import metadata_fallback
 from tasks.acoustid_fallback import acoustid_fallback
@@ -314,6 +315,19 @@ async def main():
         asyncio.create_task(
             run_task("acoustid_fallback", acoustid_fallback,
                      interval_key="acoustid_fallback_interval_seconds", default_interval=7200)
+        ),
+        # Phase 3 — sleep-tolerance CATCH-UP pass. Rescues downloaded-but-not-imported
+        # tracks that the proactive offline queue could not catch: a Lexicon import that
+        # passed the availability pre-check and then failed mid-call as the Mac slept
+        # (db-locked / timed-out / empty-import) lands the track in a TERMINAL 'error'
+        # with the file safely on the NAS but never in Lexicon. This pass runs only when
+        # Lexicon is available again (so it fires on the first cycle after wake), re-arms
+        # each transient-error orphan to its correct earlier stage, and lets the normal,
+        # fully-guarded pipeline re-import it. Idempotent + bounded (tracks.catchup_attempts).
+        # Default ON; disable live via import_catchup_enabled=0.
+        asyncio.create_task(
+            run_task("import_catchup", import_catchup,
+                     interval_key="import_catchup_interval_seconds", default_interval=900)
         ),
     ]
 

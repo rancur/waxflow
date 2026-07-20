@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.10.0 — Sleep-tolerance catch-up: rescue downloaded-but-not-imported tracks
+
+Closes the last sleep/wake gap that stranded freshly-downloaded tracks with a real
+file on the NAS but no entry in Lexicon. The always-on NAS worker downloads fine
+while the Lexicon-host Mac sleeps; the *import* (the only stage that talks to the
+Mac) is where sleep bites. Phase 3's offline queue already HOLDS import work
+*proactively* when a pre-check says the Mac is unavailable — but a call that PASSES
+the pre-check (SSH port open, `GET /v1/playlists` == 200) and then fails mid-import
+as the Mac slips into sleep (`database is locked`, `timed out`, empty import once
+the SMB mount drops) landed the track in a **terminal** `pipeline_stage='error'`
+with `download_status='complete'` and no `lexicon_track_id` — and nothing ever
+retried it. Found live: 5 such orphans, every one timestamped overnight / early-AM
+(NGHTMRE "Hold Me Close", Goo Goo Dolls "Iris", Jeff Buckley "Hallelujah", The Maine
+"I Wanna Love You", Ludwig Göransson "Hades").
+
+### Added — sleep-tolerance catch-up pass (`tasks/import_catchup.py`, worker task, default ON)
+- Runs every `import_catchup_interval_seconds` (default 900s) but **only when Lexicon
+  is available** — so it naturally fires on the first cycle after the Mac wakes (the
+  "on-wake scan"), and is a pure no-op while asleep.
+- Finds tracks stranded in `error` with `download_status='complete'`, no
+  `lexicon_track_id`, and a **transient Lexicon/Mac-unavailability** error signature
+  (db-locked / timed-out / empty-import / mount-down / connection), whose file still
+  exists on disk, and **re-arms** each to its correct earlier stage (`verifying` for a
+  verify-stage lock, otherwise `organizing`). The real re-import then runs through the
+  normal, fully-guarded pipeline (lossless gate, ISRC match guard, empty-import grace,
+  dedup existence check) — all idempotent, so a track already in Lexicon links instead
+  of duplicating. The pass itself performs **no** Lexicon/file write.
+- **Bounded, no hot loop:** only revives an error settled for at least
+  `import_catchup_min_age_seconds` (default 300s) and at most
+  `import_catchup_max_attempts` (default 6) times per track, via the new
+  `tracks.catchup_attempts` counter — a genuinely-broken track is retried a handful of
+  times then left alone. Non-transient errors (not-lossless, fingerprint-too-low) are
+  never touched.
+- Emits `import_catchup_revived` / `import_catchup_pass` activity events for observability.
+
+### Schema (additive, idempotent)
+- `tracks.catchup_attempts INTEGER NOT NULL DEFAULT 0` (guarded ADD COLUMN, mirrored in
+  `sync-api/init_db.py`; `V3_SCHEMA_VERSION` → 2). No table rebuild, no data migration.
+
+### Tests
+- `tests/test_import_catchup.py` — 10 cases covering revive-to-organizing, verify-stage
+  re-entry, empty-import signature, non-transient left-alone, missing-file skip, the
+  on-wake no-op gate, already-in-Lexicon untouched, the attempts cap, the min-age
+  window, and the disable flag.
+
+### Config keys (all read live)
+- `import_catchup_enabled` (default ON), `import_catchup_interval_seconds` (900),
+  `import_catchup_min_age_seconds` (300), `import_catchup_max_attempts` (6).
+
 ## 2.9.0 — Backup identification fallback for "no match" tracks (MusicBrainz + AcoustID scaffold)
 
 Recovers liked tracks that show **"no match"** in Match Review because Spotify
