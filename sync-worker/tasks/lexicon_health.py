@@ -179,6 +179,54 @@ def _check_lexicon_reachable(api: str) -> tuple[bool, str]:
         return False, f"Lexicon API unreachable at {api} ({e})"
 
 
+# A track sitting in the empty-import grace loop for longer than this is treated as
+# evidence the Mac-side mount is effectively down (missing, stale, or mounted at a
+# wrong mountpoint like /Volumes/music-1 after a sleep/wake remount race — the
+# 2026-07-20 incident). Well under the per-track grace window (default 1800s) so the
+# canary pages BEFORE tracks start falling into terminal errors.
+_DEFAULT_STUCK_EMPTY_THRESHOLD_SECONDS = 300
+
+
+def _stuck_empty_imports(db_path: str) -> tuple[int, int]:
+    """Return (count, oldest_age_seconds) of tracks currently stuck in the
+    empty-import grace loop longer than the threshold.
+
+    These tracks have a REAL file on disk (the worker just wrote/verified it) yet
+    Lexicon keeps importing 0 tracks for its Mac-side path — the authoritative
+    signal that the Mac cannot read the share (canary checks 1+2 cannot see this:
+    they only prove the container can write and the Lexicon API answers)."""
+    import re as _re
+
+    threshold = _DEFAULT_STUCK_EMPTY_THRESHOLD_SECONDS
+    try:
+        threshold = int(
+            get_config(db_path, "lexicon_canary_stuck_threshold_seconds") or threshold
+        )
+    except (TypeError, ValueError):
+        pass
+
+    from tasks.helpers import get_db
+
+    now = time.time()
+    count = 0
+    oldest = 0
+    with get_db(db_path) as conn:
+        rows = conn.execute(
+            """SELECT pipeline_error FROM tracks
+               WHERE pipeline_stage = 'organizing'
+                 AND pipeline_error LIKE '[empty_since:%'"""
+        ).fetchall()
+    for row in rows:
+        m = _re.search(r"\[empty_since:(\d+)\]", row[0] or "")
+        if not m:
+            continue
+        age = int(now - int(m.group(1)))
+        if age >= threshold:
+            count += 1
+            oldest = max(oldest, age)
+    return count, oldest
+
+
 def run_canary(db_path: str) -> dict:
     """Proactive import-health self-check for the watch-folder flow.
 
@@ -202,6 +250,29 @@ def run_canary(db_path: str) -> dict:
         detail = f"{lex_detail}. New imports/links will fail."
         record_import_health(db_path, "lexicon_unreachable", detail, ok=False, source="canary")
         return {"status": "lexicon_unreachable", "detail": detail, "ok": False}
+
+    # 3) Mount effectively down? Checks 1+2 only prove the NAS/container side and
+    #    the Lexicon API — NOT that the Mac can read the share. Real imports
+    #    looping empty (file on disk, Lexicon imports 0 tracks) ARE that proof,
+    #    and without this gate the canary used to overwrite the authoritative
+    #    mount_down set by note_empty_import with a false "ok"/"RECOVERED" every
+    #    cycle (the 2026-07-20 wrong-mountpoint incident hid behind exactly that).
+    try:
+        stuck_count, stuck_oldest = _stuck_empty_imports(db_path)
+    except Exception as e:  # never let the gate break the canary
+        log.warning("canary: stuck-empty-import check failed (%s)", e)
+        stuck_count, stuck_oldest = 0, 0
+    if stuck_count:
+        detail = (
+            f"{stuck_count} import(s) stuck returning 0 tracks for {stuck_oldest}s "
+            f"despite the file existing on the NAS — the music share is likely not "
+            f"readable on the Lexicon host Mac (unmounted, stale, or mounted at a "
+            f"wrong mountpoint such as /Volumes/music-1 after sleep/wake). "
+            f"Run ~/.waxflow/ensure-music-mount.sh on the Mac."
+        )
+        record_import_health(db_path, "mount_down", detail, ok=False, source="canary")
+        return {"status": "mount_down", "detail": detail, "ok": False,
+                "stuck_empty_imports": stuck_count}
 
     detail = f"{write_detail}; {lex_detail}."
     record_import_health(db_path, "ok", detail, ok=True, source="canary")

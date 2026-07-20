@@ -32,8 +32,12 @@ SAFETY
       and at most ``max_attempts`` times per track (``tracks.catchup_attempts``), so
       a genuinely-broken track is retried a handful of times then left alone.
     * Targeted: only tracks whose error signature is a transient Lexicon/Mac-
-      unavailability condition, whose download is complete, whose file still exists
-      on disk, and which are NOT already in Lexicon.
+      unavailability condition and whose download is complete. Import orphans
+      (no lexicon_track_id) additionally require the file to still exist on disk;
+      bookkeeping orphans (import succeeded, then the playlist/tag step failed as
+      the Mac slept — lexicon_track_id set) are re-armed without a file check
+      because organizing is idempotent for them (reuses the id, dedups the
+      playlist add).
     * Gated: ``import_catchup_enabled`` (default ON) — flip to 0 to disable live.
 """
 
@@ -140,7 +144,6 @@ def run_catchup(db_path: str) -> dict:
             """SELECT * FROM tracks
                WHERE pipeline_stage = 'error'
                  AND download_status = 'complete'
-                 AND lexicon_track_id IS NULL
                  AND COALESCE(catchup_attempts, 0) < ?
                  AND (updated_at IS NULL OR updated_at <= datetime('now', ?))
                ORDER BY updated_at ASC
@@ -158,11 +161,22 @@ def run_catchup(db_path: str) -> dict:
             skipped_nontransient += 1
             continue
 
+        # Two classes of sleep-orphan, both revivable:
+        #   (1) IMPORT orphan — no lexicon_track_id: the file was downloaded but
+        #       Lexicon never got it. Requires the file to still exist on disk.
+        #   (2) BOOKKEEPING orphan — lexicon_track_id IS set: the import itself
+        #       succeeded, then a post-import step (monthly-playlist add, [sls:]
+        #       comment tag) hit a transient failure ("database is locked" as the
+        #       Mac slipped into sleep). Re-arming to 'organizing' is idempotent —
+        #       the pipeline reuses the existing lexicon_track_id, skips the
+        #       import, and dedups the playlist add — so no file check is needed
+        #       (Lexicon may have organized/renamed the file since).
+        already_imported = bool(track.get("lexicon_track_id"))
         file_path = track.get("file_path")
         # The worker container mounts /music and /downloads, and file_path is the
         # container path, so this existence check is authoritative for "the file we
         # downloaded is still on disk and re-importable".
-        if not file_path or not os.path.exists(file_path):
+        if not already_imported and (not file_path or not os.path.exists(file_path)):
             missing_file += 1
             log.warning(
                 "import_catchup: track %d file missing on disk (%s) — not revived",
@@ -170,7 +184,7 @@ def run_catchup(db_path: str) -> dict:
             )
             continue
 
-        stage = _reentry_stage(track.get("pipeline_error"))
+        stage = "organizing" if already_imported else _reentry_stage(track.get("pipeline_error"))
         attempts = int(track.get("catchup_attempts") or 0) + 1
         update_track(
             db_path, track["id"],

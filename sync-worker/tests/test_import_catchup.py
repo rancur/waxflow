@@ -8,7 +8,9 @@ Proves the sleep/wake recovery contract:
   * a track whose file has vanished from disk is NOT re-armed,
   * the pass is a no-op while Lexicon is unavailable (on-wake gate),
   * revival is bounded by catchup_attempts (no infinite loop),
-  * a track already in Lexicon (lexicon_track_id set) is never touched.
+  * a track already in Lexicon (lexicon_track_id set) with a TRANSIENT error is
+    re-armed to 'organizing' (idempotent bookkeeping retry, no file check);
+    with a non-transient error it is left alone.
 
 The availability probe and the filesystem check are stubbed so the test is pure/
 offline; the real import writes are covered as idempotent elsewhere.
@@ -146,9 +148,24 @@ class ImportCatchupTest(unittest.TestCase):
         self.assertIn("skipped", counts)
         self.assertEqual(_track(self.db, tid)["pipeline_stage"], "error")
 
-    def test_already_in_lexicon_untouched(self):
-        tid = _add(self.db, lexicon_track_id=42, error="Lexicon sync error: timed out")
-        import_catchup.run_catchup(self.db)
+    def test_bookkeeping_orphan_revived_without_file_check(self):
+        # Import succeeded (lexicon_track_id set) but a post-import step failed as
+        # the Mac slept ("database is locked"). Revived to organizing, which is
+        # idempotent for linked tracks — even if the file has since been
+        # organized/renamed (os.path.exists False).
+        os.path.exists = lambda p: False
+        tid = _add(self.db, lexicon_track_id=42, error="Lexicon sync error: database is locked")
+        counts = import_catchup.run_catchup(self.db)
+        self.assertEqual(counts["revived"], 1)
+        self.assertEqual(counts["missing_file"], 0)
+        t = _track(self.db, tid)
+        self.assertEqual(t["pipeline_stage"], "organizing")
+        self.assertEqual(t["catchup_attempts"], 1)
+
+    def test_already_in_lexicon_nontransient_untouched(self):
+        tid = _add(self.db, lexicon_track_id=42, error="not lossless: codec=aac, sr=44100")
+        counts = import_catchup.run_catchup(self.db)
+        self.assertEqual(counts["revived"], 0)
         self.assertEqual(_track(self.db, tid)["pipeline_stage"], "error")
 
     def test_bounded_by_max_attempts(self):
