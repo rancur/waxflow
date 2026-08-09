@@ -44,6 +44,34 @@ def _check_github_release() -> dict | None:
     return None
 
 
+
+def _version_tuple(v: str) -> tuple:
+    """Parse a dotted version into comparable ints, ignoring any suffix."""
+    parts = []
+    for chunk in (v or "").split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _is_newer(latest: str, current: str) -> bool:
+    """True when `latest` is a strictly newer release than `current`.
+
+    A plain string compare is wrong across a version-component boundary:
+    "2.11.0" > "2.9.0" is FALSE lexicographically (at index 2, "1" < "9"), so
+    every x.9 -> x.10+ upgrade was invisible and auto-update could never fire.
+    Mirrors sync-api/routes/admin.py::_is_newer.
+    """
+    if not latest or not current:
+        return False
+    return _version_tuple(latest) > _version_tuple(current)
+
+
 def _is_right_time(schedule: str) -> bool:
     """Check if now is the right time to auto-update based on schedule."""
     now = datetime.now()
@@ -104,7 +132,7 @@ def _auto_update(db_path: str):
         return
 
     latest = release.get("tag_name", "").lstrip("v")
-    update_available = latest != current and latest > current
+    update_available = _is_newer(latest, current)
 
     # Record the check time
     set_config(db_path, "last_update_check", time.strftime("%Y-%m-%dT%H:%M:%S"))

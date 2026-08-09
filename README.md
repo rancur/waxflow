@@ -456,6 +456,50 @@ downtime here:
   `NAME._smb._tcp.local` resolves only via service discovery; when that
   advertisement goes stale, mounts **hang forever** rather than failing.
 
+---
+
+## Updates
+
+WaxFlow checks GitHub for new releases and can apply them itself. The check runs
+in the worker; the apply runs in a small `waxflow-updater` container.
+
+**It pulls prebuilt images** from `ghcr.io/rancur/waxflow-{api,worker,web}` rather
+than rebuilding from source. That matters: a from-source rebuild of the worker
+image took ~25 minutes on a Synology NAS and wedged the Docker daemon once — not
+something you want happening unattended at 3am.
+
+Before applying, it takes a database backup. Afterwards it health-checks the API
+and **rolls back to the previous tag** if the new version does not come up.
+
+| Setting | Default | |
+|---|---|---|
+| `auto_update_enabled` | `1` for new installs | existing installs keep their current value |
+| `auto_update_schedule` | `daily_3am` | or `weekly_sunday_3am`, `manual` |
+| `auto_backup_before_update` | `1` | DB + config snapshot, last 10 kept |
+
+### Security: the Docker socket
+
+Applying an update means restarting containers, which a container cannot do to
+itself — so `waxflow-updater` mounts `/var/run/docker.sock`. That is
+root-equivalent access to the host, so the service is deliberately split:
+
+- the **worker** has network but no socket — it decides *what* to update to
+- the **updater** has the socket but **`network_mode: none`** — it never
+  downloads anything; the Docker *daemon* fetches image layers when asked over
+  the socket
+
+Nothing with host-root access talks to the internet. If you would rather not
+grant socket access at all, delete the `waxflow-updater` service from
+`docker-compose.yml` — everything else keeps working, and the UI's "check for
+updates" still tells you when a release is available.
+
+### Building from source instead
+
+The `build:` blocks are still there. `docker compose up -d --build` builds
+locally and tags the images with the same names, so the stack runs without ever
+touching the registry. Point `WAXFLOW_REGISTRY` at your own namespace if you
+publish a fork.
+
 ## Tech Stack
 
 | Component | Technology |
