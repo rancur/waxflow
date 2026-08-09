@@ -45,16 +45,9 @@ if mount | grep -q " on ${MP} (smbfs"; then
   done
   if [ "$readable" -eq 1 ]; then exit 0; fi
 
-  # CRITICAL: "Operation not permitted" (EPERM) is macOS TCC denying THIS PROCESS
-  # access to a network volume — the mount is perfectly healthy. Unmounting here
-  # destroys a working share and cannot be undone from a launchd agent, because
-  # `osascript mount volume` has no GUI/keychain access either. That combination
-  # is what filled this log with MOUNT FAILED every 2 minutes while the very same
-  # commands succeeded from an interactive shell.
-  #
-  # FIX (one-time, GUI only): System Settings -> Privacy & Security ->
-  # Full Disk Access -> add /bin/bash  (then: launchctl kickstart -k
-  # gui/$(id -u)/com.waxflow.mount-music)
+  # EPERM = macOS TCC denying THIS PROCESS access to a network volume. The mount
+  # is healthy. Fix is one-time and GUI-only: System Settings -> Privacy &
+  # Security -> Full Disk Access -> add /bin/bash.
   case "$lserr" in
     *"Operation not permitted"*)
       echo "$(ts) EPERM reading ${MP} — TCC is denying this process, mount is FINE. Not unmounting. Grant Full Disk Access to /bin/bash." >>"$LOG"
@@ -62,7 +55,24 @@ if mount | grep -q " on ${MP} (smbfs"; then
       ;;
   esac
 
-  echo "$(ts) stale mount detected at ${MP} (3 consecutive failures: ${lserr}), remounting" >>"$LOG"
+  # NEVER unmount by default.
+  #
+  # v4 (2026-08-09). v3 still unmounted on any non-EPERM failure, and that is how
+  # the share was lost: a transient read failure -> unmount -> remount hangs. From
+  # a launchd agent `mount volume` cannot reach the keychain, and `mount_smbfs`
+  # gets "Authentication error", so the ONLY way back is a human in Finder.
+  # Trading a possibly-stale mount for a definitely-unmountable one is a bad deal:
+  # macOS usually re-establishes a dropped SMB session by itself, and a stale
+  # handle costs one sync cycle whereas a failed remount costs every cycle until
+  # someone notices.
+  #
+  # Set WAXFLOW_ALLOW_REMOUNT=1 to opt into the old destructive behaviour when
+  # running interactively (where remounting actually works).
+  if [ "${WAXFLOW_ALLOW_REMOUNT:-0}" != "1" ]; then
+    echo "$(ts) ${MP} unreadable (${lserr}) — leaving the mount ALONE (remount is unreliable from launchd). Re-run interactively with WAXFLOW_ALLOW_REMOUNT=1, or reconnect in Finder." >>"$LOG"
+    exit 3
+  fi
+  echo "$(ts) stale mount at ${MP} (${lserr}) — remounting (WAXFLOW_ALLOW_REMOUNT=1)" >>"$LOG"
   umount "${MP}" 2>/dev/null || diskutil unmount "${MP}" >/dev/null 2>&1 \
     || diskutil unmount force "${MP}" >/dev/null 2>&1
 fi
@@ -87,10 +97,25 @@ if [ -d "${MP}" ] && ! mount | grep -q " on ${MP} (smbfs"; then
 fi
 
 # 4) Mount (Finder/keychain credentials) and verify it landed at the canonical path.
-/usr/bin/osascript -e "try" -e "mount volume \"${URL}\"" -e "end try" >>"$LOG" 2>&1
+#
+# HARD TIMEOUT, because `osascript mount volume` can block FOREVER: when the SMB
+# session needs re-authentication it waits on NetAuthAgent for a credential
+# dialog, which never appears in a launchd context. Observed 2026-08-09 — two
+# osascript processes wedged for minutes, blocking BOTH agents and holding the
+# sync lock, so the sync stopped running entirely. An agent that hangs is worse
+# than one that fails: the failure retries next cycle, the hang never does.
+# (macOS has no coreutils `timeout`, hence the watchdog-subshell.)
+MOUNT_TIMEOUT="${WAXFLOW_MOUNT_TIMEOUT:-45}"
+/usr/bin/osascript -e "try" -e "mount volume \"${URL}\"" -e "end try" >>"$LOG" 2>&1 &
+OSPID=$!
+( sleep "$MOUNT_TIMEOUT"; kill -9 "$OSPID" 2>/dev/null ) >/dev/null 2>&1 &
+WATCHDOG=$!
+wait "$OSPID" 2>/dev/null
+kill "$WATCHDOG" 2>/dev/null
+
 sleep 3
 if mount | grep -q " on ${MP} (smbfs" && ls "${MP}" >/dev/null 2>&1; then
   echo "$(ts) mounted OK at ${MP}" >>"$LOG"; exit 0
-else
-  echo "$(ts) MOUNT FAILED (share not at ${MP} after mount attempt)" >>"$LOG"; exit 1
 fi
+echo "$(ts) MOUNT FAILED (not at ${MP} after ${MOUNT_TIMEOUT}s). If this repeats, the SMB session needs re-auth: reconnect once in Finder (Go > Connect to Server > ${URL})." >>"$LOG"
+exit 1
