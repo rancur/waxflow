@@ -41,7 +41,7 @@ class PlexClient:
     """Minimal Plex Media Server client over httpx.
 
     Args:
-        base_url: e.g. ``http://192.168.1.221:32400``.
+        base_url: e.g. ``http://nas.local:32400``.
         token: the ``X-Plex-Token`` (self-generated from the server's
             Preferences.xml; stored in 1Password + app_config, never in git).
         timeout: per-request timeout in seconds.

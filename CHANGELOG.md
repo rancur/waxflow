@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.12.1 — "Update Now" actually requests an update
+
+`POST /api/admin/update` wrote the literal string `requested at <timestamp>` into
+the signal file. The updater added in 2.12.0 reads `target_version` out of that
+file as JSON and refuses anything that is not semver — correctly, since the tag
+comes from the GitHub API and reaches `docker pull`. So the button parsed to an
+empty target and was refused every time: **"Update Now" silently did nothing.**
+
+It now resolves the latest release from GitHub itself (rather than trusting the
+caller with a tag), writes the same JSON shape `tasks/auto_update.py` writes, and
+returns `up_to_date` instead of queueing a no-op when you are already current.
+`?force=true` re-applies the current version to recover a half-applied update.
+
+### Added
+- `GET /api/admin/update-result` — the outcome of the last update, including
+  rollbacks, so "Update Now" can report what happened instead of being a button
+  that reports nothing.
+
+### Fixed
+- `scripts/deploy-to-nas.sh` extracted a tar, which adds and overwrites but never
+  DELETES. Files removed upstream lingered on the remote forever — the dead
+  services deleted in 2.11.0 were still on the NAS afterwards. It now prunes
+  tracked-but-absent files first, so a deploy mirrors the repo. Host-local files
+  (`.env`, `docker-compose.override.yml`, logs) are explicitly protected.
+- `_read_version()` replaces three inlined copies of the same VERSION read in
+  `routes/admin.py`, one of which had drifted.
+- Example Plex URLs in docstrings no longer use a real LAN address.
+
+
 ## 2.12.0 — Auto-update actually works
 
 `auto_update_enabled` has existed for a while. It could never have worked. Three

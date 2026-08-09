@@ -1,7 +1,7 @@
 """Plex / Plexamp mirror (WaxFlow v3 — Feature 4).
 
 Mirrors what WaxFlow already syncs into Lexicon over to the Plex server that runs
-ON the NAS (``http://192.168.1.221:32400``) and reads the SAME ``/volume1/music``
+ON the NAS (``http://<nas>:32400``) and reads the SAME ``/volume1/music``
 tree, so the monthly ``MM. Month YYYY`` playlists show up in Plexamp.
 
 Three responsibilities, all idempotent:

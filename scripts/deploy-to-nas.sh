@@ -19,6 +19,23 @@ GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 echo "[deploy] Version: $VERSION (SHA: $GIT_SHA)"
 echo "[deploy] Syncing files to remote host..."
+# tar-extract ADDS and overwrites but never DELETES, so files removed upstream
+# linger on the remote forever. Dead code deleted in 2.11.0 was still sitting on
+# the NAS afterwards. Prune tracked-but-now-absent files first so the deployment
+# actually mirrors the repo. Only touches paths git knows about, so .env,
+# docker-compose.override.yml and other host-local files are never at risk.
+KEEP_LOCAL='^(\.env|docker-compose\.override\.yml|deploy-history\.log|logs/)'
+git ls-files > /tmp/waxflow-manifest.txt 2>/dev/null || : > /tmp/waxflow-manifest.txt
+if [ -s /tmp/waxflow-manifest.txt ]; then
+    ssh "$REMOTE_HOST" "cat > /tmp/waxflow-manifest.txt" < /tmp/waxflow-manifest.txt
+    ssh "$REMOTE_HOST" "cd $REMOTE_PATH && \
+        find . -type f -not -path './.git/*' -not -path './node_modules/*' \
+             -not -path './.next/*' -not -path '*/__pycache__/*' -not -path '*/@eaDir/*' \
+             -not -path './logs/*' -printf '%P\n' 2>/dev/null \
+        | grep -Ev \"\$KEEP_LOCAL\" \
+        | grep -vxFf /tmp/waxflow-manifest.txt \
+        | while read -r stale; do echo \"[deploy] pruning \$stale\"; rm -f -- \"\$stale\"; done" || true
+fi
 tar czf - --exclude='.next' --exclude='node_modules' --exclude='.env' --exclude='*.db' --exclude='.git' --exclude='__pycache__' . \
     | ssh "$REMOTE_HOST" "cd $REMOTE_PATH && tar xzf -"
 

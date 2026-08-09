@@ -18,6 +18,21 @@ _start_time = time.time()
 SENSITIVE_KEYS = {"spotify_access_token", "spotify_refresh_token", "spotify_token_expiry"}
 
 
+def _read_version(default: str = "unknown") -> str:
+    """Running version, from the VERSION file baked in at build time.
+
+    Single source of truth: three call sites used to inline this, and one of them
+    had drifted to a hardcoded string.
+    """
+    try:
+        path = Path("/app/VERSION")
+        if path.exists():
+            return path.read_text().strip()
+    except Exception:
+        pass
+    return os.environ.get("VERSION", default)
+
+
 @router.get("/settings")
 async def get_settings():
     try:
@@ -132,16 +147,93 @@ async def health_check():
 
 
 @router.post("/admin/update")
-async def trigger_update():
-    """Create a signal file that the auto-update cron script watches for.
-    Writes to the Docker volume at /app/data/ so it persists and is visible to host scripts.
+async def trigger_update(force: bool = False):
+    """Request an immediate update — the "Update Now" button.
+
+    Writes the signal file that waxflow-updater watches. The payload MUST be the
+    same JSON shape tasks/auto_update.py writes: the updater reads target_version
+    out of it and refuses anything that is not semver. This endpoint used to write
+    the literal string "requested at <ts>", which the updater would (correctly)
+    reject every single time — so "Update Now" silently did nothing.
+
+    Resolves the target from GitHub rather than trusting the caller, so a request
+    cannot point the updater at an arbitrary tag. Pass force=true to re-apply the
+    current version (useful to recover a half-applied update).
     """
+    import httpx
+
+    current = _read_version()
     signal_path = Path("/app/data/.update-requested")
+
     try:
-        signal_path.write_text(f"requested at {time.time()}")
-        return {"status": "ok", "message": "Update requested. The auto-update cron will pick this up."}
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://api.github.com/repos/rancur/waxflow/releases/latest"
+            )
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"GitHub returned {resp.status_code} while checking for a release",
+            )
+        data = resp.json()
+        latest = (data.get("tag_name") or "").lstrip("v")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach GitHub: {e}")
+
+    if not latest:
+        raise HTTPException(status_code=502, detail="GitHub returned no release tag")
+
+    if not force and not _is_newer(latest, current):
+        return {
+            "status": "up_to_date",
+            "message": f"Already on {current}; latest release is {latest}.",
+            "current_version": current,
+            "latest_version": latest,
+        }
+
+    try:
+        signal_path.write_text(
+            json.dumps(
+                {
+                    "requested_at": time.time(),
+                    "current_version": current,
+                    "target_version": latest,
+                    "triggered_by": "manual",
+                }
+            )
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "status": "ok",
+        "message": f"Update to {latest} requested. waxflow-updater applies it within a minute.",
+        "current_version": current,
+        "target_version": latest,
+        "release_url": data.get("html_url"),
+    }
+
+
+@router.get("/admin/update-result")
+async def update_result():
+    """Outcome of the last update the updater applied.
+
+    The updater writes this after each attempt, including rollbacks, so the UI can
+    say what happened instead of leaving "Update Now" as a button that reports
+    nothing back.
+    """
+    result_path = Path("/app/data/.update-result")
+    pending = Path("/app/data/.update-requested").exists()
+    if not result_path.exists():
+        return {"status": "none", "pending": pending}
+    try:
+        data = json.loads(result_path.read_text())
+        data["pending"] = pending
+        return data
+    except Exception:
+        return {"status": "unknown", "pending": pending}
 
 
 @router.get("/admin/export")
@@ -232,14 +324,7 @@ async def get_analyze_stats():
 
 @router.get("/admin/version", response_model=VersionResponse)
 async def get_version():
-    # Read version from VERSION file (baked into image at build time)
-    version = None
-    version_path = Path("/app/VERSION")
-    try:
-        if version_path.exists():
-            version = version_path.read_text().strip()
-    except Exception:
-        pass
+    version = _read_version(default=None) or None
 
     # Read git SHA from env var (set as build arg)
     git_sha = os.environ.get("GIT_SHA") or None
@@ -254,13 +339,7 @@ async def check_update():
     """Check GitHub for newer releases."""
     import httpx
 
-    current = "unknown"
-    version_path = Path("/app/VERSION")
-    try:
-        if version_path.exists():
-            current = version_path.read_text().strip()
-    except Exception:
-        pass
+    current = _read_version()
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
