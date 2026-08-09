@@ -140,15 +140,22 @@ def init():
             ('lexicon_post_processing', 'analyze,cues,tags,cloud'),
             ('sync_mode', 'scan'),
             ('webhook_url', ''),
-            -- Path PREFIX the Lexicon host Mac uses to read the NAS music tree.
-            -- The worker writes to container /music (== NAS /volume1/music), which
-            -- the Mac reads over an SMB mount at /Volumes/music (live, instant —
-            -- no sync lag or ACL dependency). Downloads ALSO propagate to the Mac's
-            -- Synology-Drive replica (~/Music) because finished files keep the
-            -- inherited Synology ACL (see the _download_track_via_tiddl delivery
-            -- note: chmod would strip that ACL and strand the file).
-            ('lexicon_library_path', '/Volumes/music'),
-            ('lexicon_input_path', '/Volumes/music/Input'),
+            -- Path PREFIX the Lexicon host Mac uses to read the music tree.
+            -- 2026-08-08: these are now LOCAL Mac paths, not SMB. Engine DJ refuses
+            -- /Volumes/* locations, so every track imported under the old SMB model
+            -- was invisible to Engine export. The Mac keeps a one-way rsync replica
+            -- (scripts/sync-nas-to-mac.sh) of Database/ and Input/, and
+            -- tasks/sync_gate.py holds each import until the file has landed there.
+            -- Synology Drive is NO LONGER involved: two-way syncing the whole share
+            -- destroyed the Engine library (12 conflict copies) and jammed on
+            -- SoundSwitch project files.
+            ('lexicon_library_path', '/Users/willcurran/Music/Database'),
+            ('lexicon_input_path', '/Users/willcurran/Music/Input'),
+            -- Replication gate (see tasks/sync_gate.py). Fails open by design.
+            ('sync_gate_enabled', '1'),
+            ('sync_gate_heartbeat_path', '/downloads/.waxflow-sync-heartbeat'),
+            ('sync_gate_max_hold_seconds', '3600'),
+            ('sync_gate_heartbeat_max_age_seconds', '1800'),
             ('tidal_download_quality', 'max'),
             ('downloads_path', '/downloads'),
             ('lexicon_api_url', ''),

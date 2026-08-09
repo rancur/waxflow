@@ -21,7 +21,11 @@ services:
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://localhost:8402/api/spotify/callback}
       - TIDARR_URL=${TIDARR_URL:-http://localhost:8484}  # optional: only for legacy Tidarr fallback
       - LEXICON_API_URL=${LEXICON_API_URL:-http://localhost:48624}
-      - MUSIC_LIBRARY_PATH=/music
+      # The bind mount above still points at the share ROOT so Plex path
+      # translation (plex_music_container_prefix=/music) and existing
+      # /music/Database/... file_path rows keep resolving. The LIBRARY root
+      # is a subdirectory of it -- that is what the worker writes into.
+      - MUSIC_LIBRARY_PATH=${MUSIC_LIBRARY_PATH:-/music/Database}
       - SLS_DB_PATH=/app/data/sync.db
     restart: unless-stopped
     healthcheck:
@@ -54,7 +58,11 @@ services:
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://localhost:8402/api/spotify/callback}
       - TIDARR_URL=${TIDARR_URL:-http://localhost:8484}  # optional: only for legacy Tidarr fallback
       - LEXICON_API_URL=${LEXICON_API_URL:-http://localhost:48624}
-      - MUSIC_LIBRARY_PATH=/music
+      # The bind mount above still points at the share ROOT so Plex path
+      # translation (plex_music_container_prefix=/music) and existing
+      # /music/Database/... file_path rows keep resolving. The LIBRARY root
+      # is a subdirectory of it -- that is what the worker writes into.
+      - MUSIC_LIBRARY_PATH=${MUSIC_LIBRARY_PATH:-/music/Database}
       - SLS_DB_PATH=/app/data/sync.db
       - TIDDL_PATH=/tiddl-config
     depends_on:

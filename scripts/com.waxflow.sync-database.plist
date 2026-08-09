@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  WaxFlow — one-way NAS -> Mac library replication (replaces Synology Drive).
+
+  Install on the Lexicon host Mac (192.168.1.116):
+    scp scripts/sync-nas-to-mac.sh willcurran@192.168.1.116:.waxflow/sync-nas-to-mac.sh
+    scp scripts/com.waxflow.sync-database.plist \
+        willcurran@192.168.1.116:Library/LaunchAgents/com.waxflow.sync-database.plist
+    ssh willcurran@192.168.1.116 'chmod +x ~/.waxflow/sync-nas-to-mac.sh && \
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.waxflow.sync-database.plist'
+
+  120 s matches com.waxflow.mount-music, so a post-sleep remount is healed before
+  the next replication pass. The script self-locks, so a long first pass simply
+  causes subsequent firings to exit immediately.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.waxflow.sync-database</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/willcurran/.waxflow/sync-nas-to-mac.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>120</integer>
+  <key>StandardOutPath</key><string>/Users/willcurran/.waxflow/sync-database.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/willcurran/.waxflow/sync-database.launchd.err.log</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>5</integer>
+</dict>
+</plist>

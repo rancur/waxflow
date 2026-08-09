@@ -273,7 +273,7 @@ async def check_update():
                 return {
                     "current_version": current,
                     "latest_version": latest,
-                    "update_available": latest != current and latest > current,
+                    "update_available": _is_newer(latest, current),
                     "release_url": data.get("html_url"),
                     "release_notes": data.get("body", "")[:500],
                     "published_at": data.get("published_at"),
@@ -283,6 +283,32 @@ async def check_update():
 
     return {"current_version": current, "update_available": False}
 
+
+
+def _version_tuple(v: str) -> tuple:
+    """Parse a dotted version into comparable ints, ignoring any suffix."""
+    parts = []
+    for chunk in (v or "").split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _is_newer(latest: str, current: str) -> bool:
+    """True when `latest` is a strictly newer release than `current`.
+
+    A plain string compare is wrong across a version-component boundary:
+    "2.9.0" > "2.10.1" is True lexicographically, so the update banner was
+    inverted for exactly the 2.9 -> 2.10 upgrade this deployment was sitting on.
+    """
+    if not latest or not current:
+        return False
+    return _version_tuple(latest) > _version_tuple(current)
 
 # ============================================================
 # Config Backup System

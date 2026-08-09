@@ -22,7 +22,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/openclaw/spotify-lexicon-sync/scripts/backup-lexicon-db.sh</string>
+		<string>/Users/openclaw/waxflow/scripts/backup-lexicon-db.sh</string>
 	</array>
 	<key>RunAtLoad</key>
 	<false/>

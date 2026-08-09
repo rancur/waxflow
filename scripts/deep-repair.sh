@@ -49,8 +49,19 @@ fi
 
 if [ "$NEEDS_REPAIR" = true ]; then
     log "REPAIR NEEDED: $REASON"
-    # Hook: Add your alerting/repair dispatch here
-    # Example: curl -X POST your-webhook-url -d "{\"reason\": \"$REASON\"}"
+    # Dispatch. This used to be a commented-out example, so the script computed a
+    # verdict every run and then threw it away — it could never have alerted anyone.
+    # Uses the same env var as monitor-parity.sh so one setting covers both.
+    if [ -n "${WAXFLOW_ALERT_WEBHOOK:-}" ]; then
+        curl -s -m 5 -X POST "$WAXFLOW_ALERT_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{\"source\":\"deep-repair\",\"severity\":\"warning\",\"reason\":\"${REASON}\",\"parity_pct\":${PCT:-null},\"errors\":${ERRORS:-null}}" \
+            >/dev/null 2>&1 \
+            && log "alert posted to WAXFLOW_ALERT_WEBHOOK" \
+            || log "WARN: alert POST failed"
+    else
+        log "WARN: repair needed but WAXFLOW_ALERT_WEBHOOK is unset — nobody was told"
+    fi
 else
     log "All clear, no repair needed"
 fi
