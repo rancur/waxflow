@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.12.3 — build release images on native runners, not QEMU
+
+The first version of `release-images.yml` cross-built arm64 through
+`docker/setup-qemu-action`. Measured on the 2.12.2 release:
+
+| image | build time |
+|---|---|
+| api | 6 min |
+| worker | 9 min |
+| **web (Next.js)** | **46+ min, abandoned** |
+
+Emulating a Node build is pathologically slow, and it would have made **every**
+release take ~50 minutes — which defeats the point of publishing images so that
+updates are fast.
+
+Each architecture now builds on a runner of that architecture (`ubuntu-latest`
+and `ubuntu-24.04-arm`, free for public repos) and the two are joined into one
+multi-arch manifest. Per-arch jobs push **by digest only**; the human-readable
+tags are attached by the merge job once both architectures exist, so a tag never
+points at a half-published set.
+
+
 ## 2.12.2 — fix: WaxFlow could not be built from a fresh clone
 
 `sync-web/public/` was never committed, but `sync-web/Dockerfile` COPYs it out of

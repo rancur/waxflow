@@ -2,13 +2,17 @@ name: Publish release images
 
 # Auto-update pulls prebuilt images instead of rebuilding from source. That is
 # what makes an unattended 3am update safe: a from-source rebuild of the worker
-# took ~25 minutes on a Synology NAS and wedged the Docker daemon once. Pulling a
-# published layer takes seconds and needs no compiler on the user's box.
+# image took ~25 minutes on a Synology NAS and wedged the Docker daemon once.
+#
+# BUILT ON NATIVE RUNNERS, NOT QEMU. The first version of this workflow used
+# docker/setup-qemu-action to cross-build arm64. api and worker took 6 and 9
+# minutes; the Next.js web build took over 46 minutes under emulation and had to
+# be abandoned — which would have made every release ~50 minutes and defeated the
+# purpose. Each architecture now builds on its own native runner and the two are
+# joined into one multi-arch manifest, so a release is a few minutes.
 #
 # Publishes:
-#   ghcr.io/<owner>/waxflow-api:<version>     + :latest
-#   ghcr.io/<owner>/waxflow-worker:<version>  + :latest
-#   ghcr.io/<owner>/waxflow-web:<version>     + :latest
+#   ghcr.io/<owner>/waxflow-{api,worker,web}:<version> + :latest  (amd64 + arm64)
 
 on:
   release:
@@ -16,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build and push (e.g. 2.11.0)"
+        description: "Version to build and push (e.g. 2.12.2)"
         required: true
 
 permissions:
@@ -24,22 +28,79 @@ permissions:
   packages: write
 
 jobs:
-  publish:
+  # ---------------------------------------------------------------------------
+  # One job per (service, architecture), each on a runner of that architecture.
+  # Pushes by DIGEST only — the human-readable tags are attached by the merge job
+  # once both architectures exist, so a tag never points at a half-published set.
+  # ---------------------------------------------------------------------------
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cross product: 3 services x 2 architectures = 6 jobs, each native.
+        service: [api, worker, web]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm   # free native arm64 runner for public repos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve build context
+        id: ctx
+        run: |
+          case "${{ matrix.service }}" in
+            api)    echo "context=." >> "$GITHUB_OUTPUT"; echo "dockerfile=sync-api/Dockerfile" >> "$GITHUB_OUTPUT" ;;
+            worker) echo "context=./sync-worker" >> "$GITHUB_OUTPUT"; echo "dockerfile=./sync-worker/Dockerfile" >> "$GITHUB_OUTPUT" ;;
+            web)    echo "context=./sync-web" >> "$GITHUB_OUTPUT"; echo "dockerfile=./sync-web/Dockerfile" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.ctx.outputs.context }}
+          file: ${{ steps.ctx.outputs.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          outputs: type=image,name=ghcr.io/${{ steps.ctx.outputs.owner }}/waxflow-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.service }}-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.service }}-${{ matrix.arch }}
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Join the per-arch digests into one tagged manifest per service.
+  # ---------------------------------------------------------------------------
+  manifest:
+    needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - service: api
-            context: .
-            dockerfile: sync-api/Dockerfile
-          - service: worker
-            context: ./sync-worker
-            dockerfile: ./sync-worker/Dockerfile
-          - service: web
-            context: ./sync-web
-            dockerfile: ./sync-web/Dockerfile
-
+        service: [api, worker, web]
     steps:
       - uses: actions/checkout@v4
 
@@ -51,9 +112,10 @@ jobs:
           else
             V="${GITHUB_REF_NAME#v}"
           fi
-          # VERSION in the repo is the source of truth; refuse a mismatched tag
-          # rather than publishing an image whose /app/VERSION disagrees with it.
-          FILE_V="$(cat VERSION | tr -d '[:space:]')"
+          # VERSION in the repo is the source of truth. Publishing an image whose
+          # baked /app/VERSION disagrees with its tag would make the update check
+          # oscillate forever, so refuse rather than ship it.
+          FILE_V="$(tr -d '[:space:]' < VERSION)"
           if [ "$V" != "$FILE_V" ]; then
             echo "::error::tag/input version '$V' != VERSION file '$FILE_V'"
             exit 1
@@ -61,8 +123,11 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.service }}-*
+          merge-multiple: true
+          path: /tmp/digests
 
       - uses: docker/login-action@v3
         with:
@@ -70,19 +135,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          # linux/amd64 covers Synology/Intel NAS boxes; arm64 covers Apple
-          # silicon and Raspberry Pi hosts.
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-          tags: |
-            ghcr.io/${{ steps.v.outputs.owner }}/waxflow-${{ matrix.service }}:${{ steps.v.outputs.version }}
-            ghcr.io/${{ steps.v.outputs.owner }}/waxflow-${{ matrix.service }}:latest
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+      - name: Create and push manifest
+        run: |
+          IMAGE="ghcr.io/${{ steps.v.outputs.owner }}/waxflow-${{ matrix.service }}"
+          REFS=""
+          for f in /tmp/digests/*; do
+            d="$(cat "$f")"
+            [ -n "$d" ] && REFS="$REFS ${IMAGE}@${d}"
+          done
+          if [ -z "$REFS" ]; then
+            echo "::error::no digests found for ${{ matrix.service }}"
+            exit 1
+          fi
+          echo "joining:$REFS"
+          # shellcheck disable=SC2086
+          docker buildx imagetools create \
+            -t "${IMAGE}:${{ steps.v.outputs.version }}" \
+            -t "${IMAGE}:latest" \
+            $REFS
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.v.outputs.version }}"
