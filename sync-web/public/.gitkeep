@@ -1,0 +1,9 @@
+Next.js expects a public/ directory and sync-web/Dockerfile COPYs it out of the
+builder stage. It was never committed, so `docker compose up -d --build` from a
+fresh clone failed with:
+
+    failed to compute cache key: failed to calculate checksum of ref ... /app/public
+
+i.e. nobody could build WaxFlow from a clean checkout. It only worked for people
+whose working copy already had the directory. Keep this file so the directory
+always exists.
