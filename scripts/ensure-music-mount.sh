@@ -24,9 +24,45 @@ LOG="$HOME/.waxflow/mount-music.log"
 ts() { date "+%Y-%m-%dT%H:%M:%S"; }
 
 # 1) Healthy already? (mounted at the canonical path AND readable)
+#
+# v3 (2026-08-09) — DO NOT UNMOUNT ON A SINGLE SLOW ls.
+# The v2 check treated one failed `ls` as proof of a stale handle and unmounted.
+# Under NAS load (observed at load ~10 after a Container Manager restart) a
+# healthy share intermittently fails a single `ls`, so this script would unmount
+# a WORKING mount and then fail to restore it: `osascript mount volume` cannot
+# authenticate from a launchd agent (no GUI/keychain access), which is why the log
+# filled with "MOUNT FAILED" every 2 minutes and the sync agent aborted on 32 of
+# its last 40 passes while manual runs from a terminal always succeeded.
+#
+# Require several consecutive failures, spaced out, before touching the mount. A
+# genuinely stale handle stays broken; a briefly-slow server recovers on retry.
 if mount | grep -q " on ${MP} (smbfs"; then
-  if ls "${MP}" >/dev/null 2>&1; then exit 0; fi
-  echo "$(ts) stale mount detected at ${MP}, remounting" >>"$LOG"
+  readable=0; lserr=""
+  for attempt in 1 2 3; do
+    lserr="$(ls "${MP}" 2>&1 >/dev/null)"
+    if [ -z "$lserr" ]; then readable=1; break; fi
+    [ "$attempt" -lt 3 ] && sleep 3
+  done
+  if [ "$readable" -eq 1 ]; then exit 0; fi
+
+  # CRITICAL: "Operation not permitted" (EPERM) is macOS TCC denying THIS PROCESS
+  # access to a network volume — the mount is perfectly healthy. Unmounting here
+  # destroys a working share and cannot be undone from a launchd agent, because
+  # `osascript mount volume` has no GUI/keychain access either. That combination
+  # is what filled this log with MOUNT FAILED every 2 minutes while the very same
+  # commands succeeded from an interactive shell.
+  #
+  # FIX (one-time, GUI only): System Settings -> Privacy & Security ->
+  # Full Disk Access -> add /bin/bash  (then: launchctl kickstart -k
+  # gui/$(id -u)/com.waxflow.mount-music)
+  case "$lserr" in
+    *"Operation not permitted"*)
+      echo "$(ts) EPERM reading ${MP} — TCC is denying this process, mount is FINE. Not unmounting. Grant Full Disk Access to /bin/bash." >>"$LOG"
+      exit 2
+      ;;
+  esac
+
+  echo "$(ts) stale mount detected at ${MP} (3 consecutive failures: ${lserr}), remounting" >>"$LOG"
   umount "${MP}" 2>/dev/null || diskutil unmount "${MP}" >/dev/null 2>&1 \
     || diskutil unmount force "${MP}" >/dev/null 2>&1
 fi

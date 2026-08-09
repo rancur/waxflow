@@ -124,8 +124,19 @@ if ! mount | grep -q " on ${SRC} (smbfs"; then
     log "ABORT: ${SRC} is not mounted (ensure-music-mount.sh could not heal it)"
     exit 1
 fi
-if ! ls "$SRC" >/dev/null 2>&1; then
-    log "ABORT: ${SRC} is mounted but unreadable (stale handle)"
+LSERR="$(ls "$SRC" 2>&1 >/dev/null)"
+if [ -n "$LSERR" ]; then
+    case "$LSERR" in
+        *"Operation not permitted"*)
+            # macOS TCC, not a broken mount. The share is healthy; THIS process is
+            # denied. Nothing the script can do about it, and retrying forever just
+            # fills the log — say exactly how to fix it and stop.
+            log "ABORT: TCC denies this process access to ${SRC} (mount is healthy). One-time fix: System Settings -> Privacy & Security -> Full Disk Access -> add /bin/bash, then: launchctl kickstart -k gui/\$(id -u)/com.waxflow.sync-database"
+            ;;
+        *)
+            log "ABORT: ${SRC} unreadable (${LSERR})"
+            ;;
+    esac
     exit 1
 fi
 
