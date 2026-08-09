@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.12.2 — fix: WaxFlow could not be built from a fresh clone
+
+`sync-web/public/` was never committed, but `sync-web/Dockerfile` COPYs it out of
+the builder stage. So a clean checkout failed:
+
+    failed to compute cache key: failed to calculate checksum of ref ... /app/public
+
+**Nobody could build WaxFlow from a fresh clone.** It only worked for people whose
+working copy already happened to have the directory — which is why it went
+unnoticed until CI built from a clean checkout for the first time and the web
+image failed while api and worker succeeded.
+
+Fixed by tracking `sync-web/public/.gitkeep` and adding `RUN mkdir -p /app/public`
+so the COPY cannot fail even if the directory is absent from the build context.
+
+Also documented, because it looked alarming during review: `NEXT_PUBLIC_API_URL`
+is a build arg, but the frontend calls a RELATIVE `/api` and `next.config.js`
+rewrites it server-side from `INTERNAL_API_URL` at RUNTIME. Nothing user-specific
+is baked into the web image, which is what lets one published image serve every
+install.
+
+
 ## 2.12.1 — "Update Now" actually requests an update
 
 `POST /api/admin/update` wrote the literal string `requested at <timestamp>` into
