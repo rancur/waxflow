@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.12.4 — fix: the updater used the wrong compose project name
+
+The updater mounts the project at `/project`, and Compose derives the project name
+from the directory name — so it inferred `project` while the running stack was
+`waxflow`. A different project name means Compose tries to CREATE rather than
+RECREATE, so every apply died instantly with:
+
+    Conflict. The container name "/waxflow-api" is already in use
+
+**Auto-update would have failed on every single run.**
+
+Found by forcing an apply of the current version rather than waiting for a real
+release to expose it. The failure was safe — the stack stayed up and healthy on
+2.12.3 and `.update-result` correctly recorded `failed`, which is the fail-safe
+behaving as designed — but nothing would ever have updated.
+
+The project name is now detected from the running container's own
+`com.docker.compose.project` label, so it is correct wherever the project lives on
+disk. `WAXFLOW_PROJECT_NAME` overrides it.
+
+
 ## 2.12.3 — build release images on native runners, not QEMU
 
 The first version of `release-images.yml` cross-built arm64 through
