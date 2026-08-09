@@ -237,10 +237,44 @@ fi
 # file is newer than completed_at — that is what makes importing by LOCAL
 # /Users/... path safe despite replication lag.
 if [ "$DRY_RUN" -eq 0 ] && [ -d "$SRC/Input" ]; then
-    cat >"$HEARTBEAT.tmp" <<EOF
-{"status":"$STATUS","mode":"$MODE","completed_at":$(date +%s),"completed_at_iso":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","files_transferred":$TOTAL_FILES,"elapsed_seconds":$ELAPSED,"host":"$(scutil --get LocalHostName 2>/dev/null || hostname)","folders":"${FOLDERS[*]}"}
-EOF
-    mv -f "$HEARTBEAT.tmp" "$HEARTBEAT" 2>/dev/null || rm -f "$HEARTBEAT.tmp"
+    # Truncate-in-place, NOT write-tmp-then-mv. The share has Synology's recycle
+    # bin enabled, and every replace-by-rename was being captured as a deletion —
+    # one #recycle entry every 120 s, forever. A torn read is harmless here:
+    # sync_gate.py fails open on unparseable JSON by design.
+    printf '%s\n' "{\"status\":\"$STATUS\",\"mode\":\"$MODE\",\"completed_at\":$(date +%s),\"completed_at_iso\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"files_transferred\":$TOTAL_FILES,\"elapsed_seconds\":$ELAPSED,\"host\":\"$(scutil --get LocalHostName 2>/dev/null || hostname)\",\"folders\":\"${FOLDERS[*]}\"}" \
+        >"$HEARTBEAT" 2>/dev/null || true
+fi
+
+# --- Lexicon path-drift watchdog (read-only) ----------------------------------
+# WHY: Lexicon CANONICALISES imported paths through the boot-volume symlink,
+# rewriting the /Users/... path WaxFlow hands it into
+# /Volumes/Macintosh HD/Users/... — and Engine DJ refuses /Volumes/* locations.
+# Proven live on 2026-08-09: the first import after the path-contract cutover was
+# stored with that prefix even though WaxFlow sent a clean /Users path.
+#
+# So the source-side fix is necessary but NOT sufficient, and
+# scripts/repoint-lexicon-local.sh is NOT the one-shot we hoped for. This check
+# makes the drift impossible to miss: it is the exact failure that went unnoticed
+# from March to August and cost the Engine library.
+#
+# Read-only (mode=ro), so it is safe while Lexicon is running. Fixing still
+# requires Lexicon to be quit — see the log line's instruction.
+LEXICON_DB="$HOME/Library/Application Support/lexicon/main.db"
+if [ -f "$LEXICON_DB" ]; then
+    DRIFT=$(python3 - "$LEXICON_DB" <<'PY' 2>/dev/null
+import sqlite3, sys
+try:
+    c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+    print(c.execute(
+        "SELECT COUNT(*) FROM Track WHERE location LIKE '/Volumes/%'"
+    ).fetchone()[0])
+except Exception:
+    print("")
+PY
+)
+    if [ -n "$DRIFT" ] && [ "$DRIFT" -gt 0 ] 2>/dev/null; then
+        log "LEXICON PATH DRIFT: $DRIFT row(s) back on /Volumes/* — Engine DJ cannot see them. Quit Lexicon and run scripts/repoint-lexicon-local.sh --apply"
+    fi
 fi
 
 [ "$STATUS" = "ok" ] || exit 1
