@@ -62,7 +62,27 @@ except Exception:
 " >/dev/null 2>&1
 }
 
-compose() { docker compose --project-directory "$PROJECT_DIR" "$@"; }
+# COMPOSE PROJECT NAME — must match the running stack.
+#
+# Compose derives the project name from the directory name, and this container
+# mounts the project at /project, so it inferred "project" while the real stack
+# was "waxflow". Different project name means compose tries to CREATE rather than
+# RECREATE, and immediately hits:
+#
+#   Conflict. The container name "/waxflow-api" is already in use
+#
+# Detect it from the running container's own compose label so this is
+# self-configuring regardless of where the project lives on disk.
+detect_project() {
+    docker inspect waxflow-api \
+        --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null
+}
+PROJECT_NAME="${WAXFLOW_PROJECT_NAME:-$(detect_project)}"
+[ -z "$PROJECT_NAME" ] && PROJECT_NAME="waxflow"
+
+compose() {
+    docker compose --project-name "$PROJECT_NAME" --project-directory "$PROJECT_DIR" "$@"
+}
 
 apply_tag() {   # tag -> pull + recreate the three services on that tag
     tag="$1"
@@ -72,7 +92,7 @@ apply_tag() {   # tag -> pull + recreate the three services on that tag
     return 0
 }
 
-log "updater started (poll=${POLL}s, services='$SERVICES')"
+log "updater started (poll=${POLL}s, project='$PROJECT_NAME', services='$SERVICES')"
 if ! docker version >/dev/null 2>&1; then
     log "FATAL: cannot reach the Docker socket — is /var/run/docker.sock mounted?"
     exit 1
