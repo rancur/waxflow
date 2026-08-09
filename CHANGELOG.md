@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.12.0 — Auto-update actually works
+
+`auto_update_enabled` has existed for a while. It could never have worked. Three
+independent reasons, each sufficient on its own:
+
+1. **The version check used a string compare.** `"2.11.0" > "2.9.0"` is `False`
+   (at index 2, `"1" < "9"`), so every x.9 -> x.10+ upgrade was invisible. The
+   reverse was `True`, meaning the check could have offered a **downgrade** as an
+   update. Present in both `routes/admin.py` and `tasks/auto_update.py`.
+2. **Nothing applied the update.** `scripts/auto-update.sh` had to be installed in
+   the host's crontab by hand; nothing shipped it, so the signal file the worker
+   wrote was never read by anything.
+3. **Even when triggered, it did not update.** The script ran
+   `docker compose up -d --build` against the source already on disk — a rebuild
+   of the same version.
+
+### Added — `waxflow-updater`
+A container cannot restart itself, so applying an update needs host-side Docker
+access. This is the only place WaxFlow asks for it, and it is deliberately
+constrained:
+
+- **`network_mode: none`.** It never downloads anything. The worker (network, no
+  socket) decides the target version; the Docker *daemon* fetches image layers
+  when asked over the socket. Nothing with host-root access talks to the internet.
+- **Rollback.** After applying, it health-checks the API and restores the previous
+  tag if the new version does not come up. This runs unattended at 3am by default;
+  an update that half-applies and is never noticed is worse than one that never ran.
+- **Input is treated as untrusted.** The target tag comes from the GitHub API and
+  is refused unless it matches semver, so nothing unexpected reaches `docker pull`.
+
+Delete the service from `docker-compose.yml` if you would rather not grant socket
+access; everything else keeps working.
+
+### Added — published images
+`.github/workflows/release-images.yml` builds and pushes
+`ghcr.io/<owner>/waxflow-{api,worker,web}` (linux/amd64 + linux/arm64) on every
+published release, and refuses to publish if the tag disagrees with `VERSION`.
+
+Updating is now a pull, not a rebuild. The rebuild path took ~25 minutes for the
+worker image on a Synology NAS and wedged the Docker daemon once — unacceptable
+for an unattended 3am job. `build:` blocks remain, so `docker compose up -d
+--build` still works offline and for forks (`WAXFLOW_REGISTRY`).
+
+### Changed
+- `auto_update_enabled` defaults to `1` for **new** installs. `INSERT OR IGNORE`
+  means existing deployments keep whatever they already had.
+- Compose images are `${WAXFLOW_REGISTRY:-ghcr.io/rancur}/waxflow-*:${WAXFLOW_IMAGE_TAG:-${VERSION:-latest}}`.
+
+### Tests
+`tests/test_auto_update_version.py` — 7 cases pinning the comparison, including
+the exact regression (2.9 -> 2.10/2.11 must be newer) and that a downgrade is
+never offered.
+
+
 ## 2.11.0 — Path contract, one-way replication, and a pile of real bugs
 
 Everything here was found by *running* the system during a live incident, not by

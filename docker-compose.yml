@@ -5,7 +5,9 @@ services:
       dockerfile: sync-api/Dockerfile
       args:
         - GIT_SHA=${GIT_SHA:-unknown}
-    image: waxflow-api:${VERSION:-latest}
+    # Published on release by .github/workflows/release-images.yml. The build:
+    # block above still works — `docker compose build` overrides this locally.
+    image: ${WAXFLOW_REGISTRY:-ghcr.io/rancur}/waxflow-api:${WAXFLOW_IMAGE_TAG:-${VERSION:-latest}}
     container_name: waxflow-api
     ports:
       - "8402:8402"
@@ -40,7 +42,7 @@ services:
       context: ./sync-worker
       args:
         - GIT_SHA=${GIT_SHA:-unknown}
-    image: waxflow-worker:${VERSION:-latest}
+    image: ${WAXFLOW_REGISTRY:-ghcr.io/rancur}/waxflow-worker:${WAXFLOW_IMAGE_TAG:-${VERSION:-latest}}
     container_name: waxflow-worker
     ports:
       - "8403:8403"
@@ -83,7 +85,7 @@ services:
         - GIT_SHA=${GIT_SHA:-unknown}
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8402}
         - INTERNAL_API_URL=http://sync-api:8402
-    image: waxflow-web:${VERSION:-latest}
+    image: ${WAXFLOW_REGISTRY:-ghcr.io/rancur}/waxflow-web:${WAXFLOW_IMAGE_TAG:-${VERSION:-latest}}
     container_name: waxflow-web
     ports:
       - "8400:3000"
@@ -93,6 +95,33 @@ services:
     depends_on:
       - sync-api
     restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Auto-updater. A container cannot replace itself, so applying an update needs
+  # host-side Docker access — this is the only place WaxFlow asks for it.
+  #
+  # SECURITY: the Docker socket is root-equivalent on the host, so this service
+  # runs with NO NETWORK. It never downloads anything; the worker (network, no
+  # socket) decides what to update to, and the DAEMON fetches the image layers
+  # when asked over the socket. Nothing with host-root access talks to the
+  # internet. Set WAXFLOW_AUTOUPDATE=0 in .env to disable, or remove the service.
+  # ---------------------------------------------------------------------------
+  waxflow-updater:
+    image: docker:27-cli
+    container_name: waxflow-updater
+    network_mode: none
+    entrypoint: ["/bin/sh", "/updater/waxflow-updater.sh"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts/waxflow-updater.sh:/updater/waxflow-updater.sh:ro
+      - .:/project:ro
+      - sync-data:/data
+    environment:
+      - WAXFLOW_UPDATE_POLL_SECONDS=${WAXFLOW_UPDATE_POLL_SECONDS:-60}
+      - WAXFLOW_HEALTH_TIMEOUT=${WAXFLOW_HEALTH_TIMEOUT:-180}
+    restart: unless-stopped
+    depends_on:
+      - sync-api
 
 volumes:
   sync-data:

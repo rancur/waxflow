@@ -171,7 +171,13 @@ def init():
             ('analyze_interval_seconds', '3600'),
             ('analyze_batch_size', '20'),
             ('analyze_total_processed', '0'),
-            ('auto_update_enabled', '0'),
+            -- Auto-update is ON for NEW installs (INSERT OR IGNORE, so existing
+            -- deployments keep whatever they already had). It is safe to default on
+            -- because the updater pulls a prebuilt image rather than rebuilding,
+            -- takes a pre-update backup, health-checks afterwards and ROLLS BACK on
+            -- failure. Disable with WAXFLOW_AUTOUPDATE=0 or by removing the
+            -- waxflow-updater service from docker-compose.yml.
+            ('auto_update_enabled', '1'),
             ('auto_update_schedule', 'daily_3am'),
             ('auto_backup_before_update', '1'),
             ('last_update_check', ''),
@@ -213,7 +219,7 @@ def init():
             ('metadata_fallback_enabled', '1'),
             ('metadata_fallback_batch', '8'),
             ('metadata_fallback_interval_seconds', '3600'),
-            ('musicbrainz_user_agent', 'WaxFlow/2.11 (https://github.com/rancur/waxflow)'),
+            ('musicbrainz_user_agent', 'WaxFlow/2.12 (https://github.com/rancur/waxflow)'),
             -- Acoustic-fingerprint fallback (tasks/acoustid_fallback.py). fpcalc is
             -- in the image; provide a free AcoustID key here + flip enabled to
             -- activate (both read live, no redeploy). OFF until provisioned.
