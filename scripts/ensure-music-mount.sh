@@ -7,7 +7,7 @@
 # Deployed on the Lexicon host Mac at ~/.waxflow/ensure-music-mount.sh, run every
 # ~2 min by LaunchAgent com.waxflow.mount-music. THIS repo copy is canonical —
 # deploy changes with:
-#   scp scripts/ensure-music-mount.sh willcurran@192.168.1.116:.waxflow/ensure-music-mount.sh
+#   scp scripts/ensure-music-mount.sh <you>@<lexicon-mac>:.waxflow/ensure-music-mount.sh
 #
 # v2 (2026-07-20) — WRONG-MOUNTPOINT HEAL. Root cause of the Jul-18 sleep incident:
 # when the Mac sleeps, the SMB session drops; on wake macOS auto-remounts the share
@@ -29,11 +29,19 @@ MP="/Volumes/music"
 # while `CCPD-Database.local` and 192.168.1.221 both resolved instantly and
 # `smbutil status 192.168.1.221` negotiated fine. Mounting by IP succeeded in 1s.
 #
-# The IP is the same one every other integration already hardcodes (WaxFlow API,
-# Plex, LEXICON_API_URL peers), so it is no less stable than what we depend on
-# elsewhere. WAXFLOW_SHARE_HOST overrides it; CCPD-Database.local also works.
-SHARE_HOST="${WAXFLOW_SHARE_HOST:-192.168.1.221}"
-URL="smb://${SHARE_HOST}/music"
+# Configure per host. Put your NAS address in ~/.waxflow/waxflow.conf:
+#     WAXFLOW_SHARE_HOST=192.168.1.50      # IP is the most reliable
+#     WAXFLOW_SHARE_NAME=music
+# An IP or a plain hostname (nas.local) both work. A Bonjour SERVICE name does
+# not — that is the bug described above.
+[ -r "$HOME/.waxflow/waxflow.conf" ] && . "$HOME/.waxflow/waxflow.conf"
+SHARE_HOST="${WAXFLOW_SHARE_HOST:-}"
+SHARE_NAME="${WAXFLOW_SHARE_NAME:-music}"
+if [ -z "$SHARE_HOST" ]; then
+  echo "$(date '+%Y-%m-%dT%H:%M:%S') CONFIG MISSING: set WAXFLOW_SHARE_HOST in ~/.waxflow/waxflow.conf (e.g. your NAS IP)" >>"$HOME/.waxflow/mount-music.log"
+  exit 64
+fi
+URL="smb://${SHARE_HOST}/${SHARE_NAME}"
 LOG="$HOME/.waxflow/mount-music.log"
 ts() { date "+%Y-%m-%dT%H:%M:%S"; }
 

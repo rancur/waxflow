@@ -84,12 +84,18 @@ lost its entire database. Three rules, and they are load-bearing:
    `/music/Database/...` `tracks.file_path` rows keep resolving. Do NOT "simplify"
    this by remapping the mount — it would break every one of those rows.
 
-2. **Lexicon gets LOCAL Mac paths, never `/Volumes/*`.**
-   `lexicon_library_path=/Users/willcurran/Music/Database`. Engine DJ refuses
-   `/Volumes/*` locations, which is why tracks imported under the old SMB model were
-   invisible to Engine export. Engine also stores paths relative to its own folder
+2. **Prefer LOCAL Lexicon-host paths over `/Volumes/*`.**
+   `lexicon_library_path=<local path>` (e.g. `~/Music/Database`), set via
+   `LEXICON_LIBRARY_PATH`. NOT because Engine DJ rejects `/Volumes/*` — it does
+   not; that was tested on 2026-08-09 and disproved, all 40 rows carrying a
+   `/Volumes/Macintosh HD/` prefix were present in Engine. Prefer local paths
+   because an SMB path breaks the moment the share unmounts and the file then
+   exists only on the NAS. Engine stores paths relative to its own folder
    (`../Database/<Artist>/...`), so `Engine Library/` must remain a sibling of
-   `Database/` inside `~/Music`.
+   `Database/`.
+
+   Engine also enforces `UNIQUE (path)`: if Lexicon holds more rows than distinct
+   files, the surplus can never sync. See `scripts/merge-duplicate-lexicon-rows.py`.
 
 3. **Replication is one-way NAS -> Mac, and imports wait for it.**
    `scripts/sync-nas-to-mac.sh` (launchd, 120 s) pulls `Database/` and `Input/` down;
@@ -97,5 +103,11 @@ lost its entire database. Three rules, and they are load-bearing:
    NOT involved — two-way syncing the whole share produced 12 conflict copies of
    Engine's database and jammed permanently on SoundSwitch project files.
 
-`scripts/repoint-lexicon-local.sh` exists to clean up pre-2026-08-08 rows. If it ever
-finds work again, treat that as a regression signal, not routine maintenance.
+`scripts/repoint-lexicon-local.sh` normalises legacy rows. Note that Lexicon
+CANONICALISES imported paths through the boot-volume symlink, so new imports may
+reappear as `/Volumes/Macintosh HD/Users/...` — cosmetic, not a fault. The sync
+agent logs an action-needed line only for genuine SMB paths.
+
+**Never put an Engine library inside a two-way sync.** Two-way syncing the share
+containing Engine's live `m.db` produced 12 conflict copies and left the real
+database with 2 tracks in it. That, not path format, is what lost the library.

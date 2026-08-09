@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Initialize the sync database with all required tables."""
 
+import os
+
 from db import get_db
 
 
@@ -140,17 +142,19 @@ def init():
             ('lexicon_post_processing', 'analyze,cues,tags,cloud'),
             ('sync_mode', 'scan'),
             ('webhook_url', ''),
-            -- Path PREFIX the Lexicon host Mac uses to read the music tree.
-            -- 2026-08-08: these are now LOCAL Mac paths, not SMB. Engine DJ refuses
-            -- /Volumes/* locations, so every track imported under the old SMB model
-            -- was invisible to Engine export. The Mac keeps a one-way rsync replica
-            -- (scripts/sync-nas-to-mac.sh) of Database/ and Input/, and
-            -- tasks/sync_gate.py holds each import until the file has landed there.
-            -- Synology Drive is NO LONGER involved: two-way syncing the whole share
-            -- destroyed the Engine library (12 conflict copies) and jammed on
-            -- SoundSwitch project files.
-            ('lexicon_library_path', '/Users/willcurran/Music/Database'),
-            ('lexicon_input_path', '/Users/willcurran/Music/Input'),
+            -- Path PREFIX the Lexicon host Mac uses to read the music tree. The
+            -- worker rewrites its own container path to this before telling Lexicon
+            -- where a file is (process_pipeline._container_to_mac_path).
+            --
+            -- Default is the SMB mount, which needs no replication and works out of
+            -- the box. If you ALSO export to Engine DJ, consider pointing these at a
+            -- LOCAL path on the Mac instead (e.g. ~/Music/Database) and running
+            -- scripts/sync-nas-to-mac.sh -- see "Local paths and Engine DJ" in the
+            -- README. Set them in Settings, or seed via LEXICON_LIBRARY_PATH /
+            -- LEXICON_INPUT_PATH. Do NOT hardcode a username here: this seeds every
+            -- new install.
+            ('lexicon_library_path', '/Volumes/music/Database'),
+            ('lexicon_input_path', '/Volumes/music/Input'),
             -- Replication gate (see tasks/sync_gate.py). Fails open by design.
             ('sync_gate_enabled', '1'),
             ('sync_gate_heartbeat_path', '/downloads/.waxflow-sync-heartbeat'),
@@ -209,7 +213,7 @@ def init():
             ('metadata_fallback_enabled', '1'),
             ('metadata_fallback_batch', '8'),
             ('metadata_fallback_interval_seconds', '3600'),
-            ('musicbrainz_user_agent', 'WaxFlow/2.9 (https://github.com/rancur/waxflow)'),
+            ('musicbrainz_user_agent', 'WaxFlow/2.11 (https://github.com/rancur/waxflow)'),
             -- Acoustic-fingerprint fallback (tasks/acoustid_fallback.py). fpcalc is
             -- in the image; provide a free AcoustID key here + flip enabled to
             -- activate (both read live, no redeploy). OFF until provisioned.
@@ -591,6 +595,30 @@ def init():
         if "next_retry_at" not in iq_cols:
             conn.execute("ALTER TABLE import_queue ADD COLUMN next_retry_at TEXT")
             print("Added import_queue.next_retry_at column.")
+
+        # Host-specific paths from the environment. These are the ONE pair of
+        # settings that cannot have a correct universal default: they describe
+        # where the Lexicon *host* sees the music tree, which differs per machine
+        # (SMB mount vs a local replica, and any local path contains a username).
+        # Seeded above with the SMB default; override here without editing SQL.
+        # Applied on every start so .env stays the source of truth, but only when
+        # the variable is actually set.
+        for env_key, cfg_key in (
+            ("LEXICON_LIBRARY_PATH", "lexicon_library_path"),
+            ("LEXICON_INPUT_PATH", "lexicon_input_path"),
+        ):
+            val = (os.environ.get(env_key) or "").strip()
+            if val:
+                cur = conn.execute(
+                    "SELECT value FROM app_config WHERE key = ?", (cfg_key,)
+                ).fetchone()
+                if cur is None or cur[0] != val:
+                    conn.execute(
+                        "INSERT INTO app_config (key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (cfg_key, val),
+                    )
+                    print(f"Set {cfg_key} from {env_key}: {val}")
 
     print("Database initialized successfully.")
 

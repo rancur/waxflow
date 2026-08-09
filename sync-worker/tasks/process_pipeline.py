@@ -2176,7 +2176,7 @@ def _container_to_mac_path(
         /downloads/<rel>       -> <lexicon_input_path>/<rel>
         <MUSIC_LIBRARY_PATH>/<rel> -> <lexicon_library_path>/<rel>
 
-    ``lexicon_library_path`` is now ``/Users/willcurran/Music/Database`` — a LOCAL
+    ``lexicon_library_path`` may be a LOCAL host path (e.g. ``~/Music/Database``) — a
     path. This is the whole point: Engine DJ refuses ``/Volumes/*`` locations, so
     every track imported under the previous SMB model (``/Volumes/music/...``) or
     via the ``/Volumes/Macintosh HD/`` symlink was invisible to Engine export. Local

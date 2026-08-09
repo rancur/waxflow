@@ -393,6 +393,69 @@ volumes:
 
 ---
 
+---
+
+## Local paths and Engine DJ
+
+By default WaxFlow tells Lexicon where a file is using the **SMB mount**
+(`/Volumes/music/...`). That needs no replication and works out of the box.
+
+If you also export from Lexicon to **Engine DJ**, there are two things worth
+knowing, both learned the hard way:
+
+**1. Never put your Engine library inside a two-way sync.** Engine's `m.db` is a
+live SQLite file. Two-way syncing the share that contains it produced 12 conflict
+copies (~9.4 GB) and left the real database with 2 tracks in it. Engine stores
+track paths *relative* to its own folder (`../Database/<Artist>/...`), so a copy
+on the NAS is meaningless as well as dangerous. Keep `Engine Library/` local and
+excluded from every sync.
+
+**2. Engine holds at most one row per file.** Its schema declares
+`CONSTRAINT C_path UNIQUE (path)`. If Lexicon has more rows than distinct files —
+several rows pointing at the same audio — the surplus can never sync, and a
+partially-applied sync can fail with `SqliteError: FOREIGN KEY constraint failed`.
+Check with:
+
+```sql
+SELECT COUNT(*), COUNT(DISTINCT location) FROM Track;   -- Lexicon's main.db
+```
+
+If those differ, `scripts/merge-duplicate-lexicon-rows.py` merges them safely — it
+migrates playlist memberships onto the surviving row *before* deleting, because a
+plain delete silently drops memberships the duplicate held.
+
+### Optional: local replication
+
+To hand Lexicon local paths instead, set `LEXICON_LIBRARY_PATH` /
+`LEXICON_INPUT_PATH` to paths on the Lexicon host and run the replication agent:
+
+```bash
+mkdir -p ~/.waxflow
+cp scripts/sync-nas-to-mac.sh scripts/ensure-music-mount.sh ~/.waxflow/
+chmod +x ~/.waxflow/*.sh
+printf 'WAXFLOW_SHARE_HOST=192.168.1.50
+WAXFLOW_NAS_SSH=nas
+' > ~/.waxflow/waxflow.conf
+sed "s|/Users/willcurran|$HOME|g" scripts/com.waxflow.sync-database.plist \
+    > ~/Library/LaunchAgents/com.waxflow.sync-database.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.waxflow.sync-database.plist
+```
+
+It replicates **one way, NAS to Mac** — a pull-only replica cannot create conflict
+copies. `tasks/sync_gate.py` then holds each import until the file has actually
+landed locally, so Lexicon never imports a path that does not exist yet.
+
+Two macOS gotchas the scripts now handle explicitly, both of which cost real
+downtime here:
+
+* **Full Disk Access.** A launchd agent cannot read `/Volumes/*` until you add
+  `/bin/bash` under System Settings → Privacy & Security → Full Disk Access.
+  Without it every pass fails with `Operation not permitted`, which looks exactly
+  like a dead mount but is not.
+* **Address the NAS by IP or plain hostname, never a Bonjour *service* name.**
+  `NAME._smb._tcp.local` resolves only via service discovery; when that
+  advertisement goes stale, mounts **hang forever** rather than failing.
+
 ## Tech Stack
 
 | Component | Technology |

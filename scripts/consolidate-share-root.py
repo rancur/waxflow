@@ -10,8 +10,8 @@ WHY
     This script moves them into Database/, preserving the relative layout so the
     Lexicon repoint is a pure prefix insertion:
 
-        /Users/willcurran/Music/<Artist>/<rel>
-     -> /Users/willcurran/Music/Database/<Artist>/<rel>
+        <mac music root>/<Artist>/<rel>
+     -> <mac music root>/Database/<Artist>/<rel>
 
     Phase 3 then re-points the container mount at /volume1/music/Database, so
     tracks.file_path values of the form /music/<Artist>/<rel> keep resolving to the
@@ -53,6 +53,10 @@ SHARE = os.environ.get("WAXFLOW_SHARE", "/Volumes/music")
 LIBRARY = "Database"
 QUARANTINE = "#waxflow-quarantine"
 MANIFEST_DIR = os.path.expanduser("~/WaxFlow-Backups")
+# Where the Lexicon HOST sees its library. Used only to write old->new
+# columns into the manifest so a later repoint can be driven from it.
+MAC_MUSIC_ROOT = os.environ.get("WAXFLOW_MAC_MUSIC_ROOT",
+                               os.path.expanduser("~/Music"))
 
 KEEP_AT_ROOT = {
     "Database", "Input", "DJ Will See", "Disorganized", "Engine Library",
@@ -158,8 +162,8 @@ def main() -> int:
     with open(manifest_path, "w", encoding="utf-8") as mf:
         mf.write("action\tbytes\tnas_old\tnas_new\tmac_old\tmac_new\n")
         for action, size, rel, dst_rel in rows:
-            mac_old = f"/Users/willcurran/Music/{rel}"
-            mac_new = f"/Users/willcurran/Music/{dst_rel}"
+            mac_old = f"{MAC_MUSIC_ROOT}/{rel}"
+            mac_new = f"{MAC_MUSIC_ROOT}/{dst_rel}"
             mf.write(f"{action}\t{size}\t{rel}\t{dst_rel}\t{mac_old}\t{mac_new}\n")
 
             if not args.apply:

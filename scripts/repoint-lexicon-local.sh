@@ -1,15 +1,15 @@
 #!/bin/bash
 # WaxFlow — re-point Lexicon Track locations to canonical LOCAL
-# /Users/willcurran/Music/Database/* paths so Engine DJ export includes ALL tracks.
+# ~/Music/Database/* paths (paths are derived from $HOME; nothing is hardcoded).
 #
 # WHY
 #   Engine DJ cannot ingest /Volumes/* locations (network/removable-style paths).
 #   Historically Lexicon rows carried three non-canonical prefixes:
-#     • /Volumes/Macintosh HD/Users/willcurran/Music/...  (symlink to /, LOCAL disk)
+#     • /Volumes/Macintosh HD/Users/<you>/Music/...      (symlink to /, LOCAL disk)
 #     • /Volumes/music/...                                (SMB mount of the NAS share)
-#     • /Users/willcurran/Music/<Artist>/...              (share ROOT replica, i.e.
+#     • ~/Music/<Artist>/...                              (share ROOT replica, i.e.
 #                                                          outside the library root)
-#   The files already exist locally under /Users/willcurran/Music/Database, so
+#   The files already exist locally under ~/Music/Database, so
 #   re-pointing fixes the export WITHOUT touching a single audio file.
 #
 # STATUS (2026-08-08): THIS SCRIPT IS NOW A ONE-SHOT, NOT A RECURRING CHORE.
@@ -56,7 +56,9 @@
 #
 set -euo pipefail
 
-LEXICON_SSH="${LEXICON_SSH:-willcurran@192.168.1.116}"
+# Only used when running from a REMOTE ops box; on the Lexicon host itself
+# local mode is auto-detected and this is ignored.
+LEXICON_SSH="${LEXICON_SSH:-local}"
 HEARTBEAT="${HEARTBEAT:-$HOME/.waxflow/logs/lexicon-backup-heartbeat.json}"
 AUDIT_DIR="${AUDIT_DIR:-$HOME/.waxflow/logs}"
 APPLY=0; LIMIT=0; SKIP_BACKUP_CHECK=0
@@ -108,7 +110,7 @@ echo "audit -> $AUDIT"
 read -r -d '' PYSRC <<'PY' || true
 import sqlite3, os, sys, unicodedata
 db, apply, limit = sys.argv[1], sys.argv[2]=="1", int(sys.argv[3])
-HOME="/Users/willcurran"
+HOME=os.path.expanduser("~")
 MUSIC=HOME+"/Music"
 LIB=MUSIC+"/Database"
 INP=MUSIC+"/Input"

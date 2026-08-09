@@ -63,15 +63,19 @@
 #
 # Deployed on the Lexicon host Mac at ~/.waxflow/sync-nas-to-mac.sh, run every
 # 120 s by LaunchAgent com.waxflow.sync-database. THIS repo copy is canonical:
-#   scp scripts/sync-nas-to-mac.sh willcurran@192.168.1.116:.waxflow/sync-nas-to-mac.sh
+#   scp scripts/sync-nas-to-mac.sh <you>@<lexicon-mac>:.waxflow/sync-nas-to-mac.sh
 #
 # Usage: sync-nas-to-mac.sh [--dry-run] [--reconcile]
 
 set -uo pipefail
 
+[ -r "$HOME/.waxflow/waxflow.conf" ] && . "$HOME/.waxflow/waxflow.conf"
 SRC="${WAXFLOW_SYNC_SRC:-/Volumes/music}"
 DST="${WAXFLOW_SYNC_DST:-$HOME/Music}"
-NAS_SSH="${WAXFLOW_NAS_SSH:-nas-lan}"
+# SSH target used ONLY for fast change detection (see TRANSPORT). Set
+# WAXFLOW_NAS_SSH in ~/.waxflow/waxflow.conf. If it cannot connect, the
+# script simply falls back to a full reconcile, so this is optional.
+NAS_SSH="${WAXFLOW_NAS_SSH:-}"
 NAS_ROOT="${WAXFLOW_NAS_ROOT:-/volume1/music}"
 FOLDERS=("Database" "Input")
 RECONCILE_SECONDS="${WAXFLOW_RECONCILE_SECONDS:-21600}"   # 6 h
@@ -177,7 +181,7 @@ if [ "$MODE" = "incremental" ]; then
     # NOTE: newline-in-filename would break the line-oriented list. None exist in
     # this library, and the reconcile pass would catch such a file anyway.
     : >"$LIST"
-    if ssh -o BatchMode=yes -o ConnectTimeout=10 "$NAS_SSH" true 2>/dev/null; then
+    if [ -n "$NAS_SSH" ] && ssh -o BatchMode=yes -o ConnectTimeout=10 "$NAS_SSH" true 2>/dev/null; then
         # The filter MUST live in the find, not in rsync: --files-from bypasses
         # rsync's --exclude rules for explicitly listed paths, so a Synology
         # @eaDir entry (extended-attribute streams that do not exist over SMB)
@@ -257,34 +261,43 @@ if [ "$DRY_RUN" -eq 0 ] && [ -d "$SRC/Input" ]; then
 fi
 
 # --- Lexicon path-drift watchdog (read-only) ----------------------------------
-# WHY: Lexicon CANONICALISES imported paths through the boot-volume symlink,
-# rewriting the /Users/... path WaxFlow hands it into
-# /Volumes/Macintosh HD/Users/... — and Engine DJ refuses /Volumes/* locations.
-# Proven live on 2026-08-09: the first import after the path-contract cutover was
-# stored with that prefix even though WaxFlow sent a clean /Users path.
+# Lexicon CANONICALISES imported paths through the boot-volume symlink, rewriting
+# the /Users/... path WaxFlow hands it into /Volumes/Macintosh HD/Users/...
 #
-# So the source-side fix is necessary but NOT sufficient, and
-# scripts/repoint-lexicon-local.sh is NOT the one-shot we hoped for. This check
-# makes the drift impossible to miss: it is the exact failure that went unnoticed
-# from March to August and cost the Engine library.
+# SEVERITY MATTERS, and the two cases are NOT the same:
 #
-# Read-only (mode=ro), so it is safe while Lexicon is running. Fixing still
-# requires Lexicon to be quit — see the log line's instruction.
+#   /Volumes/Macintosh HD/...  COSMETIC. That is a symlink to /, so the path
+#                              resolves to the identical file. Verified 2026-08-09
+#                              against a real Engine library: all 40 rows carrying
+#                              this prefix were present in Engine. It does NOT
+#                              break Engine DJ export, contrary to the original
+#                              diagnosis. Tidy it up whenever; nothing is broken.
+#
+#   /Volumes/<share>/...       REAL. An SMB path breaks the moment the share is
+#                              unmounted, and the file exists only on the NAS.
+#
+# Reporting both at the same volume would train you to ignore the line that
+# matters. Read-only (mode=ro), so it is safe while Lexicon is running.
 LEXICON_DB="$HOME/Library/Application Support/lexicon/main.db"
 if [ -f "$LEXICON_DB" ]; then
     DRIFT=$(python3 - "$LEXICON_DB" <<'PY' 2>/dev/null
 import sqlite3, sys
 try:
     c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-    print(c.execute(
-        "SELECT COUNT(*) FROM Track WHERE location LIKE '/Volumes/%'"
-    ).fetchone()[0])
+    sym = c.execute("SELECT COUNT(*) FROM Track WHERE location LIKE '/Volumes/Macintosh HD/%'").fetchone()[0]
+    smb = c.execute("SELECT COUNT(*) FROM Track WHERE location LIKE '/Volumes/%' "
+                    "AND location NOT LIKE '/Volumes/Macintosh HD/%'").fetchone()[0]
+    print(f"{sym} {smb}")
 except Exception:
     print("")
 PY
 )
-    if [ -n "$DRIFT" ] && [ "$DRIFT" -gt 0 ] 2>/dev/null; then
-        log "LEXICON PATH DRIFT: $DRIFT row(s) back on /Volumes/* — Engine DJ cannot see them. Quit Lexicon and run scripts/repoint-lexicon-local.sh --apply"
+    set -- $DRIFT
+    SYMLINK_ROWS="${1:-0}"; SMB_ROWS="${2:-0}"
+    if [ "${SMB_ROWS:-0}" -gt 0 ] 2>/dev/null; then
+        log "LEXICON PATH DRIFT (action needed): $SMB_ROWS row(s) on an SMB /Volumes path — these break when the share unmounts. Quit Lexicon and run scripts/repoint-lexicon-local.sh --apply"
+    elif [ "${SYMLINK_ROWS:-0}" -gt 20 ] 2>/dev/null; then
+        log "note: $SYMLINK_ROWS row(s) carry the /Volumes/Macintosh HD symlink prefix (cosmetic — resolves fine, Engine accepts it). Tidy with repoint-lexicon-local.sh when convenient."
     fi
 fi
 

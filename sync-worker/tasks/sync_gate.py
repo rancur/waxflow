@@ -1,10 +1,16 @@
 """Replication gate — hold a Lexicon import until the file exists on the Mac.
 
 WHY THIS EXISTS (2026-08-08)
-    WaxFlow now hands Lexicon a LOCAL Mac path (/Users/willcurran/Music/Database/...)
-    instead of an SMB path (/Volumes/music/...). That is what finally makes Engine DJ
-    export work — Engine refuses /Volumes paths, which is why 40 tracks carrying a
-    '/Volumes/Macintosh HD/' prefix never reached it.
+    WaxFlow can hand Lexicon a LOCAL host path (e.g. ~/Music/Database/...) instead
+    of an SMB path (/Volumes/music/...). Local paths are preferable because an SMB
+    path stops resolving the moment the share unmounts, and the file then exists
+    only on the NAS.
+
+    (An earlier version of this note claimed Engine DJ refuses /Volumes paths.
+    Tested 2026-08-09: it does not. All 40 rows carrying a '/Volumes/Macintosh HD/'
+    prefix were present in the Engine library — that prefix is a symlink to / and
+    resolves fine. The missing-tracks symptom had a different cause: a two-way sync
+    destroying Engine's database.)
 
     The cost of local paths is replication lag. The worker writes to the NAS; a
     one-way rsync agent on the Mac (scripts/sync-nas-to-mac.sh, every 120 s) pulls it

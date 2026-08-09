@@ -3,12 +3,22 @@
 <!--
   WaxFlow — one-way NAS -> Mac library replication (replaces Synology Drive).
 
-  Install on the Lexicon host Mac (192.168.1.116):
-    scp scripts/sync-nas-to-mac.sh willcurran@192.168.1.116:.waxflow/sync-nas-to-mac.sh
-    scp scripts/com.waxflow.sync-database.plist \
-        willcurran@192.168.1.116:Library/LaunchAgents/com.waxflow.sync-database.plist
-    ssh willcurran@192.168.1.116 'chmod +x ~/.waxflow/sync-nas-to-mac.sh && \
-        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.waxflow.sync-database.plist'
+  Install ON the Lexicon host Mac. launchd does NOT expand ~, so the absolute
+  path below must be rewritten for your user:
+
+    mkdir -p ~/.waxflow ~/Library/LaunchAgents
+    cp scripts/sync-nas-to-mac.sh scripts/ensure-music-mount.sh ~/.waxflow/
+    chmod +x ~/.waxflow/*.sh
+    sed "s|/Users/willcurran|$HOME|g" scripts/com.waxflow.sync-database.plist \
+        > ~/Library/LaunchAgents/com.waxflow.sync-database.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.waxflow.sync-database.plist
+
+  Then create ~/.waxflow/waxflow.conf with your NAS address:
+    WAXFLOW_SHARE_HOST=192.168.1.50
+    WAXFLOW_NAS_SSH=nas            # optional, enables ~1s incremental passes
+
+  macOS TCC will deny a launchd agent access to /Volumes network mounts until you
+  add /bin/bash under System Settings > Privacy & Security > Full Disk Access.
 
   120 s matches com.waxflow.mount-music, so a post-sleep remount is healed before
   the next replication pass. The script self-locks, so a long first pass simply
