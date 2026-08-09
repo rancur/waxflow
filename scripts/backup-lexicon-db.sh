@@ -44,11 +44,12 @@
 
 set -euo pipefail
 
-LEXICON_SSH="${LEXICON_SSH:-willcurran@192.168.1.116}"
+# Set LEXICON_SSH to <user>@<lexicon-host>, or "local" when running ON that Mac.
+LEXICON_SSH="${LEXICON_SSH:-local}"
 LEXICON_DB="${LEXICON_DB:-\$HOME/Library/Application Support/lexicon/main.db}"
 MAC_BACKUP_DIR="${MAC_BACKUP_DIR:-\$HOME/WaxFlow-Backups/lexicon-db}"
 NAS_SSH="${NAS_SSH:-nas}"
-NAS_BACKUP_DIR="${NAS_BACKUP_DIR:-/volume1/homes/willcurran/WaxFlow-Backups/lexicon-db}"
+NAS_BACKUP_DIR="${NAS_BACKUP_DIR:-/volume1/homes/$USER/WaxFlow-Backups/lexicon-db}"
 KEEP="${KEEP:-14}"
 LOG_DIR="${LOG_DIR:-$HOME/.waxflow/logs}"
 SKIP_ON_HYPERBACKUP="${SKIP_ON_HYPERBACKUP:-1}"

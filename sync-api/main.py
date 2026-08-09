@@ -1,4 +1,5 @@
 import os
+import pathlib
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,10 +17,18 @@ from routes.tidal import router as tidal_router
 from routes.status import router as status_router
 from routes.wanted import router as wanted_router
 
+# Version comes from the VERSION file baked into the image at build time, so
+# it can never drift from the release tag (it used to be hardcoded "2.1.0"
+# while VERSION said 2.10.1).
+try:
+    __version__ = pathlib.Path("/app/VERSION").read_text().strip()
+except OSError:
+    __version__ = os.environ.get("VERSION", "0.0.0")
+
 app = FastAPI(
     title="WaxFlow API",
     description="All your music, flowing home. Spotify Liked Songs to Lexicon DJ.",
-    version="2.1.0",
+    version=__version__,
 )
 
 _cors_origins_env = os.environ.get("CORS_ORIGINS", "")
@@ -49,4 +58,4 @@ app.include_router(wanted_router)
 
 @app.get("/")
 async def root():
-    return {"service": "waxflow", "version": "2.1.0"}
+    return {"service": "waxflow", "version": __version__}

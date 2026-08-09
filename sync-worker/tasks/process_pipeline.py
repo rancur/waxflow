@@ -2045,6 +2045,18 @@ def _process_organizing(db_path: str):
         # Soulseek fallback. Protects Will's lossless standard at the single chokepoint.
         if _reject_nonlossless_for_import(db_path, track):
             continue
+        # Replication gate: WaxFlow hands Lexicon a LOCAL Mac path, so the file must
+        # have reached the Mac before we import. Holding here (track stays in
+        # 'organizing', retried next cycle) is how we avoid the silent
+        # HTTP-200-imported-0-tracks failure. Fails open — see tasks/sync_gate.py.
+        try:
+            from tasks.sync_gate import is_replicated
+            ok, reason = is_replicated(db_path, track.get("file_path"), track)
+            if not ok:
+                log.info("organizing: holding track %d — %s", track["id"], reason)
+                continue
+        except Exception as e:
+            log.warning("sync_gate error (continuing on normal path): %s", e)
         try:
             _organize_track(db_path, track)
             synced_count += 1
@@ -2154,14 +2166,29 @@ def _container_to_mac_path(
     """Translate a worker-container file path into the path the Lexicon host Mac
     reads it by, so POST /v1/tracks points at a file Lexicon can actually open.
 
-    Delivery model (2026-07-11): the worker writes finished audio into container
-    ``/music`` (== NAS /volume1/music), which the Mac reads over the SMB mount at
-    ``lexicon_library_path`` (/Volumes/music) — LIVE, no sync lag. A separate
-    upload/staging flow lands in ``/downloads`` (== NAS /volume1/music/Input),
-    read at ``lexicon_input_path``. Map by container prefix:
+    Delivery model (2026-08-08) — LOCAL paths, not SMB:
 
-        /downloads/<rel>  -> <lexicon_input_path>/<rel>
-        /music/<rel>      -> <lexicon_library_path>/<rel>
+        container /music/Database  == NAS /volume1/music/Database
+                                   == Mac ~/Music/Database   (one-way rsync replica)
+        container /downloads       == NAS /volume1/music/Input
+                                   == Mac ~/Music/Input
+
+        /downloads/<rel>       -> <lexicon_input_path>/<rel>
+        <MUSIC_LIBRARY_PATH>/<rel> -> <lexicon_library_path>/<rel>
+
+    ``lexicon_library_path`` may be a LOCAL host path (e.g. ``~/Music/Database``) — a
+    path. This is the whole point: Engine DJ refuses ``/Volumes/*`` locations, so
+    every track imported under the previous SMB model (``/Volumes/music/...``) or
+    via the ``/Volumes/Macintosh HD/`` symlink was invisible to Engine export. Local
+    paths make ``scripts/repoint-lexicon-local.sh`` unnecessary for new tracks.
+
+    The cost is replication lag, which ``tasks/sync_gate.py`` handles by holding the
+    import until the file has actually landed on the Mac.
+
+    NOTE: ``MUSIC_LIBRARY_PATH`` is ``/music/Database`` (not ``/music``). The bind
+    mount deliberately still points at the share ROOT so that Plex path translation
+    (plex_music_container_prefix=/music -> /volume1/music) and the 4,135 existing
+    ``/music/Database/...`` file_path rows all keep resolving unchanged.
     """
     if downloads_dir and file_path.startswith(downloads_dir):
         relative_path = os.path.relpath(file_path, downloads_dir)

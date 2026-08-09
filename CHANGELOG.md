@@ -1,5 +1,88 @@
 # Changelog
 
+## 2.11.0 — Path contract, one-way replication, and a pile of real bugs
+
+Everything here was found by *running* the system during a live incident, not by
+reading it. Several are bugs any deployment would hit.
+
+### Fixed — bugs that affect every install
+- **`MUSIC_LIBRARY_PATH` was hardcoded in `docker-compose.yml`.** Both services
+  pinned `/music`, so setting it in `.env` silently did nothing. Now
+  `${MUSIC_LIBRARY_PATH:-/music/Database}`. Pointing the library root at a
+  SUBDIRECTORY of the bind mount keeps the share root clean and leaves Plex path
+  translation intact — remapping the mount instead would break every existing
+  `file_path` row.
+- **The update banner was inverted.** `admin.py` compared versions as strings, so
+  `"2.9.0" > "2.10.1"` was `True` and no update was ever offered across a
+  major.minor boundary. Replaced with a numeric-tuple compare.
+- **The API reported the wrong version.** `main.py` hardcoded `2.1.0` while
+  `VERSION` said `2.10.1`. It now reads `/app/VERSION`, baked in at build time.
+- **`busy_timeout` contradicted the connect timeout.** 5 s against `timeout=30`,
+  and `busy_timeout` is what governs — so `PATCH /api/settings` still returned
+  `{"detail":"database is locked"}` whenever the worker was mid-index. Both 30 s.
+- **`deep-repair.sh` could never alert anyone.** It computed a repair verdict and
+  then dispatched to a commented-out example. Wired to `WAXFLOW_ALERT_WEBHOOK`.
+- **CodeQL scanned Python only**; `sync-web`'s TypeScript went unanalysed. (Held
+  back from this PR — needs a `workflow`-scoped token.)
+
+### Added — one-way NAS -> Mac replication (optional)
+`scripts/sync-nas-to-mac.sh` + LaunchAgent. Pull-only, so conflict copies are
+structurally impossible. Hybrid transport: change detection over SSH (~0.9 s,
+the NAS walks its own disk) with an SMB transfer, versus 5 m 46 s for a full SMB
+scan; 6 h reconcile as the safety net. `tasks/sync_gate.py` holds each import
+until the file has landed locally, and **fails open** on every degenerate case —
+a gate that can deadlock the pipeline is worse than the lag it prevents.
+
+### Added — tools
+- `scripts/merge-duplicate-lexicon-rows.py` — Engine DJ's `Track.path` is UNIQUE,
+  so Lexicon rows beyond the distinct-file count can NEVER sync and can leave a
+  part-applied sync failing with `FOREIGN KEY constraint failed`. Migrates
+  playlist memberships onto the surviving row *before* deleting; a plain delete
+  would have destroyed 849 memberships on the library this was written against.
+- `scripts/consolidate-share-root.py` — moves stray artist folders from a share
+  root into the library root. Non-destructive on collisions.
+- `scripts/dedupe-report.py` — read-only duplicate/quality analysis. Reads remix
+  descriptors from the parent folder as well as the filename, so different mixes
+  are not reported as duplicates.
+
+### Fixed — macOS agent robustness
+- `ensure-music-mount.sh` treated **any** failed `ls` as a stale handle and
+  unmounted. From a launchd agent the share cannot be remounted (`mount volume`
+  has no keychain access; `mount_smbfs` returns `Authentication error`), so it
+  destroyed a working mount that only a human in Finder could restore. It now
+  never unmounts by default, and distinguishes macOS TCC's `Operation not
+  permitted` — which means the mount is fine and *this process* is denied — from
+  a real stale handle.
+- The share is addressed by IP/hostname, **not** a Bonjour service-instance name.
+  `NAME._smb._tcp.local` resolves only via service discovery; when that goes
+  stale, mounts hang forever instead of failing.
+- `osascript mount volume` is now watchdog-wrapped. It blocks indefinitely
+  waiting on a credential dialog that never appears under launchd, which wedged
+  both agents and stopped replication entirely.
+
+### Changed
+- Host-specific values moved out of the scripts into `~/.waxflow/waxflow.conf`.
+- `lexicon_library_path` / `lexicon_input_path` seed to the SMB default and can be
+  set via `LEXICON_LIBRARY_PATH` / `LEXICON_INPUT_PATH` — no username in defaults.
+- `bump-version.sh` updates every version source, not just `VERSION`.
+- README gains "Local paths and Engine DJ", including the two things that cost the
+  most time here: never put an Engine library inside a two-way sync, and Engine
+  holds at most one row per file.
+
+### Removed
+- `sync-api/services/{matcher,downloader,verifier}.py` — 463 lines referenced
+  nowhere; that logic lives in `sync-worker/tasks/`.
+- `scripts/backup-lexicon.sh` — self-documented no-op; `backup-lexicon-db.sh` is
+  the real one.
+
+### Corrected
+An earlier diagnosis held that Engine DJ refuses `/Volumes/*` locations. **It does
+not.** Tested against a real Engine library: all 40 rows carrying a
+`/Volumes/Macintosh HD/` prefix were present. That prefix is a symlink to `/` and
+resolves fine. The missing-tracks symptom was caused by two-way sync destroying
+the Engine database, not by path format.
+
+
 ## 2.10.0 — Sleep-tolerance catch-up: rescue downloaded-but-not-imported tracks
 
 Closes the last sleep/wake gap that stranded freshly-downloaded tracks with a real
