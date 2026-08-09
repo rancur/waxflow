@@ -18,7 +18,21 @@
 # same share mounted at a wrong mountpoint, unmounts it, clears any stale dir, and
 # remounts at the canonical path.
 MP="/Volumes/music"
-SHARE_HOST="CCPD-Database._smb._tcp.local"
+# v5 (2026-08-09) — ADDRESS THE NAS BY IP, NOT BY BONJOUR SERVICE NAME.
+# This was "CCPD-Database._smb._tcp.local", the Bonjour SERVICE-INSTANCE name.
+# That is not a hostname: it resolves only through service discovery, and when
+# the advertisement went stale (after the NAS's Container Manager restart) every
+# connection attempt HUNG instead of failing — Finder sat on "Connecting to
+# smb://CCPD-...local/music" indefinitely, and so did `mount volume`.
+#
+# Measured at the time: `CCPD-Database._smb._tcp.local` did not resolve at all,
+# while `CCPD-Database.local` and 192.168.1.221 both resolved instantly and
+# `smbutil status 192.168.1.221` negotiated fine. Mounting by IP succeeded in 1s.
+#
+# The IP is the same one every other integration already hardcodes (WaxFlow API,
+# Plex, LEXICON_API_URL peers), so it is no less stable than what we depend on
+# elsewhere. WAXFLOW_SHARE_HOST overrides it; CCPD-Database.local also works.
+SHARE_HOST="${WAXFLOW_SHARE_HOST:-192.168.1.221}"
 URL="smb://${SHARE_HOST}/music"
 LOG="$HOME/.waxflow/mount-music.log"
 ts() { date "+%Y-%m-%dT%H:%M:%S"; }
