@@ -25,7 +25,11 @@ SYNC_API_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if SYNC_API_DIR not in sys.path:
     sys.path.insert(0, SYNC_API_DIR)
 
-_DB = tempfile.mktemp(suffix=".db")
+# mkdtemp + join, not mktemp: mktemp returns a name without creating anything, so
+# the file it names can be created by someone else between the call and our open
+# (CodeQL py/insecure-temporary-file). The directory here is created atomically with
+# owner-only permissions, and we own every path inside it.
+_DB = os.path.join(tempfile.mkdtemp(prefix="waxflow-test-"), "sync.db")
 os.environ.setdefault("SLS_DB_PATH", _DB)
 
 import db as db_mod  # noqa: E402
