@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.14.0 — retroactive dateAdded from your Spotify liked dates
+
+Lexicon stamps `dateAdded` with the moment a file was imported, so a library
+assembled by WaxFlow shows thousands of tracks "added" on the day the sync ran.
+The real date is already in `tracks.spotify_added_at`, going back to 2014.
+
+Measured on the live library: **5,255 tracks are wrong, 996 of them by 11 years.**
+Sorting by date added is meaningless until that is fixed.
+
+`scripts/backfill-lexicon-dateadded.py` corrects it. Lexicon's API refuses the
+field outright -- `PATCH /v1/track` with `dateAdded` returns
+`'dateAdded' is not editable`, while `comment` on the same request returns 200 --
+so this is a direct SQLite write, gated the same way `repoint-lexicon-local.sh` is:
+
+  * a fresh **verified** backup must exist (integrity ok, Track > 0)
+  * **Lexicon must be quit** -- a running Lexicon caches rows and would overwrite
+    the change on exit
+  * **dry-run by default**; `--apply`, and `--limit N` for a small first batch
+  * `integrity_check` + `foreign_key_check` before and after
+  * cue point, beat grid, playlist and cloud-link counts compared before and after,
+    because a `dateAdded`-only write must not move anything else
+  * one transaction, rolled back whole on any failure, with a per-row audit log
+
+It touches `Track.dateAdded` and nothing else -- in particular not `location` and
+not `locationUnique`, Lexicon's immutable import-identity key.
+
+It runs on the Mac. Not because the database is unreachable elsewhere, but because
+SQLite must not be written over SMB/NFS, where advisory locking is unreliable and
+`BEGIN IMMEDIATE` cannot be trusted. Running locally also lets it verify Lexicon is
+genuinely quit instead of inferring it from an API timeout.
+
+### One bug worth naming
+
+WaxFlow stores `lexicon_track_id` as TEXT; Lexicon's `Track.id` is INTEGER.
+Comparing them raw matches **nothing** and silently degrades to path matching --
+which took ID matches from 5,130 to zero without raising a thing. Found by
+checking a dry-run's match counts rather than trusting them. Both the coercion and
+that failure mode are now covered by tests.
+
 ## 2.13.2 — fix: /api/dashboard returned 500
 
 The service-health section of `get_dashboard()` runs *after* the
