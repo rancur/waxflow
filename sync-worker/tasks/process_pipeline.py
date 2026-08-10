@@ -2066,6 +2066,14 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
     codec = audio_stream.get("codec_name", "unknown")
     sample_rate = int(audio_stream.get("sample_rate", 0))
     bit_depth = int(audio_stream.get("bits_per_raw_sample") or audio_stream.get("bits_per_sample") or 0)
+    # Larger of the stream's and the container's figure: VBR MP3 commonly reports
+    # only one, and for a lossy file the bitrate IS the quality decision.
+    bit_rate = 0
+    for _src in (audio_stream.get("bit_rate"), (probe_data.get("format") or {}).get("bit_rate")):
+        try:
+            bit_rate = max(bit_rate, int(_src or 0))
+        except (TypeError, ValueError):
+            pass
 
     # Trusted match sources: the file IS the correct recording (matched by ISRC or
     # found in the existing library), so the recording identity is already confirmed.
@@ -2124,9 +2132,30 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
     reasons = []
     is_mismatched = False
 
-    if not is_lossless:
+    # Quality ladder (2.16.0). This used to be a hard "not lossless -> fail", which
+    # is what actually kept 320k files out of the library: the organizing-stage floor
+    # added in 2.16.0 was unreachable, because verify parked the track at 'error'
+    # long before it got there.
+    #
+    # Three outcomes now. Anything at or above the floor VERIFIES, so it reaches the
+    # library and is playable; below-target files are additionally flagged and still
+    # routed to the lossless hunt, so accepting one never ends the search.
+    from tasks import quality as _quality
+    quality_score = _quality.score_probe({
+        "codec": codec, "sample_rate": sample_rate,
+        "bit_depth": bit_depth, "bit_rate": bit_rate,
+    })
+    below_target = False
+    if not quality_score.meets_floor:
         verify_pass = False
-        reasons.append(f"not lossless: codec={codec}, sr={sample_rate}")
+        reasons.append(
+            f"below the quality floor: codec={codec}, sr={sample_rate}, "
+            f"{quality_score.bit_rate // 1000}k")
+    elif not quality_score.meets_target:
+        below_target = True
+        reasons.append(
+            f"below target ({quality_score.tier_name}: {codec} "
+            f"{quality_score.bit_rate // 1000}k) — accepted, still hunting lossless")
 
     if fp_match_score is not None and fp_match_score < min_fp_score:
         # Below threshold (0.70): definite mismatch — fail
@@ -2164,6 +2193,11 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         verify_sample_rate=sample_rate,
         verify_bit_depth=bit_depth,
         verify_is_genuine_lossless=1 if is_lossless else 0,
+        quality_tier=quality_score.tier_name,
+        quality_score=quality_score.score,
+        quality_bit_rate=quality_score.bit_rate,
+        quality_checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        below_target=1 if below_target else 0,
         chromaprint=chromaprint,
         fingerprint_match_score=fp_match_score,
         pipeline_stage=next_stage,
@@ -2185,8 +2219,23 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
     if (not verify_pass) and (not is_lossless) and (not is_mismatched):
         _route_lossless_gap(
             db_path, track_id,
-            f"Tidal copy not lossless (codec={codec}, sr={sample_rate}); sourcing via Soulseek",
+            f"copy below the quality floor (codec={codec}, sr={sample_rate}); "
+            f"sourcing via Soulseek",
         )
+    elif below_target and not is_mismatched:
+        # Good enough to keep and play, not good enough to stop looking. Queue the
+        # hunt WITHOUT touching pipeline_stage: the track continues to organizing
+        # and lands in the library, and the fallback picks it up separately.
+        # Accepting a 320k file must never quietly end the search for lossless.
+        try:
+            if _soulseek_enabled(db_path) and not _soulseek_already_attempted(db_path, track_id):
+                _soulseek_queue(
+                    db_path, track_id,
+                    f"below target ({quality_score.tier_name}) — hunting lossless")
+                log.info("Track %d: kept %s and queued an upgrade hunt",
+                         track_id, quality_score.tier_name)
+        except Exception as e:  # noqa: BLE001 — never let this break the pipeline
+            log.warning("Track %d: upgrade queue failed (%s)", track_id, e)
 
 
 # ---------------------------------------------------------------------------

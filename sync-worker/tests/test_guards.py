@@ -17,6 +17,8 @@ or:  python -m unittest discover -s sync-worker/tests
 import os
 import sys
 import time
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -879,3 +881,72 @@ class TestLexiconLinkGate(unittest.TestCase):
             {"id": 1626, "title": "Running Blind", "artist": "Noisia",
              "location": "/m/Noisia - Running Blind.aiff", "duration": None})
         self.assertEqual(decision, "link")
+
+
+class TestVerifyQualityFloor(unittest.TestCase):
+    """The floor has to be enforced at VERIFY, not only at the import gate.
+
+    2.16.0 lowered the floor in soulseek_fallback.reject_nonlossless_for_import --
+    which sits at the ORGANIZING stage. Verify runs first and parked every
+    non-lossless file at 'error', so that change was unreachable and not a single
+    track took the new path. Measured live: below_target stayed at 0.
+    """
+
+    def _verify(self, codec, sample_rate, bit_rate, tmpdir):
+        import json as _json
+        captured = {}
+        probe = {"streams": [{"codec_type": "audio", "codec_name": codec,
+                              "sample_rate": str(sample_rate), "bit_rate": str(bit_rate)}],
+                 "format": {"bit_rate": str(bit_rate), "duration": "180.0"}}
+
+        class _P:
+            returncode = 0
+            stdout = _json.dumps(probe)
+            stderr = ""
+
+        path = os.path.join(tmpdir, f"x.{codec}")
+        open(path, "wb").write(b"0")
+        with mock.patch.object(pp.subprocess, "run", return_value=_P()), \
+             mock.patch.object(pp, "update_track",
+                               side_effect=lambda d, t, **kw: captured.update(kw)), \
+             mock.patch.object(pp, "log_activity"), \
+             mock.patch.object(pp, "_route_lossless_gap") as route, \
+             mock.patch.object(pp, "_soulseek_enabled", return_value=True), \
+             mock.patch.object(pp, "_soulseek_already_attempted", return_value=False), \
+             mock.patch.object(pp, "_soulseek_queue") as queue:
+            pp._verify_track("/tmp/x.db", {
+                "id": 1, "file_path": path, "duration_ms": 180_000,
+                "match_source": "file_index_isrc"}, 0.70)
+        return captured, route, queue
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="vq_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_320k_now_passes_verification(self):
+        cap, route, _ = self._verify("mp3", 44100, 320_000, self.tmp)
+        self.assertEqual(cap["verify_status"], "pass")
+        self.assertEqual(cap["below_target"], 1)
+        route.assert_not_called()
+
+    def test_320k_still_queues_the_lossless_hunt(self):
+        # Accepting a below-target file must never quietly end the search.
+        _, _, queue = self._verify("mp3", 44100, 320_000, self.tmp)
+        queue.assert_called_once()
+
+    def test_lossless_passes_and_is_not_flagged(self):
+        cap, _, queue = self._verify("flac", 44100, 900_000, self.tmp)
+        self.assertEqual(cap["verify_status"], "pass")
+        self.assertEqual(cap["below_target"], 0)
+        queue.assert_not_called()
+
+    def test_below_the_floor_still_fails_and_routes(self):
+        cap, route, _ = self._verify("mp3", 44100, 128_000, self.tmp)
+        self.assertEqual(cap["verify_status"], "fail")
+        route.assert_called_once()
+
+    def test_quality_columns_are_recorded(self):
+        cap, _, _ = self._verify("mp3", 44100, 320_000, self.tmp)
+        self.assertEqual(cap["quality_tier"], "320k")
+        self.assertEqual(cap["quality_bit_rate"], 320_000)
+        self.assertIsNotNone(cap["quality_checked_at"])

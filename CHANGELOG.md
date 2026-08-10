@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.16.1 — the floor was in the wrong place to have any effect
+
+2.16.0 lowered the quality floor in `reject_nonlossless_for_import`, which sits at
+the ORGANIZING stage. Verify runs first, and it parked every non-lossless file at
+`error` long before organizing was reached — so the new floor was unreachable and
+not one track took it. Measured after deploying: `below_target` stayed at **0**.
+
+The ladder now applies at verification, which is where the decision actually gets
+made:
+
+    at/above target   -> pass, unchanged
+    floor..target     -> PASS, flagged below_target, upgrade hunt queued
+    below the floor   -> fail and route to Soulseek, unchanged
+
+A below-target file continues to organizing and lands in the library, and the
+Soulseek hunt is queued **without** touching `pipeline_stage` — accepting a 320k
+copy must never quietly end the search for lossless.
+
+Verify also now reads the bitrate (max of stream and container, for VBR) and
+records `quality_tier`, `quality_score`, `quality_bit_rate`, `quality_checked_at`
+and `below_target` on every track it touches.
+
+Caught by deploying 2.16.0, retrying the 37 `not_lossless` errors, and checking
+whether anything had actually taken the new path. Nothing had.
+
 ## 2.16.0 — a 320k file you can play beats a perfect file you don't have
 
 The import gate was lossless-or-nothing. A 320 kbps file of a track that exists
