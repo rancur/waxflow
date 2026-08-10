@@ -420,10 +420,15 @@ class TestTitleMatchNoMidWordSubstring(unittest.TestCase):
 
 class _FileIndexConn:
     """Fake DB conn for _check_existing_by_isrc: reports file_index exists, no ISRC
-    hit, and returns the given rows for the fuzzy title+artist LIKE query."""
+    hit, and returns the given rows for the fuzzy title+artist LIKE query.
+
+    Rows are (file_path, title, artist, duration_seconds). A row given as a 3-tuple
+    is padded with a None duration, which the duration gate treats as unknown and
+    lets through -- so tests that predate the gate keep testing what they meant to.
+    """
 
     def __init__(self, like_rows):
-        self._like_rows = like_rows
+        self._like_rows = [r if len(r) >= 4 else (*r, None) for r in like_rows]
 
     def __enter__(self):
         return self
@@ -473,6 +478,67 @@ class TestFileIndexFuzzyValidation(unittest.TestCase):
                 "title": "Drift", "artist": "Bonobo", "isrc": "GBCFB2600207"})
         self.assertIsNotNone(result)
         self.assertEqual(result["match_type"], "title_artist")
+
+
+class TestDurationGate(unittest.TestCase):
+    """Title + artist agreeing does not make a file the same RECORDING.
+
+    Extended mixes, radio edits, live takes and remixes all share a title and an
+    artist, and the pipeline used to accept whichever one was on disk. Downstream
+    verify then rejected it on duration and parked the track as a 'fingerprint
+    mismatch' -- a bucket that never involved a fingerprint.
+
+    The cases below are real rows from the live library.
+    """
+
+    def _match(self, spotify_seconds, file_seconds, tolerance=None):
+        conn = _FileIndexConn(like_rows=[(
+            "/music/Database/Ben Bohmer/Ben Bohmer - Zeit & Raum.flac",
+            "Zeit & Raum", "Ben Bohmer", file_seconds)])
+        cfg = {"match_duration_tolerance_seconds": tolerance} if tolerance else {}
+        with mock.patch.object(pp, "get_db", return_value=conn), \
+             mock.patch.object(pp, "get_config", side_effect=lambda _d, k: cfg.get(k)):
+            return pp._check_existing_by_isrc("/tmp/x.db", {
+                "id": 1, "title": "Zeit & Raum", "artist": "Ben Bohmer",
+                "isrc": "", "duration_ms": int(spotify_seconds * 1000)})
+
+    def test_rejects_the_extended_mix(self):
+        # Live row: spotify 254s, file 361s -- a 107s difference.
+        self.assertIsNone(self._match(254, 361))
+
+    def test_rejects_a_moderate_mismatch(self):
+        # Live row: spotify 165s, file 265s.
+        self.assertIsNone(self._match(165, 265))
+
+    def test_accepts_an_exact_duration_match(self):
+        self.assertIsNotNone(self._match(254, 254))
+
+    def test_accepts_normal_mastering_variance(self):
+        # 136 of 265 live matches land within 2s; 19 more within 5s. All correct.
+        self.assertIsNotNone(self._match(254, 256))
+        self.assertIsNotNone(self._match(254, 249.5))
+
+    def test_boundary_is_inclusive(self):
+        self.assertIsNotNone(self._match(254, 259))     # exactly 5s
+        self.assertIsNone(self._match(254, 259.5))      # just past it
+
+    def test_unknown_file_duration_fails_open(self):
+        # ~0.4% of indexed files have no duration; refusing them would regress
+        # matching for tracks that are perfectly fine.
+        self.assertIsNotNone(self._match(254, None))
+
+    def test_unknown_spotify_duration_fails_open(self):
+        conn = _FileIndexConn(like_rows=[(
+            "/music/x.flac", "Zeit & Raum", "Ben Bohmer", 361)])
+        with mock.patch.object(pp, "get_db", return_value=conn), \
+             mock.patch.object(pp, "get_config", return_value=None):
+            result = pp._check_existing_by_isrc("/tmp/x.db", {
+                "id": 1, "title": "Zeit & Raum", "artist": "Ben Bohmer",
+                "isrc": "", "duration_ms": None})
+        self.assertIsNotNone(result)
+
+    def test_tolerance_is_configurable(self):
+        self.assertIsNotNone(self._match(254, 361, tolerance=120))
 
 
 class _RecordingConn:
@@ -551,3 +617,60 @@ class EmptyImportSyncLagMarkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPostProcessingDecoupling(unittest.TestCase):
+    """auto_analyze_enabled must gate ANALYSIS only.
+
+    It used to return early from the whole batch, so switching off "Auto-Analyze
+    After Sync" silently also switched off cue-point generation, tag lookup and
+    cloud upload -- each of which has its own checkbox in Settings, and none of
+    which the toggle's own description mentions.
+    """
+
+    def _fire(self, config):
+        posted = []
+        client = mock.MagicMock()
+
+        def post(path, json=None, **kw):
+            posted.append((json or {}).get("action"))
+            resp = mock.MagicMock()
+            resp.status_code = 200
+            return resp
+
+        client.post.side_effect = post
+        with mock.patch.object(pp, "get_config", side_effect=lambda _d, k: config.get(k)), \
+             mock.patch.object(pp, "httpx") as fake_httpx, \
+             mock.patch.object(pp, "log_activity"), \
+             mock.patch.object(pp.time, "sleep"):
+            fake_httpx.Client.return_value = _FakeClientCtx(client)
+            pp._trigger_lexicon_post_processing_batch("/tmp/x.db", 5)
+        return posted
+
+    def test_disabling_analyze_leaves_cues_tags_and_cloud_running(self):
+        posted = self._fire({
+            "auto_analyze_enabled": "0",
+            "lexicon_post_processing": "analyze,cues,tags,cloud",
+        })
+        self.assertNotIn("TrackBrowser_Analyze", posted)
+        self.assertIn("TrackBrowser_CuePointGenerator", posted)
+        self.assertIn("TrackBrowser_TagLookup", posted)
+        self.assertIn("CloudFileBackup_UploadSelected", posted)
+
+    def test_all_actions_fire_by_default(self):
+        posted = self._fire({})
+        for action in ("TrackBrowser_Analyze", "TrackBrowser_CuePointGenerator",
+                       "TrackBrowser_TagLookup", "CloudFileBackup_UploadSelected"):
+            self.assertIn(action, posted)
+
+    def test_per_action_selection_is_respected(self):
+        posted = self._fire({"lexicon_post_processing": "cues"})
+        self.assertIn("TrackBrowser_CuePointGenerator", posted)
+        self.assertNotIn("TrackBrowser_TagLookup", posted)
+
+    def test_nothing_enabled_makes_no_calls_at_all(self):
+        posted = self._fire({
+            "auto_analyze_enabled": "0",
+            "lexicon_post_processing": "analyze",
+        })
+        self.assertEqual(posted, [])

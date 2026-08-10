@@ -583,6 +583,12 @@ def init():
             ON source_attempts(track_id, source);
         CREATE INDEX IF NOT EXISTS idx_wanted_track ON wanted(track_id);
         CREATE INDEX IF NOT EXISTS idx_import_queue_state ON import_queue(state);
+        -- tracks carried no index at all beyond its implicit PK one. These three
+        -- back the dashboard month drill-down and the filters every list view uses.
+        CREATE INDEX IF NOT EXISTS idx_tracks_spotify_added_at
+            ON tracks(spotify_added_at);
+        CREATE INDEX IF NOT EXISTS idx_tracks_pipeline_stage ON tracks(pipeline_stage);
+        CREATE INDEX IF NOT EXISTS idx_tracks_lexicon_status ON tracks(lexicon_status);
         """)
     with get_db() as conn:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tracks)").fetchall()}

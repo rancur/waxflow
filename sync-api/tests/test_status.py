@@ -298,7 +298,16 @@ class TestTrmnlRender(unittest.TestCase):
 class TestEndpoints(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _seed_full(_ENDPOINT_DB)  # the file SLS_DB_PATH points at
+        _seed_full(_ENDPOINT_DB)
+        # Setting SLS_DB_PATH above only works if THIS module is the first to import
+        # db.py, which captures the env var into a module global. That made the test
+        # silently dependent on pytest's alphabetical collection order -- adding any
+        # test module sorting earlier pointed the handlers at someone else's DB.
+        # Pin it explicitly instead.
+        import db as db_mod
+        cls._saved_db_path = db_mod.DB_PATH
+        db_mod.DB_PATH = _ENDPOINT_DB
+
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
         # Mount ONLY the status router (proves it stands alone and keeps the test
@@ -306,6 +315,11 @@ class TestEndpoints(unittest.TestCase):
         app = FastAPI()
         app.include_router(status_mod.router)
         cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        import db as db_mod
+        db_mod.DB_PATH = cls._saved_db_path
 
     def test_status_json_ok(self):
         r = self.client.get("/api/status.json")

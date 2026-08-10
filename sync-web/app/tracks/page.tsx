@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, Suspense } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
 import { apiFetch } from '../api'
 import StatusBadge from '../components/StatusBadge'
 
@@ -97,14 +98,24 @@ function Dash() {
   return <span className="text-slate-600">\u2014</span>
 }
 
-export default function TracksPage() {
+function TracksPageInner() {
+  // Seeded from the URL so the dashboard's monthly bars can deep-link into a
+  // filtered view (/tracks?month=2026-03&pipeline_stage=error).
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const monthParam = searchParams.get('month') ?? ''
+  const monthLabel = monthParam
+    ? new Date(Number(monthParam.slice(0, 4)), Number(monthParam.slice(5, 7)) - 1)
+        .toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    : ''
+
   const [tracks, setTracks] = useState<TrackData[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(DEFAULT_PER_PAGE)
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
-  const [stageFilter, setStageFilter] = useState('')
+  const [stageFilter, setStageFilter] = useState(searchParams.get('pipeline_stage') ?? '')
   const [matchFilter, setMatchFilter] = useState('')
   const [downloadFilter, setDownloadFilter] = useState('')
   const [verifyFilter, setVerifyFilter] = useState('')
@@ -133,6 +144,7 @@ export default function TracksPage() {
       if (downloadFilter) params.set('download_status', downloadFilter)
       if (verifyFilter) params.set('verify_status', verifyFilter)
       if (lexiconFilter) params.set('lexicon_status', lexiconFilter)
+      if (monthParam) params.set('month', monthParam)
 
       const result = await apiFetch<any>(`/tracks?${params}`)
       setTracks(result.tracks)
@@ -143,7 +155,7 @@ export default function TracksPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, perPage, search, stageFilter, matchFilter, downloadFilter, verifyFilter, lexiconFilter, sortBy, sortDir])
+  }, [page, perPage, search, stageFilter, matchFilter, downloadFilter, verifyFilter, lexiconFilter, sortBy, sortDir, monthParam])
 
   useEffect(() => { fetchTracks() }, [fetchTracks])
 
@@ -236,6 +248,21 @@ export default function TracksPage() {
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-bold text-slate-100">Track Library</h1>
             <span className="text-xs text-slate-500">{total.toLocaleString()} tracks</span>
+            {/* The month filter lives in the URL rather than in a visible control,
+                so without this chip a drilled-in view looks like the whole library
+                with a wrong count. */}
+            {monthParam && (
+              <button
+                onClick={() => router.push('/tracks')}
+                title="Clear month filter"
+                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs
+                           border border-emerald-500/30 bg-emerald-500/10 text-emerald-400
+                           hover:bg-emerald-500/20 transition-colors"
+              >
+                {monthLabel}
+                <span aria-hidden className="text-emerald-500/70">&times;</span>
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <select
@@ -536,6 +563,17 @@ function TrackTableRow({
         </tr>
       )}
     </>
+  )
+}
+
+// useSearchParams() opts a route into client-side rendering, and the App Router
+// requires it to sit inside a Suspense boundary -- without one, `next build` fails
+// at the prerender step rather than at runtime.
+export default function TracksPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Loading tracks…</div>}>
+      <TracksPageInner />
+    </Suspense>
   )
 }
 

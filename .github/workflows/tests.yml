@@ -1,0 +1,78 @@
+name: Tests
+
+# WHY THIS EXISTS
+#   The repo had ~20 test files and nothing that ran them. Every suite was green
+#   only when someone remembered to run it by hand, and two order-dependency bugs
+#   had already crept in unnoticed (test modules fighting over db.py's module-level
+#   DB_PATH, which is decided by whichever test imports it first).
+#
+#   pytest is the runner, not unittest: some suites use bare test functions that
+#   `python -m unittest` silently collects as zero tests and reports as success.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [sync-api, sync-worker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.service }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx
+          # sync-worker's Dockerfile installs tiddl separately from requirements.txt.
+          # Mirror that here: without it _refresh_tidal_token cannot resolve the Tidal
+          # client credentials and returns early, so its test fails on an absent
+          # dependency rather than on anything real.
+          if [ "${{ matrix.service }}" = "sync-worker" ]; then pip install tiddl; fi
+
+      - name: Run tests
+        working-directory: ${{ matrix.service }}
+        # Run the whole suite in ONE process on purpose: cross-module interference
+        # via shared module state is a real failure mode here, and running each
+        # file in isolation would hide exactly the bug this job exists to catch.
+        run: python -m pytest tests -q
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sync-web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sync-web
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: sync-web
+        run: npx tsc --noEmit
+
+      - name: Build
+        working-directory: sync-web
+        # `next build` catches what tsc cannot -- most importantly a useSearchParams()
+        # call outside a Suspense boundary, which fails at the prerender step.
+        run: npm run build

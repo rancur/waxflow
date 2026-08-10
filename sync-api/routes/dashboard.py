@@ -12,6 +12,57 @@ router = APIRouter(prefix="/api", tags=["dashboard"])
 LEXICON_API = os.environ.get("LEXICON_API_URL", "http://localhost:48624")
 TIDARR_API = os.environ.get("TIDARR_URL", "http://localhost:8484")  # optional legacy fallback
 
+# The worker re-probes Soulseek every 120s. If the last verdict is older than this,
+# the worker itself is the thing that is unwell, and reporting its last known "ok"
+# would be reporting a lie.
+_SOULSEEK_STALE_AFTER_SECONDS = 900
+
+# Statuses that mean "deliberately off", not "broken".
+_SOULSEEK_INACTIVE = {"disabled", "not_configured"}
+
+
+def _soulseek_service(conn) -> ServiceHealth:
+    """Report the verdict last persisted by the worker's soulseek_health task."""
+    keys = ("soulseek_health", "soulseek_detail", "soulseek_checked_at", "soulseek_latency_ms")
+    rows = conn.execute(
+        f"SELECT key, value FROM app_config WHERE key IN ({','.join('?' * len(keys))})",
+        keys,
+    ).fetchall()
+    cfg = {r["key"]: r["value"] for r in rows}
+
+    status = (cfg.get("soulseek_health") or "").strip()
+    detail = cfg.get("soulseek_detail") or None
+    checked_at = cfg.get("soulseek_checked_at")
+
+    if not status:
+        return ServiceHealth(
+            name="soulseek", status="unknown",
+            error="no health check recorded yet — is the worker running?",
+        )
+
+    try:
+        latency = float(cfg["soulseek_latency_ms"]) if cfg.get("soulseek_latency_ms") else None
+    except (TypeError, ValueError):
+        latency = None
+
+    if checked_at and status not in _SOULSEEK_INACTIVE:
+        try:
+            from datetime import datetime, timezone
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(checked_at)).total_seconds()
+            if age > _SOULSEEK_STALE_AFTER_SECONDS:
+                return ServiceHealth(
+                    name="soulseek", status="unknown", latency_ms=latency,
+                    error=f"last checked {int(age // 60)} min ago — worker may be stalled",
+                )
+        except (TypeError, ValueError):
+            pass
+
+    if status == "ok":
+        return ServiceHealth(name="soulseek", status="ok", latency_ms=latency)
+    if status in _SOULSEEK_INACTIVE:
+        return ServiceHealth(name="soulseek", status="disabled", error=detail)
+    return ServiceHealth(name="soulseek", status="error", latency_ms=latency, error=detail)
+
 
 @router.get("/dashboard", response_model=DashboardResponse)
 async def get_dashboard():
@@ -79,11 +130,14 @@ async def get_dashboard():
         # Service health checks
         services = []
 
-        # Lexicon
+        # Lexicon. Probe /v1/playlists, NOT /v1/tracks: this endpoint is polled every
+        # 10s by the dashboard, and /v1/tracks returns the ENTIRE library (5,600+
+        # rows) on every single call. lexicon_health._check_lexicon_reachable already
+        # uses /v1/playlists for exactly this reason.
         try:
             t0 = time.monotonic()
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{LEXICON_API}/v1/tracks")
+                resp = await client.get(f"{LEXICON_API}/v1/playlists")
             latency = round((time.monotonic() - t0) * 1000, 1)
             services.append(ServiceHealth(
                 name="lexicon",
@@ -108,6 +162,10 @@ async def get_dashboard():
             ))
         except Exception as e:
             services.append(ServiceHealth(name="tidal", status="error", error=str(e)))
+
+        # Soulseek. The API has neither the slskd credentials nor the worker's client,
+        # so it reports what the worker's soulseek_health probe last persisted.
+        services.append(_soulseek_service(conn))
 
         return DashboardResponse(
             spotify_total=spotify_total,

@@ -1,5 +1,108 @@
 # Changelog
 
+## 2.13.0 — visible failures, real retries, and the wrong-version fix
+
+Three problems that were reported as feature requests turned out to be something
+other than they looked. Measuring them first is what made this release small.
+
+### The Missing Tracks page was never empty — it was erroring
+
+`/upload` asked for `per_page=500` from an endpoint capped at 200. The API replied
+with a 422 explaining exactly that, and the page rendered a clean empty table.
+
+The reason it survived so long is `api.ts`: it threw away the response body and
+raised `Error("API error: 422")`, so every caller's `catch { setRows([]) }` turned a
+loud, specific server error into "you have no missing tracks". The client now keeps
+the status and FastAPI's `detail`, retries only transport faults and 5xx (never a
+4xx, which is deterministic), and the page pages through all 270 errors instead of
+truncating at the cap.
+
+### "Fingerprint mismatch" involved no fingerprints
+
+The category matched on duration, not on the chromaprint WaxFlow computes and
+stores. 108 of the 109 tracks in it came from one path: the file-index title+artist
+matcher, which accepted any file whose title and artist agreed — so an extended
+mix, a radio edit or a live take all matched. Verify then rejected the file on
+duration and parked the track as an error.
+
+Measured across 265 such matches on the live library: 155 land within 5s of the
+Spotify duration and 110 exceed it, 95 of those by more than 15s. The two
+populations separate cleanly, so title+artist matches now require the durations to
+agree within 5s (configurable; fails open when either duration is unknown, as ~0.4%
+of indexed files have none). The category is renamed **Wrong Version**, which is
+what it always was.
+
+### Post-processing was working the whole time
+
+Of 400 tracks imported since July: 400 had BPM, 399 had cue points, 394 artwork,
+399 cloud-backed — and only 4 tracks in the entire library lacked cues. Nothing was
+broken; there was no way to see it. The dashboard now shows coverage for cue
+points, beat grids, BPM, key, genre and tags, sampled hourly by the worker.
+
+It also honestly reports what it *cannot* measure: Lexicon's API exposes no artwork
+or cloud-upload field, so those are named as unavailable rather than guessed at.
+
+One real bug did surface here: **"Auto-Analyze After Sync" silently disabled cue
+generation, tag lookup and cloud upload too**, despite each having its own checkbox
+in Settings and the toggle's own description mentioning only BPM/key detection.
+Turning off analysis now turns off exactly analysis.
+
+### Bulk retry
+
+`POST /api/tracks/bulk-retry` takes explicit ids or a category name resolved
+server-side by the same classifier that renders the count — so "Retry All 47"
+acts on those 47, not on a set that drifted. The Errors page gains per-category
+"Retry All" alongside the existing "Ignore All".
+
+It also **clears `fallback_attempts`**, without which a retry was quietly inert:
+`already_attempted()` treats any prior row as "we tried this", so the track reset,
+walked back down the pipeline, and failed identically without ever re-contacting
+Soulseek. The existing single-track retry had the same defect and is fixed too.
+
+Bulk operations now write one summary activity row instead of one per track;
+ignoring a category used to insert thousands and bury the dashboard feed.
+
+### Soulseek in service health
+
+`is_logged_in()` existed and was never surfaced. Because sync-api cannot import
+worker code and has no slskd credentials, the worker probes every 120s and persists
+the verdict to `app_config` for the API to serve — the pattern `lexicon_health`
+already uses. It distinguishes logged-out (slskd answers, but searches return
+nothing) from unreachable, and never-configured from broken. A verdict older than
+15 minutes reports as unknown rather than repeating a stale "ok".
+
+The dashboard now renders whatever services the API reports rather than a hardcoded
+list of three.
+
+### Dashboard drill-down
+
+Clicking a month's green/red/grey segment opens that exact set of tracks. The
+`month` filter is a half-open range rather than `substr(spotify_added_at, 1, 7)`, so
+it can use an index — and `tracks` had no index at all beyond its implicit primary
+key one, so `spotify_added_at`, `pipeline_stage` and `lexicon_status` now have them.
+
+Segment widths come from flex-grow on raw counts; three independently rounded
+percentages could total 101% and overflow the bar.
+
+### Also
+
+- The dashboard health probe called `GET /v1/tracks` — Lexicon's **entire library**
+  — every 10 seconds. It now calls `/v1/playlists`, as `lexicon_health` already did.
+- The nav error badge polled every errored track in full for a single integer;
+  there is now a counts-only summary endpoint.
+- **CI runs the tests.** The repo had ~20 test files and no workflow that executed
+  them. It runs pytest (not `unittest`, which silently collects zero tests from the
+  bare-function suites and reports success), plus a web typecheck and a real
+  `next build`.
+- Fixed two order-dependency bugs the new CI immediately exposed: test modules were
+  fighting over `db.py`'s module-level `DB_PATH`, which is decided by whichever test
+  imports it first.
+- The Tidal token-refresh test had been failing for anyone running the suite outside
+  the container. `tiddl` is installed by `sync-worker/Dockerfile` but is absent from
+  `requirements.txt`, so the function under test bailed out on missing credentials
+  before reaching the code the test was asserting on. CI now mirrors the Dockerfile.
+
+
 ## 2.12.4 — fix: the updater used the wrong compose project name
 
 The updater mounts the project at `/project`, and Compose derives the project name

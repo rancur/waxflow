@@ -58,6 +58,17 @@ class TrackUpdate(BaseModel):
     file_path: Optional[str] = None
 
 
+class BulkRetryRequest(BaseModel):
+    """Retry many tracks by explicit id, or by error category resolved server-side.
+
+    `limit` is a safety rail: a category retry can cover thousands of tracks, and
+    the pipeline picks work up every 10 seconds.
+    """
+    track_ids: Optional[list[int]] = None
+    category: Optional[str] = None
+    limit: int = Field(default=500, ge=1, le=5000)
+
+
 class TrackListResponse(BaseModel):
     tracks: list[TrackOut]
     total: int

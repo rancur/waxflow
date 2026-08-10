@@ -187,6 +187,19 @@ CREATE INDEX IF NOT EXISTS idx_wanted_track ON wanted(track_id);
 CREATE INDEX IF NOT EXISTS idx_import_queue_state ON import_queue(state);
 """
 
+# Indexes on `tracks`, which this module does NOT own -- sync-api's init_db.py
+# creates that table, and the two containers can start in either order. They are
+# applied separately and only for columns that actually exist, because
+# `conn.executescript` runs in one shot: a CREATE INDEX naming a column that is not
+# there yet raises, and every statement after it in the script is skipped. Putting
+# these in _V3_DDL would mean one early-boot ordering accident silently costs the
+# worker its entire v3 schema.
+V3_TRACK_INDEXES: tuple[tuple[str, str], ...] = (
+    ("idx_tracks_spotify_added_at", "spotify_added_at"),
+    ("idx_tracks_pipeline_stage", "pipeline_stage"),
+    ("idx_tracks_lexicon_status", "lexicon_status"),
+)
+
 
 def ensure_v3_schema(db_path: str) -> None:
     """Idempotently create the additive v3 tables/columns.
@@ -206,6 +219,17 @@ def ensure_v3_schema(db_path: str) -> None:
             if name not in cols:
                 conn.execute(f"ALTER TABLE tracks ADD COLUMN {name} {decl}")
                 log.info("schema: added tracks.%s", name)
+
+    # Indexes on tracks. Guarded on the column existing -- see V3_TRACK_INDEXES.
+    # `tracks` shipped with no index at all beyond its implicit PK one, so these
+    # back the dashboard month drill-down and every list-view filter.
+    with get_db(db_path) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracks)").fetchall()}
+        for index_name, column in V3_TRACK_INDEXES:
+            if column in cols:
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} ON tracks({column})"
+                )
 
     # Guarded, nullable ADD COLUMNs on import_queue (Phase 3 backoff cursor). Same
     # cheap/non-locking additive pattern; a no-op once present.
