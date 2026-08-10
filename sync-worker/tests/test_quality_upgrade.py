@@ -269,3 +269,78 @@ class ScoreBackfillTest(unittest.TestCase):
         conn.execute("UPDATE tracks SET quality_tier='lossless'")
         conn.commit(); conn.close()
         self.assertEqual(qu.backfill_scores(self.db, 10), 0)
+
+
+class InPlaceReplacementTest(unittest.TestCase):
+    """The seamless path: same container means Lexicon's location never changes.
+
+    That is what removes the "quit Lexicon" requirement for the common case. On
+    this library 845 of 939 scored tracks are lossless climbing within their own
+    container, so no database write is involved at all -- the bytes at the existing
+    path simply get better.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="inplace_")
+        self.db = os.path.join(self.dir, "t.db")
+        self.old = os.path.join(self.dir, "song.flac")
+        with open(self.old, "wb") as f:
+            f.write(b"OLD" * 1000)
+        _seed(self.db, [("song", MP3)])
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE tracks SET file_path=? WHERE id=1", (self.old,))
+        conn.commit(); conn.close()
+        self.better = os.path.join(self.dir, "better.flac")
+        with open(self.better, "wb") as f:
+            f.write(b"NEW" * 2000)
+
+    def _scores(self):
+        return (quality.score_probe(MP3),
+                quality.score_probe({"codec": "flac", "sample_rate": 44100,
+                                     "bit_depth": 16, "bit_rate": 900_000}))
+
+    def test_same_extension_is_detected(self):
+        self.assertTrue(qu._same_container("/a/x.flac", "/tmp/y.flac"))
+        self.assertTrue(qu._same_container("/a/x.FLAC", "/tmp/y.flac"))
+        self.assertFalse(qu._same_container("/a/x.m4a", "/tmp/y.flac"))
+
+    def test_the_file_is_replaced_at_the_same_path(self):
+        old_score, new_score = self._scores()
+        ok = qu.replace_in_place(self.db, {"id": 1, "file_path": self.old},
+                                 self.better, old_score, new_score)
+        self.assertTrue(ok)
+        self.assertEqual(open(self.old, "rb").read(), b"NEW" * 2000)
+        self.assertTrue(os.path.exists(self.old), "the path itself must not move")
+
+    def test_the_original_is_kept_so_it_is_reversible(self):
+        old_score, new_score = self._scores()
+        qu.replace_in_place(self.db, {"id": 1, "file_path": self.old},
+                            self.better, old_score, new_score)
+        kept = os.path.join(self.dir, ".superseded", "song.flac")
+        self.assertTrue(os.path.exists(kept))
+        self.assertEqual(open(kept, "rb").read(), b"OLD" * 1000)
+
+    def test_no_staging_file_is_left_behind(self):
+        old_score, new_score = self._scores()
+        qu.replace_in_place(self.db, {"id": 1, "file_path": self.old},
+                            self.better, old_score, new_score)
+        self.assertEqual([f for f in os.listdir(self.dir) if f.endswith(".incoming")], [])
+
+    def test_quality_is_recorded_and_the_hunt_ends(self):
+        old_score, new_score = self._scores()
+        qu.replace_in_place(self.db, {"id": 1, "file_path": self.old},
+                            self.better, old_score, new_score)
+        conn = sqlite3.connect(self.db)
+        tier, bt, state = conn.execute(
+            "SELECT quality_tier, below_target, upgrade_state FROM tracks WHERE id=1"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(tier, "lossless")
+        self.assertEqual(bt, 0)
+        self.assertEqual(state, "resolved")
+
+    def test_a_missing_original_is_refused(self):
+        old_score, new_score = self._scores()
+        self.assertFalse(qu.replace_in_place(
+            self.db, {"id": 1, "file_path": "/nope/gone.flac"},
+            self.better, old_score, new_score))

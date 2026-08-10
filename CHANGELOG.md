@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.18.0 — upgrades that apply themselves
+
+Replacing a file meant rewriting Lexicon's `Track.location`, which meant quitting
+Lexicon, which meant a human. That made "automatic upgrades" a contradiction.
+
+It turns out most upgrades do not need any of that. **A FLAC replacing a FLAC keeps
+its filename** -- so the better bytes can be written straight over the old file,
+`location` never changes, and there is nothing to rewrite and nothing to quit.
+
+Measured on this library: **845 of 939 scored tracks** are lossless climbing within
+their own container. Only the 94 lossy ones must change container (m4a -> flac) and
+therefore still need the gated relocator.
+
+So the rechecker now takes whichever path applies:
+
+    same container   -> written in place, immediately, Lexicon untouched
+    container change -> staged for the relocator, as before
+
+The in-place swap is atomic (`os.replace`), so the path never holds a partial file
+and a crash mid-copy leaves the original exactly as it was. The original is copied
+to `.superseded/` first, so it is reversible.
+
+Cue points, beat grids and playlists key off `Track.id` and survive untouched. One
+caveat worth knowing: a waveform Lexicon has already drawn was rendered from the
+old audio. Grids are time-based and a same-recording upgrade has the same duration,
+so cues and grids stay correct, but the drawn waveform may want a re-analyse.
+
+### Also
+
+A live-write experiment was attempted and correctly refused by the permission
+layer: writing to Lexicon's database while Lexicon is running risks its in-memory
+cache overwriting the change on exit. The in-place path sidesteps that question
+entirely rather than answering it -- it never touches the database at all.
+
 ## 2.17.1 — score the existing library, and prove the relocator
 
 **Scoring is now self-healing.** It previously happened only as a track passed

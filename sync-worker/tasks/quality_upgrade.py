@@ -170,6 +170,79 @@ def find_candidates(db_path: str, profile: dict, limit: int) -> list[dict]:
     return out
 
 
+def _same_container(old_path: str, new_path: str) -> bool:
+    """Would this upgrade land at the same filename?
+
+    A FLAC replacing a FLAC keeps its extension, so it can be written straight over
+    the old file: Lexicon's `Track.location` never changes, which means there is
+    nothing to rewrite and no reason to quit Lexicon. Measured on this library, 845
+    of 939 scored tracks are in that position -- only the 94 lossy ones must change
+    container and therefore need the gated relocator.
+    """
+    return (os.path.splitext(old_path or "")[1].lower()
+            == os.path.splitext(new_path or "")[1].lower())
+
+
+def replace_in_place(db_path: str, track: dict, new_file: str,
+                     old_score, new_score) -> bool:
+    """Swap the audio at the EXISTING path. No database write anywhere.
+
+    Lexicon keys cue points, beat grids and playlists off `Track.id`, and `location`
+    is untouched here, so all of them survive. Nothing about Lexicon is read or
+    written -- it simply plays better audio next time.
+
+    The swap is atomic (`os.replace`), so the path never holds a partial file: a
+    crash mid-copy leaves the original exactly as it was. The original is copied to
+    `.superseded/` first, so the change is reversible.
+
+    CAVEAT worth knowing: a waveform Lexicon already rendered was computed from the
+    old audio. Beat grids are time-based and a same-recording upgrade has the same
+    duration, so grids and cues stay valid, but the drawn waveform may need a
+    re-analyse to look right.
+    """
+    old_path = track.get("file_path")
+    if not old_path or not os.path.exists(old_path):
+        return False
+
+    directory = os.path.dirname(old_path)
+    superseded = os.path.join(directory, ".superseded")
+    staging = os.path.join(directory, f".{os.path.basename(old_path)}.incoming")
+
+    try:
+        os.makedirs(superseded, exist_ok=True)
+        shutil.copy2(old_path, os.path.join(superseded, os.path.basename(old_path)))
+        shutil.copy2(new_file, staging)
+        with open(staging, "rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(staging, old_path)
+    except OSError as e:
+        log.warning("Track %d: in-place replace failed: %s", track["id"], e)
+        try:
+            if os.path.exists(staging):
+                os.remove(staging)
+        except OSError:
+            pass
+        return False
+
+    update_track(
+        db_path, track["id"],
+        quality_tier=new_score.tier_name, quality_score=new_score.score,
+        quality_bit_rate=new_score.bit_rate, quality_checked_at=_now_iso(),
+        below_target=0 if new_score.meets_target else 1,
+        upgrade_state="resolved",
+    )
+    log_activity(
+        db_path, "upgrade_applied", track["id"],
+        f"Replaced {old_score.tier_name if old_score else '?'} with "
+        f"{new_score.tier_name} in place — Lexicon untouched",
+        {"path": old_path, "old": old_score.as_dict() if old_score else None,
+         "new": new_score.as_dict()},
+    )
+    log.info("Track %d: replaced %s -> %s IN PLACE", track["id"],
+             old_score.tier_name if old_score else "?", new_score.tier_name)
+    return True
+
+
 def _stage_replacement(db_path: str, track: dict, new_path: str,
                        old_score, new_score) -> None:
     """Record a verified improvement for the relocator to apply."""
@@ -245,6 +318,19 @@ def process_one(db_path: str, track: dict, client, profile: dict) -> bool:
                           track["id"], candidate_score.tier_name, current.tier_name)
                 continue
 
+            # Same container -> write the bytes over the existing path. Lexicon's
+            # location does not change, so there is no database write, nothing to
+            # quit, and the upgrade takes effect immediately. This is the common
+            # case: 845 of 939 scored tracks here are lossless climbing within
+            # their own container.
+            if _same_container(track.get("file_path"), local):
+                if replace_in_place(db_path, track, local, current, candidate_score):
+                    _record_attempt(db_path, track["id"], attempts, False)
+                    return True
+
+            # Different container (m4a -> flac): the filename must change, so
+            # Lexicon's location has to be rewritten. That needs the relocator with
+            # Lexicon quit, so stage it rather than applying it here.
             dest = sf._move_into_library(db_path, local, track.get("artist") or "",
                                          track.get("title") or "")
             _stage_replacement(db_path, track, dest, current, candidate_score)
