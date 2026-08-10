@@ -720,7 +720,9 @@ class TestLexiconSearchDurationGate(unittest.TestCase):
     Lexicon reports duration in SECONDS.
     """
 
-    def _search(self, spotify_seconds, lexicon_seconds, lex_title="Running Blind (Fre4knc Remix)"):
+    def _search(self, spotify_seconds, lexicon_seconds,
+                lex_title="Running Blind (Fre4knc Remix)",
+                sp_title="Running Blind - Original Mix"):
         payload = {"data": {"tracks": [{
             "id": 1626, "title": lex_title, "artist": "Noisia",
             "duration": lexicon_seconds,
@@ -740,17 +742,22 @@ class TestLexiconSearchDurationGate(unittest.TestCase):
         with mock.patch.object(pp.httpx, "Client", return_value=_C()), \
              mock.patch.object(pp, "get_config", return_value=None):
             return pp._check_existing_in_lexicon({
-                "id": 1, "title": "Running Blind - Original Mix", "artist": "Noisia",
+                "id": 1, "title": sp_title, "artist": "Noisia",
                 "duration_ms": int(spotify_seconds * 1000)}, "/tmp/x.db")
 
     def test_original_no_longer_matches_the_remix_file(self):
         self.assertIsNone(self._search(335.5, 312.5))
 
     def test_the_remix_itself_still_matches(self):
-        self.assertIsNotNone(self._search(312.5, 312.5))
+        # The claimant that IS the remix: title and file agree, durations agree.
+        self.assertIsNotNone(self._search(312.5, 312.5,
+                                          sp_title="Running Blind - Fre4knc Remix"))
 
     def test_missing_lexicon_duration_fails_open(self):
-        self.assertIsNotNone(self._search(335.5, None))
+        # Duration unknown -> that gate cannot judge. Use a title that does not
+        # trip the independent VERSION gate, or this proves nothing about duration.
+        self.assertIsNotNone(self._search(335.5, None,
+                                          sp_title="Running Blind - Fre4knc Remix"))
 
     def test_works_without_a_db_path(self):
         # The signature keeps db_path optional for existing callers; the gate must
@@ -812,3 +819,63 @@ class TestVersionConflictGate(unittest.TestCase):
         self.assertFalse(pp._versions_conflict("", ""))
         self.assertFalse(pp._versions_conflict("Title - Remix", ""))
         self.assertFalse(pp._versions_conflict(None, None))
+
+
+class TestLexiconLinkGate(unittest.TestCase):
+    """LINKING says "this Lexicon row IS my track". Title+artist cannot establish
+    that -- an original, an extended mix and three remixes all share both.
+
+    Linking anyway is what produced 252 Lexicon rows each claimed by several
+    Spotify tracks. The linked row points at a DIFFERENT FILE, so the version
+    actually liked never gets imported, and the track is still reported as synced.
+    """
+
+    def _classify(self, track, candidate):
+        payload = {"data": {"tracks": [candidate]}}
+
+        class _R:
+            status_code = 200
+            def json(self): return payload
+
+        class _C:
+            def get(self, *a, **k): return _R()
+
+        return pp._classify_lexicon_presence(_C(), track)
+
+    def _track(self, title, seconds):
+        return {"id": 1, "title": title, "artist": "Noisia",
+                "duration_ms": int(seconds * 1000)}
+
+    def test_refuses_to_link_a_different_length_recording(self):
+        # Real case: "Running Blind - Original Mix" (336s) was linked to the
+        # Fre4knc remix row (313s), whose file is a different recording entirely.
+        decision, _ = self._classify(
+            self._track("Running Blind - Original Mix", 336),
+            {"id": 1626, "title": "Running Blind (Fre4knc Remix)", "artist": "Noisia",
+             "location": "/m/Noisia - Running Blind (Fre4knc Remix).aiff", "duration": 313})
+        self.assertNotEqual(decision, "link")
+
+    def test_refuses_to_link_a_different_version(self):
+        decision, _ = self._classify(
+            self._track("Dream Atlas - CloZee Remix", 322),
+            {"id": 2392, "title": "Dream Atlas", "artist": "Noisia",
+             "location": "/m/Dream Atlas (Original Mix)/x - Dream Atlas (Original Mix).flac",
+             "duration": 322})
+        self.assertNotEqual(decision, "link")
+
+    def test_still_links_the_genuine_same_recording(self):
+        # The duplicate-safety guarantee must survive: a real re-import of the same
+        # track still links instead of creating a duplicate.
+        decision, lex_id = self._classify(
+            self._track("Running Blind - Fre4knc Remix", 313),
+            {"id": 1626, "title": "Running Blind (Fre4knc Remix)", "artist": "Noisia",
+             "location": "/m/Noisia - Running Blind (Fre4knc Remix).aiff", "duration": 313})
+        self.assertEqual(decision, "link")
+        self.assertEqual(lex_id, "1626")
+
+    def test_links_when_lexicon_reports_no_duration(self):
+        decision, _ = self._classify(
+            self._track("Running Blind", 313),
+            {"id": 1626, "title": "Running Blind", "artist": "Noisia",
+             "location": "/m/Noisia - Running Blind.aiff", "duration": None})
+        self.assertEqual(decision, "link")

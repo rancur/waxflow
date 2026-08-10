@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.15.2 — the mis-mapping was in the LINK step, not the file matchers
+
+Unmapping 20 of the 252 mis-mapped rows and watching them re-resolve showed 14 of
+20 going straight back to the same wrong Lexicon row. The gates were live; they
+were guarding the wrong step.
+
+    wf#146  "Running Blind - Original Mix"
+       file_path  -> "Noisia - Running Blind (Original Mix).flac"   CORRECT
+       lexicon id -> "Running Blind (Fre4knc Remix)"                WRONG
+
+The file matchers were doing their job. `_lexicon_find_or_import` then linked that
+correct file to a Lexicon row pointing at a **different file**, on title and artist
+alone -- `_classify_lexicon_presence` collected only `(title, artist)` per
+candidate and discarded `location` and `duration` entirely.
+
+Linking says "this Lexicon row IS my track". Title and artist cannot establish
+that: an original, an extended mix and three remixes all share both. The linked row
+points elsewhere, so the version actually liked is never imported and the track is
+still reported as synced. **That is the mechanism that created all 252.**
+
+Both remaining holes are now closed:
+
+  * `_classify_lexicon_presence` keeps each candidate's location and duration and
+    applies the same duration + version gates before returning "link". The
+    duplicate-safety guarantee is unchanged -- a genuine re-import still links
+    rather than creating a duplicate.
+  * `_check_existing_in_library` fell through from its (gated) file_index lookup to
+    an **ungated filesystem scan** that matches on filename against the BASE title,
+    so "Concussion - Mefjus Remix" happily landed on "Noisia - Concussion.flac".
+    That fallback now probes the file's real duration and checks versions.
+
+### "original" is a version token
+
+A file named "(Original Mix)" asserts it is NOT a remix. Leaving it out meant a
+Spotify "... - CloZee Remix" and a file "... (Original Mix)" produced no conflict,
+because only one side carried a token. Adding it moves the false-positive rate on
+correct matches from 0.11% to 0.32% (15 of 4,628) -- and most of those 15 are
+genuine mis-matches the duration gate could not see.
+
 ## 2.15.1 — version-aware matching for remixes
 
 Prompted by a good observation: a library full of remixes has the remix named in

@@ -358,6 +358,11 @@ DEFAULT_DURATION_TOLERANCE_SECONDS = 5.0
 _VERSION_TOKENS = (
     "remix", "bootleg", "vip", "mashup", "rework", "flip", "edit",
     "extended", "radio", "dub", "instrumental", "acoustic", "live",
+    # "original" is a positive signal, not the absence of one: a file named
+    # "(Original Mix)" is asserting it is NOT a remix. Without it, a Spotify
+    # "... - CloZee Remix" and a file "... (Original Mix)" produced no conflict
+    # because only one side had a token.
+    "original",
 )
 
 
@@ -843,10 +848,43 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
                         # filename as complete word(s) — word-boundary anchored so a
                         # single-word title fragment ("drift") does NOT match a
                         # filename containing a longer word ("...drifting...").
-                        if (_contains_at_word_boundary(title_base_norm, fname_norm) or
+                        if not (_contains_at_word_boundary(title_base_norm, fname_norm) or
                                 _contains_at_word_boundary(title_norm, fname_norm)):
-                            return {"file_path": os.path.join(root, f)}
+                            continue
 
+                        candidate = os.path.join(root, f)
+                        # The filesystem scan matches on the FILENAME alone, and it
+                        # searches on the BASE title, so "Concussion - Mefjus Remix"
+                        # happily lands on "Noisia - Concussion.flac". The file_index
+                        # lookup above is gated; this fallback was not, and it is how
+                        # match_source='library_existing' produced wrong files.
+                        if _versions_conflict(title, candidate):
+                            continue
+                        # Probe the file itself: there is no indexed duration here.
+                        if not _durations_match(db_path, track,
+                                                _probe_duration_seconds(candidate),
+                                                candidate):
+                            continue
+                        return {"file_path": candidate}
+
+    return None
+
+
+def _probe_duration_seconds(path: str) -> float | None:
+    """Duration of a file on disk, or None when it cannot be determined.
+
+    Prefers the already-indexed value and only shells out to ffprobe as a last
+    resort, because this runs inside a directory walk.
+    """
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(path)
+        if audio is not None and getattr(audio, "info", None) is not None:
+            length = getattr(audio.info, "length", None)
+            if length:
+                return float(length)
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
@@ -2776,7 +2814,7 @@ def _classify_lexicon_presence(client: httpx.Client, track: dict) -> tuple[str, 
         queries.append(stripped)
 
     any_search_ok = False
-    candidates: dict = {}  # lexicon_id -> (lex_title, lex_artist)
+    candidates: dict = {}  # lexicon_id -> (lex_title, lex_artist, location, duration)
 
     def _collect(params: dict):
         nonlocal any_search_ok
@@ -2797,7 +2835,8 @@ def _classify_lexicon_presence(client: httpx.Client, track: dict) -> tuple[str, 
             tid = t.get("id")
             if tid is None:
                 continue
-            candidates[tid] = (t.get("title") or "", t.get("artist") or "")
+            candidates[tid] = (t.get("title") or "", t.get("artist") or "",
+                               t.get("location") or "", t.get("duration"))
 
     seen_q: set[str] = set()
     for q in queries:
@@ -2809,9 +2848,32 @@ def _classify_lexicon_presence(client: httpx.Client, track: dict) -> tuple[str, 
     _collect({"filter[artist]": artist, "filter[title]": title})
 
     ambiguous = False
-    for tid, (lex_title, lex_artist) in candidates.items():
+    for tid, (lex_title, lex_artist, lex_location, lex_duration) in candidates.items():
         a_match = _artists_match(artist, lex_artist)
         t_match = _titles_match(title, lex_title)
+
+        # LINKING to a row means "this Lexicon track IS my track". Title and artist
+        # agreeing is not enough to claim that: an original, an extended mix and
+        # three remixes all share both. Linking anyway is what produced 252 Lexicon
+        # rows each claimed by several Spotify tracks -- and the linked row points
+        # at a DIFFERENT FILE, so the version actually liked never gets imported and
+        # the track is silently reported as synced.
+        #
+        # Apply the same gates the file matchers use, against the row's own file.
+        if t_match and a_match:
+            if not _durations_match(None, track, lex_duration, lex_location):
+                log.info(
+                    "Lexicon link REFUSED for '%s - %s': candidate %s is %ss vs %ss",
+                    artist, title, tid, lex_duration and round(float(lex_duration)),
+                    track.get("duration_ms") and round(track["duration_ms"] / 1000),
+                )
+                continue
+            if _versions_conflict(title, lex_location):
+                log.info(
+                    "Lexicon link REFUSED for '%s - %s': candidate %s is a different "
+                    "version (%s)", artist, title, tid, lex_location,
+                )
+                continue
         if t_match and a_match:
             # Confident identity match -> LINK (protects the library from dupes).
             return ("link", str(tid))
