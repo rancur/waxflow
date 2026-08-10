@@ -1,5 +1,9 @@
 # :headphones: WaxFlow
 
+> **Picking this up fresh?** Start with [`docs/HANDOFF.md`](docs/HANDOFF.md)
+> — what is built, what is left, and the ground-truth facts that are
+> expensive to rediscover.
+
 **All your music, flowing home. Sync your Spotify Liked Songs to Lexicon DJ with lossless FLAC downloads from Tidal.**
 
 ![Version](https://img.shields.io/badge/version-v2.3.0-blue)
