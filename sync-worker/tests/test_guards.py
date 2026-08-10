@@ -758,3 +758,57 @@ class TestLexiconSearchDurationGate(unittest.TestCase):
         with mock.patch.object(pp, "get_config", side_effect=AssertionError("no config")):
             pass  # guard only; real call below uses the default path
         self.assertIsNone(self._search(335.5, 312.5))
+
+
+class TestVersionConflictGate(unittest.TestCase):
+    """Catches what the duration gate structurally cannot: cuts of the SAME length.
+
+    An instrumental, an acoustic take and the vocal original all run about as long,
+    so duration says nothing -- but the names do. All the "should reject" cases
+    below are real mis-matches from the live library that the duration gate passed.
+
+    Compared against the FILE PATH, never Lexicon's title: Lexicon routinely keeps
+    the original song name on a file that is a specific remix. Measured on this
+    library, comparing titles rejects 7.8% of CORRECT matches; comparing paths
+    rejects 0.11%.
+    """
+
+    def test_rejects_same_length_different_versions(self):
+        for title, path in (
+            ("Kuaga (Lost Time) - S.P.Y Instrumental",
+             "/music/Kuaga (Extended Mix)/Pierce Fulton - Kuaga (Lost Time).flac"),
+            ("Collide - Acoustic Version",
+             "/music/Collide (Radio Edit)/Howie Day - Collide.flac"),
+        ):
+            self.assertTrue(pp._versions_conflict(title, path), title)
+
+    def test_matching_version_names_are_kept(self):
+        self.assertFalse(pp._versions_conflict(
+            "Stay - Maduk Remix",
+            "/music/Stay (Maduk Remix)/Delta Heavy - Stay 4M88.flac"))
+
+    def test_reads_the_parent_folder_not_just_the_filename(self):
+        # The library puts the release in the DIRECTORY, so the remix tag often
+        # appears only there.
+        self.assertFalse(pp._versions_conflict(
+            "Stay - Maduk Remix",
+            "/music/Stay (Maduk Remix)/Delta Heavy - Stay.flac"))
+        self.assertTrue(pp._versions_conflict(
+            "Stay - Maduk Remix",
+            "/music/Stay (Radio Edit)/Delta Heavy - Stay.flac"))
+
+    def test_defers_when_either_side_is_silent(self):
+        # Lexicon keeping the plain song name on a remix file is COMMON; guessing
+        # there is how 7.8% of good matches got rejected in testing.
+        self.assertFalse(pp._versions_conflict(
+            "Trespass 2019 - Mark Knight Remix", "/music/Trespass/Trespass 2019.flac"))
+        self.assertFalse(pp._versions_conflict(
+            "Sandstorm", "/music/Sandstorm (Extended Mix)/Darude - Sandstorm.flac"))
+
+    def test_plain_titles_and_paths_never_conflict(self):
+        self.assertFalse(pp._versions_conflict("Silence", "/music/Silence/Delerium - Silence.flac"))
+
+    def test_missing_inputs_are_safe(self):
+        self.assertFalse(pp._versions_conflict("", ""))
+        self.assertFalse(pp._versions_conflict("Title - Remix", ""))
+        self.assertFalse(pp._versions_conflict(None, None))

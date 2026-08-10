@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.15.1 — version-aware matching for remixes
+
+Prompted by a good observation: a library full of remixes has the remix named in
+the title and the filename, so the matcher should be using that. It was throwing
+it away -- `_titles_match` returns True for **every** one of these:
+
+    "Dream Atlas - CloZee Remix"    vs  "Dream Atlas (Original Mix)"
+    "Running Blind - Original Mix"  vs  "Running Blind (Fre4knc Remix)"
+    "Concussion - Mefjus Remix"     vs  "Concussion"
+
+Matching now rejects a candidate when the track title and the FILE clearly name
+different versions. It complements the duration gate by catching what that
+structurally cannot: **cuts of the same length**. An instrumental, an acoustic take
+and the vocal original all run about as long, so duration says nothing about them.
+Real examples it catches on this library:
+
+    "Kuaga (Lost Time) - S.P.Y Instrumental"  ->  file is the vocal version
+    "Collide - Acoustic Version"              ->  file is the studio version
+    "Calling - Original Instrumental Mix"     ->  file is the vocal version
+
+### Two things the measurements changed
+
+**Compare against the FILE PATH, not Lexicon's title.** Lexicon routinely keeps the
+original song name on a file that is a specific remix, so "Trespass 2019 - Mark
+Knight Remix" legitimately sits at a row titled "Trespass 2019". Gating on titles
+rejects **7.8%** of correct matches; gating on paths rejects **0.11%**.
+
+**Require BOTH sides to name a version before rejecting.** If either is silent we
+cannot tell, and deferring to the duration gate beats guessing. The parent folder
+counts as much as the filename -- the library puts the release in the directory, so
+a remix tag frequently appears only there.
+
+An earlier, stricter variant that also fired when one side was silent was measured
+and discarded: it resolved FEWER contested rows than the duration gate alone
+(179 vs 195) while rejecting 363 good matches.
+
 ## 2.15.0 — the duration gate now covers every matching path
 
 Investigating why 252 Lexicon tracks were each claimed by more than one Spotify

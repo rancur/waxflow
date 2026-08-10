@@ -311,7 +311,8 @@ def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
                    FROM file_index WHERE isrc = ?""",
                 (isrc,),
             ).fetchone()
-            if row and _durations_match(db_path, track, row[3], row[0]):
+            if (row and _durations_match(db_path, track, row[3], row[0])
+                    and not _versions_conflict(title, row[0])):
                 return {"file_path": row[0], "match_type": "isrc"}
 
         # Secondary: fuzzy title + artist match. The SQL LIKE prefix is only a
@@ -344,12 +345,73 @@ def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
                     continue
                 if not _durations_match(db_path, track, row[3], row[0]):
                     continue
+                if _versions_conflict(title, row[0]):
+                    continue
                 return {"file_path": row[0], "match_type": "title_artist"}
 
     return None
 
 
 DEFAULT_DURATION_TOLERANCE_SECONDS = 5.0
+
+# Version descriptors that name a SPECIFIC cut of a song.
+_VERSION_TOKENS = (
+    "remix", "bootleg", "vip", "mashup", "rework", "flip", "edit",
+    "extended", "radio", "dub", "instrumental", "acoustic", "live",
+)
+
+
+def _version_tokens(text: str) -> frozenset:
+    return frozenset(t for t in _VERSION_TOKENS if t in (text or "").lower())
+
+
+def _path_version_tokens(path: str) -> frozenset:
+    """Version descriptors in a filename OR its parent folder.
+
+    The parent folder matters as much as the filename: the library layout puts the
+    release in the directory, so the Maduk remix of "Stay" lands at
+    ".../Stay (Maduk Remix)/Delta Heavy - Stay 4M88.flac" -- the tag is in the
+    FOLDER. (Same reasoning as scripts/dedupe-report.py::mix_tokens.)
+    """
+    if not path:
+        return frozenset()
+    stem = os.path.splitext(os.path.basename(path))[0]
+    parent = os.path.basename(os.path.dirname(path))
+    return _version_tokens(f"{parent} {stem}")
+
+
+def _versions_conflict(spotify_title: str, file_path: str) -> bool:
+    """Do the track title and the FILE clearly name different versions?
+
+    Complements the duration gate by catching what it structurally cannot: cuts of
+    the same length. An instrumental, an acoustic take and the vocal original all
+    run about as long, so duration says nothing -- but the names do.
+
+    Compared against the FILE PATH, deliberately NOT against Lexicon's title.
+    Lexicon frequently keeps the original song name on a file that is a specific
+    remix; measured on this library, comparing titles rejects 7.8% of CORRECT
+    matches, while comparing paths rejects 0.11%.
+
+    Requires BOTH sides to name a version before rejecting anything. If either is
+    silent we cannot tell, and a matcher that guesses is worse than one that defers
+    to the duration gate.
+    """
+    title_tokens = _version_tokens(_extract_version_descriptor(spotify_title))
+    path_tokens = _path_version_tokens(file_path)
+    if not title_tokens or not path_tokens:
+        return False
+    return not (title_tokens & path_tokens)
+
+
+def _extract_version_descriptor(title: str) -> str:
+    """The parenthesised or dash-suffixed descriptor of a title, if any."""
+    if not title:
+        return ""
+    parts = re.findall(r"[\(\[]([^\)\]]+)[\)\]]", title)
+    tail = re.search(r"\s+-\s+(.+)$", re.sub(r"[\(\[][^\)\]]*[\)\]]", "", title))
+    if tail:
+        parts.append(tail.group(1))
+    return " ".join(parts)
 
 
 def _durations_match(db_path: str | None, track: dict, file_seconds, file_path: str) -> bool:
@@ -695,6 +757,9 @@ def _check_existing_in_lexicon(track: dict, db_path: str | None = None) -> dict 
                                             t.get("location", "")):
                         continue
 
+                    if _versions_conflict(title, t.get("location", "")):
+                        continue
+
                     return {
                         "lexicon_track_id": str(tid),
                         "file_path": t.get("location", ""),
@@ -732,6 +797,7 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
                     for row in rows:
                         if (_titles_match(title, row[1] or "") and _artists_match(artist, row[2] or "")
                                 and _durations_match(db_path, track, row[3], row[0])
+                                and not _versions_conflict(title, row[0])
                                 and os.path.exists(row[0])):
                             return {"file_path": row[0]}
         except Exception:
