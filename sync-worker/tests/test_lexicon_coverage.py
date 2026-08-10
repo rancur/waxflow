@@ -9,6 +9,7 @@ are not part of the library and must not drag the percentage down.
 import os
 import sys
 import unittest
+from unittest import mock
 
 SYNC_WORKER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if SYNC_WORKER_DIR not in sys.path:
@@ -78,6 +79,72 @@ class SummarizeTest(unittest.TestCase):
     def test_missing_field_is_treated_as_absent_not_an_error(self):
         summary = lc.summarize([{"title": "no post-processing fields at all"}])
         self.assertEqual(summary["coverage"]["cuepoints"]["count"], 0)
+
+
+class FetchPaginationTest(unittest.TestCase):
+    """Lexicon caps /v1/tracks at 1000 rows and rejects larger limits.
+
+    Reading the unpaginated response LOOKED like it worked -- a full 1000 tracks
+    came back and the percentages were plausible -- while actually measuring only
+    the oldest fifth of a 5,611-track library. The log line ("1000 active tracks")
+    was the only tell. A silently-truncated denominator is the worst failure mode
+    for a module whose entire output is a percentage.
+    """
+
+    def _client_returning(self, total, page_size=1000):
+        pages = []
+
+        def get(path, params=None, **kw):
+            offset = (params or {}).get("offset", 0)
+            limit = (params or {}).get("limit", page_size)
+            batch = [{"id": i} for i in range(offset, min(offset + limit, total))]
+            pages.append(offset)
+            resp = mock.MagicMock()
+            resp.json.return_value = {
+                "data": {"total": total, "limit": limit,
+                         "offset": offset, "tracks": batch}
+            }
+            resp.raise_for_status.return_value = None
+            return resp
+
+        client = mock.MagicMock()
+        client.get.side_effect = get
+        client.__enter__ = lambda s: client
+        client.__exit__ = lambda s, *a: False
+        return client, pages
+
+    def test_fetches_every_page_not_just_the_first(self):
+        client, pages = self._client_returning(5611)
+        with mock.patch.object(lc.httpx, "Client", return_value=client):
+            tracks = lc.fetch_tracks("http://lexicon.test")
+        self.assertEqual(len(tracks), 5611)
+        self.assertEqual(pages, [0, 1000, 2000, 3000, 4000, 5000])
+
+    def test_exact_multiple_of_page_size_terminates(self):
+        # The off-by-one trap: a final page that is exactly full, with nothing after.
+        client, _ = self._client_returning(2000)
+        with mock.patch.object(lc.httpx, "Client", return_value=client):
+            tracks = lc.fetch_tracks("http://lexicon.test")
+        self.assertEqual(len(tracks), 2000)
+
+    def test_single_short_page_makes_one_request(self):
+        client, pages = self._client_returning(42)
+        with mock.patch.object(lc.httpx, "Client", return_value=client):
+            tracks = lc.fetch_tracks("http://lexicon.test")
+        self.assertEqual(len(tracks), 42)
+        self.assertEqual(pages, [0])
+
+    def test_empty_library(self):
+        client, _ = self._client_returning(0)
+        with mock.patch.object(lc.httpx, "Client", return_value=client):
+            self.assertEqual(lc.fetch_tracks("http://lexicon.test"), [])
+
+    def test_never_requests_a_limit_lexicon_would_reject(self):
+        client, _ = self._client_returning(3000)
+        with mock.patch.object(lc.httpx, "Client", return_value=client):
+            lc.fetch_tracks("http://lexicon.test")
+        for call in client.get.call_args_list:
+            self.assertLessEqual(call.kwargs["params"]["limit"], 1000)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.13.1 — fix: coverage measured only the first 1000 tracks
+
+Lexicon caps `GET /v1/tracks` at 1000 rows per request and rejects any larger
+limit outright. The coverage task read the unpaginated response, so on a
+5,611-track library it silently measured the oldest fifth and reported confident
+percentages for it.
+
+This is the failure mode a percentage is worst at showing: a full 1000 tracks came
+back, every number looked plausible, and the only tell was the log line reading
+`1000 active tracks` for a library with 5,611. Caught by watching the first run
+after deploying 2.13.0 rather than by anything the code reported.
+
+Now paged via `limit`/`offset` against the reported `total`, with a bounded page
+count. Tests cover the exact-multiple-of-page-size boundary, which is where a
+naive loop stops one page early or runs one too many.
+
 ## 2.13.0 — visible failures, real retries, and the wrong-version fix
 
 Three problems that were reported as feature requests turned out to be something
@@ -86,8 +102,9 @@ percentages could total 101% and overflow the bar.
 
 ### Also
 
-- The dashboard health probe called `GET /v1/tracks` — Lexicon's **entire library**
-  — every 10 seconds. It now calls `/v1/playlists`, as `lexicon_health` already did.
+- The dashboard health probe called `GET /v1/tracks` — up to 1000 full track
+  records — every 10 seconds, just to prove Lexicon answers. It now calls
+  `/v1/playlists`, as `lexicon_health` already did.
 - The nav error badge polled every errored track in full for a single integer;
   there is now a counts-only summary endpoint.
 - **CI runs the tests.** The repo had ~20 test files and no workflow that executed

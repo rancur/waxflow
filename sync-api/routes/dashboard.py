@@ -131,9 +131,9 @@ async def get_dashboard():
         services = []
 
         # Lexicon. Probe /v1/playlists, NOT /v1/tracks: this endpoint is polled every
-        # 10s by the dashboard, and /v1/tracks returns the ENTIRE library (5,600+
-        # rows) on every single call. lexicon_health._check_lexicon_reachable already
-        # uses /v1/playlists for exactly this reason.
+        # 10s by the dashboard, and /v1/tracks returns up to 1000 full track records
+        # per call just to prove the service answers.
+        # lexicon_health._check_lexicon_reachable already uses /v1/playlists.
         try:
             t0 = time.monotonic()
             async with httpx.AsyncClient(timeout=5.0) as client:

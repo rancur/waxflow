@@ -105,13 +105,38 @@ def summarize(tracks: list[dict]) -> dict:
     }
 
 
+# Lexicon caps /v1/tracks at 1000 rows per request and rejects anything larger with
+# an error, so the whole library has to be walked in pages. Reading the unpaginated
+# response looked like it worked -- it returned a full 1000 tracks and a plausible
+# percentage -- while actually measuring only the oldest fifth of the library.
+_PAGE_SIZE = 1000
+_MAX_PAGES = 100  # 100k tracks; a stop so a bad `total` cannot loop forever
+
+
 def fetch_tracks(api_url: str, timeout: float = 120.0) -> list[dict]:
-    """Fetch the whole Lexicon library. One big response; see COST above."""
+    """Fetch the whole Lexicon library, one page at a time. See COST above."""
+    tracks: list[dict] = []
     with httpx.Client(base_url=api_url, timeout=timeout) as client:
-        resp = client.get("/v1/tracks")
-        resp.raise_for_status()
-        payload = resp.json()
-    return (payload.get("data") or {}).get("tracks") or []
+        for page in range(_MAX_PAGES):
+            resp = client.get(
+                "/v1/tracks",
+                params={"limit": _PAGE_SIZE, "offset": page * _PAGE_SIZE},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data") or {}
+            batch = data.get("tracks") or []
+            tracks.extend(batch)
+
+            total = data.get("total")
+            if len(batch) < _PAGE_SIZE or (total is not None and len(tracks) >= total):
+                break
+        else:
+            log.warning(
+                "lexicon_coverage: stopped at %d pages — coverage covers %d tracks, "
+                "which may not be the whole library",
+                _MAX_PAGES, len(tracks),
+            )
+    return tracks
 
 
 def collect(db_path: str) -> dict | None:
