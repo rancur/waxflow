@@ -33,6 +33,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # sync-worker's tests probe and generate REAL audio files -- that is the
+      # point of them, since the bugs they guard are all metadata-reading bugs.
+      # The worker image installs ffmpeg; the runner does not.
+      - name: Install ffmpeg
+        if: matrix.service == 'sync-worker'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: |
