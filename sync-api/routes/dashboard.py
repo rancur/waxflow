@@ -209,3 +209,50 @@ async def monthly_progress():
             return {"months": months}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/quality/profile")
+async def quality_profile():
+    """The active quality profile, plus how the library measures against it.
+
+    Surfaces the same ladder the worker uses -- floor, cutoff and target -- so the
+    Settings page shows exactly what the pipeline will accept, what it will keep
+    hunting for, and where every track currently sits.
+    """
+    import quality as q
+
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM app_config WHERE key LIKE 'quality_%' "
+                "OR key LIKE 'relocation_%'"
+            ).fetchall()
+            cfg = {r["key"]: r["value"] for r in rows}
+
+            profile = q.resolve_profile(lambda k: cfg.get(k))
+            described = q.describe_profile(profile)
+
+            # Where the library actually sits. NULL quality_tier means "not scored
+            # yet" -- every track gets one as it passes through verification.
+            hist = {r["quality_tier"] or "unscored": r["n"] for r in conn.execute(
+                "SELECT quality_tier, COUNT(*) AS n FROM tracks "
+                "WHERE pipeline_stage = 'complete' GROUP BY quality_tier")}
+            below = conn.execute(
+                "SELECT COUNT(*) FROM tracks WHERE below_target = 1").fetchone()[0]
+            try:
+                pending = conn.execute(
+                    "SELECT COUNT(*) FROM relocation_queue WHERE state = 'pending'"
+                ).fetchone()[0]
+            except Exception:      # noqa: BLE001 — table arrives with the migration
+                pending = 0
+
+        return {
+            **described,
+            "library": hist,
+            "below_target": below,
+            "pending_upgrades": pending,
+            "upgrade_enabled": str(cfg.get("quality_upgrade_enabled", "1")).strip() in ("1", "true", "yes", "on"),
+            "replacement_enabled": str(cfg.get("relocation_enabled", "0")).strip() in ("1", "true", "yes", "on"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

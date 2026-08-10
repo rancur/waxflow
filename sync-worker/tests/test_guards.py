@@ -892,7 +892,7 @@ class TestVerifyQualityFloor(unittest.TestCase):
     track took the new path. Measured live: below_target stayed at 0.
     """
 
-    def _verify(self, codec, sample_rate, bit_rate, tmpdir):
+    def _verify(self, codec, sample_rate, bit_rate, tmpdir, replacement_ready=True):
         import json as _json
         captured = {}
         probe = {"streams": [{"codec_type": "audio", "codec_name": codec,
@@ -911,6 +911,8 @@ class TestVerifyQualityFloor(unittest.TestCase):
                                side_effect=lambda d, t, **kw: captured.update(kw)), \
              mock.patch.object(pp, "log_activity"), \
              mock.patch.object(pp, "_route_lossless_gap") as route, \
+             mock.patch.object(pp, "_upgrade_replacement_available",
+                               return_value=replacement_ready), \
              mock.patch.object(pp, "_soulseek_enabled", return_value=True), \
              mock.patch.object(pp, "_soulseek_already_attempted", return_value=False), \
              mock.patch.object(pp, "_soulseek_queue") as queue:
@@ -950,3 +952,17 @@ class TestVerifyQualityFloor(unittest.TestCase):
         self.assertEqual(cap["quality_tier"], "320k")
         self.assertEqual(cap["quality_bit_rate"], 320_000)
         self.assertIsNotNone(cap["quality_checked_at"])
+
+    def test_no_hunt_is_queued_when_replacement_cannot_happen(self):
+        """The stranding guard.
+
+        A successful hunt with no relocator leaves the better file on disk while
+        _lexicon_find_or_import short-circuits on the existing lexicon_track_id --
+        so Lexicon keeps pointing at the WORSE copy and you keep playing it.
+        Queueing an upgrade we cannot finish is worse than not queueing it.
+        """
+        cap, _, queue = self._verify("mp3", 44100, 320_000, self.tmp,
+                                     replacement_ready=False)
+        self.assertEqual(cap["verify_status"], "pass", "the file is still kept")
+        self.assertEqual(cap["below_target"], 1, "and still flagged")
+        queue.assert_not_called()

@@ -197,3 +197,100 @@ def is_upgrade(current: QualityScore | None, candidate: QualityScore,
     if current is None:
         return True
     return candidate.score - current.score >= min_delta
+
+
+# --------------------------------------------------------------------------- #
+# Quality profile — the Radarr/Sonarr model.
+# --------------------------------------------------------------------------- #
+#
+# Three settings describe the whole policy, and they are deliberately separate:
+#
+#   floor    the worst we will ever accept. Below this a file is rejected outright.
+#   cutoff   the point at which we STOP looking. Reaching it means "good enough";
+#            we keep the file and never spend bandwidth on it again.
+#   target   the best we try for first.
+#
+# Searching walks DOWN from target to floor, taking the first tier that yields a
+# verified file. Upgrading walks UP: anything below the cutoff stays on the hunt.
+#
+# Radarr calls the middle one "cutoff" and it is the setting people actually tune --
+# someone happy with 16-bit lossless sets cutoff=lossless and never re-downloads,
+# while someone chasing hi-res sets cutoff=hi-res and keeps hunting.
+
+PROFILE_TIERS = (TIER_HIRES, TIER_24BIT, TIER_LOSSLESS, TIER_LOSSY_HIGH)
+
+DEFAULT_PROFILE = {
+    "floor": TIER_LOSSY_HIGH,     # accept 320k rather than have nothing
+    "cutoff": TIER_LOSSLESS,      # stop upgrading once we have CD-quality lossless
+    "target": TIER_HIRES,         # but always ask for the best first
+}
+
+
+def tier_from_name(name: str, default: int | None = None) -> int | None:
+    """Resolve a configured tier name ('lossless', '320k', ...) to its number."""
+    key = (name or "").strip().lower().replace("_", "-")
+    for tier, tier_name in TIER_NAMES.items():
+        if tier_name == key:
+            return tier
+    aliases = {"cd": TIER_LOSSLESS, "16-bit": TIER_LOSSLESS, "flac": TIER_LOSSLESS,
+               "mp3": TIER_LOSSY_HIGH, "320": TIER_LOSSY_HIGH, "320k": TIER_LOSSY_HIGH,
+               "hires": TIER_HIRES, "hi-res": TIER_HIRES, "24bit": TIER_24BIT}
+    return aliases.get(key, default)
+
+
+def resolve_profile(get: "callable") -> dict:
+    """Build the active profile from a config getter.
+
+    `get(key)` returns a string or None -- pass a closure over app_config. Anything
+    unset or unparseable falls back to DEFAULT_PROFILE, and the three values are
+    then forced into a sane order, because a profile whose floor sits above its
+    cutoff would search for nothing at all.
+    """
+    profile = dict(DEFAULT_PROFILE)
+    for key in ("floor", "cutoff", "target"):
+        tier = tier_from_name(get(f"quality_{key}_tier") or "", None)
+        if tier is not None:
+            profile[key] = tier
+
+    # floor <= cutoff <= target, always.
+    profile["cutoff"] = max(profile["cutoff"], profile["floor"])
+    profile["target"] = max(profile["target"], profile["cutoff"])
+    return profile
+
+
+def search_ladder(profile: dict) -> list:
+    """Tiers to try, best first, down to the floor.
+
+    This is what makes the search "ask for the best, then work down" rather than
+    all-or-nothing: each tier is attempted in turn and the first one that yields a
+    verified file wins.
+    """
+    return [t for t in PROFILE_TIERS
+            if profile["floor"] <= t <= profile["target"]]
+
+
+def needs_upgrade(current: QualityScore | None, profile: dict) -> bool:
+    """Should this track stay on the upgrade hunt?
+
+    True while it sits below the cutoff. At or above it we are done -- that is the
+    whole point of a cutoff, and without one a hi-res chase never terminates.
+    """
+    if current is None:
+        return True
+    return current.tier < profile["cutoff"]
+
+
+def describe_profile(profile: dict) -> dict:
+    """Human-readable form for the API and settings UI."""
+    return {
+        "floor": TIER_NAMES[profile["floor"]],
+        "cutoff": TIER_NAMES[profile["cutoff"]],
+        "target": TIER_NAMES[profile["target"]],
+        "search_order": [TIER_NAMES[t] for t in search_ladder(profile)],
+        "tiers": [
+            {"name": TIER_NAMES[t], "tier": t,
+             "accepted": profile["floor"] <= t,
+             "stops_upgrading": t >= profile["cutoff"]}
+            for t in PROFILE_TIERS
+        ],
+    }

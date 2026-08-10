@@ -133,5 +133,68 @@ class MirrorTest(unittest.TestCase):
                          "have drifted — edit BOTH")
 
 
+
+class ProfileTest(unittest.TestCase):
+    """The Radarr model: floor (never accept worse), cutoff (stop upgrading),
+    target (ask for this first). Search walks DOWN, upgrading walks UP."""
+
+    def _get(self, **kw):
+        return lambda key: kw.get(key)
+
+    def test_defaults_are_sensible(self):
+        p = quality.resolve_profile(self._get())
+        self.assertEqual(p["floor"], quality.TIER_LOSSY_HIGH)
+        self.assertEqual(p["cutoff"], quality.TIER_LOSSLESS)
+        self.assertEqual(p["target"], quality.TIER_HIRES)
+
+    def test_search_order_is_best_first_down_to_the_floor(self):
+        p = quality.resolve_profile(self._get())
+        names = [quality.TIER_NAMES[t] for t in quality.search_ladder(p)]
+        self.assertEqual(names, ["hi-res", "24-bit", "lossless", "320k"])
+
+    def test_raising_the_floor_shortens_the_search(self):
+        p = quality.resolve_profile(self._get(quality_floor_tier="lossless"))
+        names = [quality.TIER_NAMES[t] for t in quality.search_ladder(p)]
+        self.assertEqual(names, ["hi-res", "24-bit", "lossless"])
+        self.assertNotIn("320k", names)
+
+    def test_cutoff_decides_when_to_stop_hunting(self):
+        lossless = quality.score_probe(FLAC_16)
+        mp3 = quality.score_probe(MP3_320)
+
+        happy_with_cd = quality.resolve_profile(self._get(quality_cutoff_tier="lossless"))
+        self.assertFalse(quality.needs_upgrade(lossless, happy_with_cd))
+        self.assertTrue(quality.needs_upgrade(mp3, happy_with_cd))
+
+        chasing_hires = quality.resolve_profile(self._get(quality_cutoff_tier="hi-res"))
+        self.assertTrue(quality.needs_upgrade(lossless, chasing_hires),
+                        "a hi-res cutoff must keep hunting past CD quality")
+
+    def test_nothing_yet_always_needs_an_upgrade(self):
+        self.assertTrue(quality.needs_upgrade(None, quality.resolve_profile(self._get())))
+
+    def test_impossible_profiles_are_forced_into_order(self):
+        # floor above cutoff would search for nothing at all.
+        p = quality.resolve_profile(self._get(quality_floor_tier="hi-res",
+                                              quality_cutoff_tier="320k"))
+        self.assertGreaterEqual(p["cutoff"], p["floor"])
+        self.assertGreaterEqual(p["target"], p["cutoff"])
+        self.assertTrue(quality.search_ladder(p))
+
+    def test_unknown_names_fall_back_rather_than_crash(self):
+        p = quality.resolve_profile(self._get(quality_cutoff_tier="banana"))
+        self.assertEqual(p["cutoff"], quality.DEFAULT_PROFILE["cutoff"])
+
+    def test_common_aliases_resolve(self):
+        for alias, tier in (("flac", quality.TIER_LOSSLESS), ("mp3", quality.TIER_LOSSY_HIGH),
+                            ("hires", quality.TIER_HIRES), ("24bit", quality.TIER_24BIT)):
+            self.assertEqual(quality.tier_from_name(alias), tier, alias)
+
+    def test_description_is_ui_ready(self):
+        d = quality.describe_profile(quality.resolve_profile(self._get()))
+        self.assertEqual(d["cutoff"], "lossless")
+        self.assertEqual(len(d["tiers"]), 4)
+        self.assertTrue(all("accepted" in t and "stops_upgrading" in t for t in d["tiers"]))
+
 if __name__ == "__main__":
     unittest.main()

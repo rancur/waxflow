@@ -3,8 +3,30 @@
 import { useEffect, useState, useCallback } from 'react'
 import { apiFetch } from '../api'
 
+interface QualityProfile {
+  floor: string
+  cutoff: string
+  target: string
+  search_order: string[]
+  tiers: { name: string; tier: number; accepted: boolean; stops_upgrading: boolean }[]
+  library: Record<string, number>
+  below_target: number
+  pending_upgrades: number
+  upgrade_enabled: boolean
+  replacement_enabled: boolean
+}
+
+// Highest first — the order the pipeline actually searches in.
+const QUALITY_TIERS = [
+  { key: 'hi-res', label: 'Hi-Res', hint: 'lossless above 48 kHz' },
+  { key: '24-bit', label: '24-bit', hint: 'lossless, 24-bit depth' },
+  { key: 'lossless', label: 'Lossless', hint: 'FLAC/AIFF at CD quality' },
+  { key: '320k', label: '320 kbps', hint: 'high-bitrate MP3/AAC' },
+]
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Record<string, string>>({})
+  const [quality, setQuality] = useState<QualityProfile | null>(null)
   const [backups, setBackups] = useState<any[]>([])
   const [version, setVersion] = useState<any>(null)
   const [spotifyStatus, setSpotifyStatus] = useState<any>(null)
@@ -39,8 +61,9 @@ export default function SettingsPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [settingsRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes, analyzeRes, updateRes, configBackupsRes] = await Promise.allSettled([
+      const [settingsRes, qualityRes, backupsRes, versionRes, spotifyRes, healthRes, dashboardRes, tidalRes, analyzeRes, updateRes, configBackupsRes] = await Promise.allSettled([
         apiFetch<any>('/settings'),
+        apiFetch<QualityProfile>('/quality/profile'),
         apiFetch<any>('/lexicon/backups'),
         apiFetch<any>('/admin/version'),
         apiFetch<any>('/spotify/status'),
@@ -53,6 +76,7 @@ export default function SettingsPage() {
       ])
 
       if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value.settings || {})
+      if (qualityRes.status === 'fulfilled') setQuality(qualityRes.value)
       if (backupsRes.status === 'fulfilled') setBackups(backupsRes.value.backups || backupsRes.value || [])
       if (versionRes.status === 'fulfilled') setVersion(versionRes.value)
       if (spotifyRes.status === 'fulfilled') setSpotifyStatus(spotifyRes.value)
@@ -688,6 +712,110 @@ export default function SettingsPage() {
             }`} />
           </button>
         </div>
+      </div>
+
+      {/* ================================================================ */}
+      {/* QUALITY PROFILE                                                   */}
+      {/* ================================================================ */}
+
+      <div className="card">
+        <div className="flex items-baseline justify-between mb-1">
+          <h2 className="text-sm font-semibold text-slate-300">Quality Profile</h2>
+          {quality && (
+            <span className="text-xs text-slate-500">
+              {quality.below_target} below target
+              {quality.pending_upgrades > 0 && ` · ${quality.pending_upgrades} upgrade${quality.pending_upgrades === 1 ? '' : 's'} staged`}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-slate-600 mb-4">
+          Downloads search from the top of this list downwards and take the best copy
+          available. Anything below the cutoff stays on the upgrade hunt.
+        </p>
+
+        <div className="space-y-2">
+          {QUALITY_TIERS.map((tier) => {
+            const accepted = quality ? quality.tiers.find(t => t.name === tier.key)?.accepted : true
+            const isCutoff = quality?.cutoff === tier.key
+            const count = quality?.library?.[tier.key] ?? 0
+            return (
+              <div
+                key={tier.key}
+                className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${
+                  accepted ? 'border-slate-700 bg-slate-800/40' : 'border-slate-800 bg-slate-900/40 opacity-50'
+                }`}
+              >
+                <div className={`w-1.5 h-8 rounded-full ${accepted ? 'bg-emerald-500' : 'bg-slate-700'}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-slate-200">{tier.label}</span>
+                    {isCutoff && (
+                      <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded
+                                       border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+                        cutoff
+                      </span>
+                    )}
+                    {!accepted && <span className="text-[10px] text-slate-600">not accepted</span>}
+                  </div>
+                  <p className="text-[11px] text-slate-600">{tier.hint}</p>
+                </div>
+                <span className="text-xs text-slate-500 tabular-nums">{count.toLocaleString()}</span>
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-4 mt-5 pt-4 border-t border-slate-800">
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">Minimum accepted</label>
+            <select
+              className="select-field text-xs w-full"
+              value={settings.quality_floor_tier || '320k'}
+              onChange={(e) => updateSetting('quality_floor_tier', e.target.value)}
+            >
+              {QUALITY_TIERS.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
+            </select>
+            <p className="text-[11px] text-slate-600 mt-1">Never import anything worse than this.</p>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">Stop upgrading at</label>
+            <select
+              className="select-field text-xs w-full"
+              value={settings.quality_cutoff_tier || 'lossless'}
+              onChange={(e) => updateSetting('quality_cutoff_tier', e.target.value)}
+            >
+              {QUALITY_TIERS.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
+            </select>
+            <p className="text-[11px] text-slate-600 mt-1">Reaching this means done — no more searching.</p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-800">
+          <div>
+            <p className="text-sm text-slate-300">Automatic upgrades</p>
+            <p className="text-xs text-slate-600">
+              Replace a file and re-point Lexicon when a better copy is found.
+              Runs only with Lexicon quit.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => updateSetting('relocation_enabled', settings.relocation_enabled === '1' ? '0' : '1')}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              settings.relocation_enabled === '1' ? 'bg-emerald-500' : 'bg-slate-700'
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+              settings.relocation_enabled === '1' ? 'translate-x-6' : 'translate-x-1'
+            }`} />
+          </button>
+        </div>
+        {settings.relocation_enabled !== '1' && (
+          <p className="text-[11px] text-amber-500/70 mt-2">
+            While this is off, upgrades are not searched for at all — finding one that
+            nothing can install would leave the better file unreferenced on disk.
+          </p>
+        )}
       </div>
 
       {/* ================================================================ */}

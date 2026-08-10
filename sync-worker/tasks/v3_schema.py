@@ -63,6 +63,10 @@ V3_TRACK_COLUMNS = (
     ("quality_bit_rate", "INTEGER"),
     ("quality_checked_at", "TEXT"),
     ("below_target", "INTEGER NOT NULL DEFAULT 0"),
+    # Upgrade rechecker bookkeeping (2.17.0).
+    ("upgrade_state", "TEXT"),
+    ("upgrade_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("upgrade_checked_at", "TEXT"),
 )
 
 # Nullable columns added to the existing ``import_queue`` table for Phase 3
@@ -190,6 +194,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_links_dedup
     ON purchase_links(dedup_key);
 CREATE INDEX IF NOT EXISTS idx_source_attempts_track_source
     ON source_attempts(track_id, source);
+CREATE TABLE IF NOT EXISTS relocation_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id INTEGER NOT NULL,
+    lexicon_track_id TEXT,
+    old_path TEXT,
+    new_path TEXT NOT NULL,
+    old_score INTEGER,
+    new_score INTEGER,
+    old_tier TEXT,
+    new_tier TEXT,
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    applied_at TEXT
+);
+-- One pending relocation per track, enforced by the database rather than by
+-- remembering to check: without it a rechecker that runs twice before the
+-- relocator drains stages the same swap repeatedly.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relocation_one_pending
+    ON relocation_queue(track_id) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_relocation_state ON relocation_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_track ON wanted(track_id);
 CREATE INDEX IF NOT EXISTS idx_import_queue_state ON import_queue(state);
 """
@@ -206,6 +232,7 @@ V3_TRACK_INDEXES: tuple[tuple[str, str], ...] = (
     ("idx_tracks_pipeline_stage", "pipeline_stage"),
     ("idx_tracks_lexicon_status", "lexicon_status"),
     ("idx_tracks_quality_score", "quality_score"),
+    ("idx_tracks_upgrade_checked_at", "upgrade_checked_at"),
 )
 
 

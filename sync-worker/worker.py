@@ -25,6 +25,7 @@ from tasks.create_playlists import create_playlists
 from tasks.lexicon_health import lexicon_health_check
 from tasks.soulseek_health import soulseek_health_check
 from tasks.lexicon_coverage import lexicon_coverage
+from tasks.quality_upgrade import quality_upgrade
 from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.plex_sync import plex_sync
 from tasks.mac_availability import sample_availability
@@ -270,6 +271,14 @@ async def main():
         asyncio.create_task(
             run_task("lexicon_coverage", lexicon_coverage,
                      interval_key="lexicon_coverage_interval_seconds", default_interval=3600)
+        ),
+        # Quality rechecker: hunts for better copies of anything below the profile's
+        # cutoff and STAGES the swap. It applies nothing itself -- replacing a file
+        # also means rewriting Lexicon's Track.location, which only the relocator
+        # does, and only with Lexicon quit. Self-gates on relocation_enabled.
+        asyncio.create_task(
+            run_task("quality_upgrade", quality_upgrade,
+                     interval_key="quality_upgrade_interval_seconds", default_interval=21600)
         ),
         # Lossy-only auto-upgrade re-check: tracks kept as lossy because no lossless
         # existed at import time are periodically re-sourced through the Tidal +

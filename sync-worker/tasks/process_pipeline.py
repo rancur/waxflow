@@ -226,6 +226,26 @@ def touch_worker_heartbeat(db_path: str):
         pass  # heartbeat is best-effort; never fail the pipeline on it
 
 
+def _upgrade_replacement_available(db_path: str) -> bool:
+    """Can a found upgrade actually be put into service?
+
+    Replacing a file is only half the job: Lexicon's Track.location has to move too,
+    or the library keeps playing the old copy while the better one sits on disk
+    unreferenced. Until the relocator is enabled there is no point starting hunts we
+    cannot finish.
+
+    Config:
+        quality_upgrade_enabled   1 to hunt for upgrades at all (default 1)
+        relocation_enabled        1 once the relocator can move Lexicon rows
+    """
+    def on(key: str, default: str) -> bool:
+        raw = get_config(db_path, key)
+        raw = default if raw is None or raw == "" else raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+    return on("quality_upgrade_enabled", "1") and on("relocation_enabled", "0")
+
+
 def _route_lossless_gap(db_path: str, track_id: int, error_msg: str) -> bool:
     """Route a track that Tidal couldn't provide as true-lossless.
 
@@ -2227,15 +2247,25 @@ def _verify_track(db_path: str, track: dict, min_fp_score: float):
         # hunt WITHOUT touching pipeline_stage: the track continues to organizing
         # and lands in the library, and the fallback picks it up separately.
         # Accepting a 320k file must never quietly end the search for lossless.
-        try:
-            if _soulseek_enabled(db_path) and not _soulseek_already_attempted(db_path, track_id):
-                _soulseek_queue(
-                    db_path, track_id,
-                    f"below target ({quality_score.tier_name}) — hunting lossless")
-                log.info("Track %d: kept %s and queued an upgrade hunt",
-                         track_id, quality_score.tier_name)
-        except Exception as e:  # noqa: BLE001 — never let this break the pipeline
-            log.warning("Track %d: upgrade queue failed (%s)", track_id, e)
+        #
+        # GATED on replacement actually working. If the hunt succeeds while nothing
+        # can relocate the Lexicon row, _lexicon_find_or_import short-circuits on the
+        # existing lexicon_track_id and Lexicon keeps pointing at the OLD file: the
+        # better copy lands on disk, unreferenced, and you carry on playing the worse
+        # one. Queueing an upgrade we cannot finish is worse than not queueing it.
+        if not _upgrade_replacement_available(db_path):
+            log.debug("Track %d: kept %s; upgrade hunt not queued "
+                      "(replacement is disabled)", track_id, quality_score.tier_name)
+        else:
+            try:
+                if _soulseek_enabled(db_path) and not _soulseek_already_attempted(db_path, track_id):
+                    _soulseek_queue(
+                        db_path, track_id,
+                        f"below target ({quality_score.tier_name}) — hunting lossless")
+                    log.info("Track %d: kept %s and queued an upgrade hunt",
+                             track_id, quality_score.tier_name)
+            except Exception as e:  # noqa: BLE001 — never let this break the pipeline
+                log.warning("Track %d: upgrade queue failed (%s)", track_id, e)
 
 
 # ---------------------------------------------------------------------------

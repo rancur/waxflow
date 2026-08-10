@@ -168,6 +168,22 @@ def init():
             ('plex_gid', '1000'),
             ('retry_search_interval_seconds', '43200'),
             ('lexicon_legacy_path_prefixes', ''),
+            -- Quality profile (Radarr model). floor = never accept worse;
+            -- cutoff = stop upgrading once reached; target = ask for this first.
+            -- Search walks target -> floor; the rechecker hunts anything below cutoff.
+            ('quality_floor_tier', '320k'),
+            ('quality_cutoff_tier', 'lossless'),
+            ('quality_target_tier', 'hi-res'),
+            ('quality_upgrade_enabled', '1'),
+            ('quality_upgrade_interval_seconds', '21600'),
+            ('quality_upgrade_batch', '3'),
+            ('quality_upgrade_max_attempts', '6'),
+            ('quality_upgrade_min_free_gb', '20'),
+            -- Off until the relocator has been exercised: with this at 0 the
+            -- rechecker stages nothing, so no upgrade can be found and then stranded.
+            ('relocation_enabled', '0'),
+            ('relocation_dry_run', '1'),
+            ('relocation_window', '03:00-05:00'),
             ('analyze_interval_seconds', '3600'),
             ('analyze_batch_size', '20'),
             ('analyze_total_processed', '0'),
@@ -581,6 +597,25 @@ def init():
             ON purchase_links(dedup_key);
         CREATE INDEX IF NOT EXISTS idx_source_attempts_track_source
             ON source_attempts(track_id, source);
+        CREATE TABLE IF NOT EXISTS relocation_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER NOT NULL,
+            lexicon_track_id TEXT,
+            old_path TEXT,
+            new_path TEXT NOT NULL,
+            old_score INTEGER,
+            new_score INTEGER,
+            old_tier TEXT,
+            new_tier TEXT,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            applied_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_relocation_one_pending
+            ON relocation_queue(track_id) WHERE state = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_relocation_state ON relocation_queue(state);
         CREATE INDEX IF NOT EXISTS idx_wanted_track ON wanted(track_id);
         CREATE INDEX IF NOT EXISTS idx_import_queue_state ON import_queue(state);
         -- tracks carried no index at all beyond its implicit PK one. These three
@@ -612,6 +647,9 @@ def init():
             ("quality_bit_rate", "INTEGER"),
             ("quality_checked_at", "TEXT"),
             ("below_target", "INTEGER NOT NULL DEFAULT 0"),
+            ("upgrade_state", "TEXT"),
+            ("upgrade_attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("upgrade_checked_at", "TEXT"),
         ):
             if name not in cols:
                 conn.execute(f"ALTER TABLE tracks ADD COLUMN {name} {decl}")
@@ -621,6 +659,9 @@ def init():
         # a missing column aborts every statement after it in the same executescript.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tracks_quality_score ON tracks(quality_score)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tracks_upgrade_checked_at "
+            "ON tracks(upgrade_checked_at)")
 
         iq_cols = {r[1] for r in conn.execute("PRAGMA table_info(import_queue)").fetchall()}
         if "next_retry_at" not in iq_cols:

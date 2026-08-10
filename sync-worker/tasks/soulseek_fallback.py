@@ -295,14 +295,82 @@ def _queued_tracks(db_path: str, limit: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def _expected_size_range(duration_ms: int | None):
-    """Plausible byte range for a lossless FLAC of this duration (~350-1500 kbps)."""
+def _expected_size_range(duration_ms: int | None, min_kbps: int = 350,
+                         max_kbps: int = 1500):
+    """Plausible byte range for a file of this duration at the given bitrate band.
+
+    Defaults describe a lossless FLAC (~350-1500 kbps). A 320k MP3 is roughly a
+    quarter the size, so searching for one with the lossless band would reject every
+    real result -- the band has to move with the tier being searched for.
+    """
     if not duration_ms:
-        return (5_000_000, 200_000_000)
+        return (1_000_000, 200_000_000)
     secs = duration_ms / 1000.0
-    lo = int(secs * 350 * 1000 / 8 * 0.7)
-    hi = int(secs * 1500 * 1000 / 8 * 1.6)
-    return (max(3_000_000, lo), max(hi, 30_000_000))
+    lo = int(secs * min_kbps * 1000 / 8 * 0.7)
+    hi = int(secs * max_kbps * 1000 / 8 * 1.6)
+    return (max(500_000, lo), max(hi, 30_000_000))
+
+
+# File extensions we will consider, and the best tier each can represent.
+_LOSSLESS_EXTS = (".flac", ".aiff", ".aif", ".wav", ".alac", ".ape", ".wv")
+_LOSSY_EXTS = (".mp3", ".m4a", ".aac", ".ogg", ".opus")
+
+# Bitrate band per tier, used both to size-filter candidates and to sanity-check
+# what a peer claims.
+_TIER_KBPS = {
+    "hi-res": (1500, 9216),
+    "24-bit": (700, 4608),
+    "lossless": (350, 1500),
+    "320k": (256, 400),
+}
+
+
+def _ext_of(filename: str) -> str:
+    name = (filename or "").replace("\\", "/").split("/")[-1].lower()
+    dot = name.rfind(".")
+    return name[dot:] if dot >= 0 else ""
+
+
+def estimate_tier(filename: str, size: int, duration_ms: int | None,
+                  attrs: dict | None = None) -> int:
+    """Best guess at a candidate's tier BEFORE downloading it.
+
+    slskd sometimes reports bitRate/bitDepth/sampleRate per file; when it does that
+    is far better than guessing. Otherwise fall back to the extension plus the
+    bitrate implied by size and duration. This is only a pre-filter -- everything is
+    still probed and scored for real after download.
+    """
+    from tasks import quality
+    attrs = attrs or {}
+    ext = _ext_of(filename)
+    lossless = ext in _LOSSLESS_EXTS
+
+    sample_rate = int(attrs.get("sampleRate") or 0)
+    bit_depth = int(attrs.get("bitDepth") or 0)
+    bit_rate = int(attrs.get("bitRate") or 0) * 1000
+
+    if not bit_rate and size and duration_ms:
+        bit_rate = int(size * 8 / (duration_ms / 1000.0))
+
+    if lossless:
+        if sample_rate > 48_000:
+            return quality.TIER_HIRES
+        if bit_depth >= 24:
+            return quality.TIER_24BIT
+        # No attributes: infer from the implied bitrate. A 24-bit/96k file is far
+        # denser than CD-quality, so size is a usable proxy when nothing else is.
+        if not sample_rate and not bit_depth and bit_rate:
+            if bit_rate >= 1_500_000:
+                return quality.TIER_HIRES
+            if bit_rate >= 700_000:
+                return quality.TIER_24BIT
+        return quality.TIER_LOSSLESS
+
+    if ext in _LOSSY_EXTS:
+        floor = quality.LOSSY_FLOOR_BPS * (1 - quality.LOSSY_FLOOR_TOLERANCE)
+        return quality.TIER_LOSSY_HIGH if bit_rate >= floor else quality.TIER_BELOW
+
+    return quality.TIER_BELOW
 
 
 _STOPWORDS = {"the", "a", "an", "of", "and", "&", "feat", "ft", "vs", "remix", "mix",
@@ -319,28 +387,50 @@ def _tokens(*parts: str) -> set[str]:
 
 
 def rank_candidates(responses: list[dict], duration_ms: int | None,
-                    artist: str = "", title: str = "") -> list[dict]:
-    """Flatten peer responses to ranked .flac candidates (best prospect first).
+                    artist: str = "", title: str = "",
+                    tier: int | None = None) -> list[dict]:
+    """Flatten peer responses to ranked candidates (best prospect first).
 
     RELEVANCE FIRST: on generic titles (e.g. "The Wave") a search returns thousands
     of unrelated files; ranking purely by peer speed surfaces the wrong track. So we
     score each candidate by how many artist/title tokens appear in its filename and
     rank by relevance BEFORE availability (free slot / queue / speed). The duration
     gate in verify_lossless then rejects any wrong-length version that slips through.
+
+    `tier` selects WHICH quality we are hunting for on this pass. The caller walks
+    the ladder downwards -- hi-res, then 24-bit, then lossless, then 320k -- so the
+    best available copy wins rather than whatever turns up first. Passing None keeps
+    the original behaviour exactly: .flac only, lossless size band.
     """
+    from tasks import quality
     want_artist = _tokens(artist)
     want_title = _tokens(title)
     want = want_artist | want_title
-    lo, hi = _expected_size_range(duration_ms)
+
+    if tier is None:
+        allowed_exts, lo, hi = (".flac",), *_expected_size_range(duration_ms)
+    else:
+        name = quality.TIER_NAMES.get(tier, "lossless")
+        min_kbps, max_kbps = _TIER_KBPS.get(name, (350, 1500))
+        lo, hi = _expected_size_range(duration_ms, min_kbps, max_kbps)
+        allowed_exts = _LOSSY_EXTS if tier == quality.TIER_LOSSY_HIGH else _LOSSLESS_EXTS
+
     cands = []
     for r in responses:
         for f in r.get("files", []):
             fn = f.get("filename", "")
-            if not fn.lower().endswith(".flac"):
+            if _ext_of(fn) not in allowed_exts:
                 continue
             size = int(f.get("size") or 0)
             if not (lo <= size <= hi):
                 continue
+            if tier is not None:
+                # Only consider files that plausibly ARE the tier being hunted.
+                # Everything is still probed for real after download; this just
+                # stops us spending a transfer on something obviously wrong.
+                attrs = f.get("attributes") or {}
+                if estimate_tier(fn, size, duration_ms, attrs) < tier:
+                    continue
             fn_tokens = _tokens(fn.replace("\\", "/").split("/")[-1])
             a = len(want_artist & fn_tokens)
             t = len(want_title & fn_tokens)
@@ -414,6 +504,78 @@ def _move_into_library(db_path: str, src_path: str, artist: str, title: str) -> 
     return dest
 
 
+def download_candidate(client: SlskdClient, cand: dict, tmpdir: str,
+                       timeout_s: float = PER_PEER_TIMEOUT_S) -> str | None:
+    """Transfer one candidate from a peer and fetch the bytes locally.
+
+    Returns the local path, or None if the peer never delivered. Peers frequently
+    fail to connect at all (the VPN has no forwarded port), so a None here is
+    routine and the caller should simply try the next candidate.
+    """
+    try:
+        if not client.download_and_wait(cand["username"], cand["filename"],
+                                        cand["size"], timeout_s=timeout_s):
+            return None
+    except Exception as e:  # noqa: BLE001
+        log.warning("download error from %s: %s", cand["username"][:16], e)
+        return None
+
+    relpath = client.ondisk_relpath(cand["filename"])
+    local = os.path.join(tmpdir, os.path.basename(relpath))
+    try:
+        if client.fetch_file(relpath, local) == 0:
+            return None
+    except Exception as e:  # noqa: BLE001
+        log.warning("fetch failed for %s: %s", relpath, e)
+        return None
+    return local
+
+
+def active_profile(db_path: str) -> dict:
+    """The configured quality profile (floor / cutoff / target)."""
+    from tasks import quality
+    return quality.resolve_profile(lambda k: get_config(db_path, k))
+
+
+def search_best_available(client: SlskdClient, artist: str, title: str,
+                          duration_ms: int, profile: dict,
+                          min_tier: int | None = None) -> tuple:
+    """Walk the quality ladder downwards and return the best tier with candidates.
+
+    This is what "ask for the absolute best, then work down" actually means: try
+    hi-res first, then 24-bit, then lossless, then 320k, and stop at the first tier
+    that yields anything plausible. Without it the search is all-or-nothing and a
+    24-bit copy is indistinguishable from a CD rip.
+
+    `min_tier` stops the walk early -- an upgrade hunt has no reason to look at
+    tiers at or below what the track already has.
+
+    Returns (tier, candidates, query_used); tier is None when nothing was found.
+    """
+    from tasks import quality
+    queries = _build_queries(artist, title)
+    ladder = [t for t in quality.search_ladder(profile)
+              if min_tier is None or t > min_tier]
+
+    # Search once per query and re-filter per tier: the searches are the slow part,
+    # and re-ranking a cached response set is free.
+    seen: list[tuple] = []
+    for q in queries:
+        responses = client.search(q)
+        if not responses:
+            continue
+        seen.append((q, responses))
+        for tier in ladder:
+            cands = rank_candidates(responses, duration_ms, artist, title, tier=tier)
+            if cands:
+                log.info("soulseek: %s - %s -> %d candidate(s) at %s",
+                         artist, title, len(cands), quality.TIER_NAMES[tier])
+                return tier, cands, q
+
+    # Nothing matched any tier in the profile.
+    return None, [], (seen[-1][0] if seen else f"{artist} {title}".strip())
+
+
 def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
     track_id = track["id"]
     fa_id = track["_fa_id"]
@@ -426,22 +588,18 @@ def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
         log.warning("slskd not logged in — leaving track %d queued for next cycle", track_id)
         return  # transient: try again next cycle (leave the queued row in place)
 
-    # search across query variants until we have candidates
-    responses = []
-    for q in _build_queries(artist, title):
-        query_used = q
-        responses = client.search(q)
-        if rank_candidates(responses, duration_ms, artist, title):
-            break
-    cands = rank_candidates(responses, duration_ms, artist, title)
+    # Walk the quality ladder: best tier first, working down to the floor.
+    profile = active_profile(db_path)
+    found_tier, cands, query_used = search_best_available(
+        client, artist, title, duration_ms, profile)
 
     if not cands:
         _finalize(db_path, fa_id, "no_candidates", 0)
         update_track(db_path, track_id, pipeline_stage="error",
-                     pipeline_error="Soulseek: no lossless FLAC candidates found")
+                     pipeline_error="Soulseek: no candidates found at any accepted quality")
         log_activity(db_path, "soulseek_no_candidates", track_id,
-                     f"No FLAC candidates for {artist} - {title}")
-        log.info("Track %d: no soulseek FLAC candidates", track_id)
+                     f"No candidates for {artist} - {title}")
+        log.info("Track %d: no soulseek candidates at any tier", track_id)
         return
 
     tmpdir = tempfile.mkdtemp(prefix="slsk_")

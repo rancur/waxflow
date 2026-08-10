@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.17.0 — quality profiles, tiered search, and automatic upgrades
+
+The Radarr/Sonarr model, end to end: ask for the best, take the best available, and
+keep hunting until every track is good enough.
+
+### The profile
+
+Three settings, all in Settings -> Quality Profile:
+
+    floor    never accept anything worse          default 320k
+    cutoff   stop hunting once reached            default lossless
+    target   ask for this first                   default hi-res
+
+Downloads walk the ladder DOWN -- hi-res, 24-bit, lossless, 320k -- and take the
+first tier that yields a verified file. The rechecker walks it UP: anything below
+the cutoff stays on the hunt. The cutoff is what makes that terminate; without one
+a hi-res chase never ends.
+
+### Search now actually descends
+
+`rank_candidates` hard-filtered `.flac` and nothing else, so the "search" was
+all-or-nothing and a 24-bit copy was indistinguishable from a CD rip. It now takes
+a tier, accepts the extensions and size band appropriate to it, and pre-filters on
+slskd's reported bitRate/bitDepth/sampleRate where the peer provides them.
+`search_best_available` drives the walk. Passing no tier preserves the old
+behaviour exactly.
+
+### The rechecker
+
+`quality_upgrade.py` finds tracks below the cutoff, hunts only ABOVE what they
+already have (a sideways move is pure churn), verifies any candidate through the
+existing fake-FLAC/transcode gate, and requires a strictly better score before
+staging anything.
+
+### Replacement
+
+`scripts/apply-relocations.py` swaps the file and re-points Lexicon's
+`Track.location`, which is the step that makes an upgrade real. Same gate design as
+the other direct writers: verified fresh backup; Lexicon proven quit three ways (no
+process, an exclusive lock is obtainable, the -wal is static); dry-run by default;
+integrity + foreign-key checks; cue/grid/playlist/cloud counts compared before and
+after; one transaction; and the old file moved to `.superseded/` only AFTER the
+write commits and verifies. It touches `location` and nothing else -- never
+`locationUnique`, so CloudFile links survive, and cues key off `Track.id`, which
+never changes.
+
+### The stranding guard
+
+Finding an upgrade that nothing can install is worse than not looking: the better
+file lands on disk, `_lexicon_find_or_import` short-circuits on the existing
+`lexicon_track_id`, and Lexicon keeps playing the worse copy while disk usage
+grows. So hunts are only queued when `relocation_enabled=1`. It ships **off**, and
+Settings says so.
+
 ## 2.16.1 — the floor was in the wrong place to have any effect
 
 2.16.0 lowered the quality floor in `reject_nonlossless_for_import`, which sits at
