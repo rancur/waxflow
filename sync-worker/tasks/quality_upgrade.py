@@ -81,6 +81,56 @@ def _free_gb(path: str) -> float:
         return float("inf")
 
 
+DEFAULT_SCORE_BATCH = 250
+
+
+def backfill_scores(db_path: str, limit: int) -> int:
+    """Score `complete` tracks that have never been scored.
+
+    Scoring otherwise only happens as a track passes through verification, so a
+    library assembled before the ladder existed is invisible to the rechecker --
+    it cannot evaluate what it cannot see. Runs a bounded batch each cycle so the
+    backlog drains on its own without a migration step.
+
+    A file that no longer exists is marked rather than retried forever: a stale
+    path is a different problem, and silently re-probing it every cycle would hide
+    that while wasting the batch.
+    """
+    from tasks import quality
+    with get_db(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, file_path FROM tracks
+               WHERE pipeline_stage = 'complete'
+                 AND quality_tier IS NULL
+                 AND file_path IS NOT NULL
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+    scored = 0
+    for row in rows:
+        track_id, path = row["id"], row["file_path"]
+        if not os.path.exists(path):
+            update_track(db_path, track_id, quality_tier="missing-file",
+                         quality_checked_at=_now_iso())
+            continue
+        try:
+            score = quality.score_file(path)
+        except Exception as e:  # noqa: BLE001
+            log.debug("backfill: cannot probe %s: %s", path, e)
+            update_track(db_path, track_id, quality_tier="unreadable",
+                         quality_checked_at=_now_iso())
+            continue
+        update_track(
+            db_path, track_id,
+            quality_tier=score.tier_name, quality_score=score.score,
+            quality_bit_rate=score.bit_rate, quality_checked_at=_now_iso(),
+            below_target=0 if score.meets_target else 1,
+        )
+        scored += 1
+    return scored
+
+
 def find_candidates(db_path: str, profile: dict, limit: int) -> list[dict]:
     """Tracks sitting below the cutoff, oldest-checked first.
 
@@ -218,7 +268,10 @@ def run(db_path: str) -> dict:
         return summary
     if not can_stage(db_path):
         # Finding an upgrade we cannot install just wastes bandwidth and leaves an
-        # orphan file on disk.
+        # orphan file on disk. Scoring still runs: it is read-only, and it is what
+        # makes the Settings histogram meaningful before anything is switched on.
+        summary["scored"] = backfill_scores(
+            db_path, _num(db_path, "quality_score_batch", DEFAULT_SCORE_BATCH))
         summary["skipped"] = "relocation_enabled=0 — nothing could apply an upgrade"
         return summary
     if not sf.is_enabled(db_path):
@@ -232,6 +285,14 @@ def run(db_path: str) -> dict:
         summary["skipped"] = f"less than {min_free} GB free"
         log.warning("quality_upgrade: %s", summary["skipped"])
         return summary
+
+    # Score anything that has never been scored first -- the hunt below can only
+    # consider tracks whose current quality is known.
+    scored = backfill_scores(db_path, _num(db_path, "quality_score_batch",
+                                           DEFAULT_SCORE_BATCH))
+    if scored:
+        summary["scored"] = scored
+        log.info("quality_upgrade: scored %d previously-unscored track(s)", scored)
 
     profile = sf.active_profile(db_path)
     batch = _num(db_path, "quality_upgrade_batch", DEFAULT_BATCH)

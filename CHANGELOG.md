@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.17.1 — score the existing library, and prove the relocator
+
+**Scoring is now self-healing.** It previously happened only as a track passed
+through verification, so a library assembled before the ladder existed was
+invisible to the rechecker -- it cannot evaluate what it cannot see. Measured live:
+**4,978 of 5,163** complete tracks had no score at all, which meant the whole
+upgrade system had nothing to work on. `backfill_scores()` now drains a bounded
+batch every cycle, and runs even when upgrades are gated off, because it is
+read-only and it is what makes the Settings histogram meaningful.
+
+A file that no longer exists is marked rather than re-probed forever: 932 tracks
+have stale paths, and silently retrying them every cycle would hide that while
+burning the batch.
+
+**The relocator's write path is verified.** It had never executed a real write.
+Exercised against an online `.backup` copy of the live 5,714-track Lexicon
+database, on a real track with real cue points:
+
+    integrity_check      ok
+    fk violations        0
+    location changed     yes
+    locationUnique kept  yes   (CloudFile links depend on this)
+    cues                 4 -> 4
+    table counts         all unchanged
+
+That is the claim the whole design rests on -- a `location`-only write leaves cues,
+beat grids, playlists and cloud links untouched -- now measured rather than
+reasoned about.
+
 ## 2.17.0 — quality profiles, tiered search, and automatic upgrades
 
 The Radarr/Sonarr model, end to end: ask for the best, take the best available, and

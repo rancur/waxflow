@@ -46,6 +46,7 @@ def _seed(path, tracks):
             file_path TEXT, lexicon_track_id TEXT, pipeline_stage TEXT,
             quality_tier TEXT, quality_score INTEGER, quality_bit_rate INTEGER,
             verify_codec TEXT, verify_sample_rate INTEGER, verify_bit_depth INTEGER,
+            quality_checked_at TEXT, below_target INTEGER DEFAULT 0,
             upgrade_state TEXT, upgrade_attempts INTEGER DEFAULT 0,
             upgrade_checked_at TEXT, updated_at TEXT);
         CREATE TABLE relocation_queue (
@@ -209,3 +210,62 @@ class UpgradeDecisionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScoreBackfillTest(unittest.TestCase):
+    """Scoring only happens at verification, so a library built before the ladder
+    existed is invisible to the rechecker -- it cannot evaluate what it cannot see.
+
+    Measured live: 4,978 of 5,163 complete tracks had no score at all.
+    """
+
+    def setUp(self):
+        self.db = os.path.join(tempfile.mkdtemp(prefix="qsb_"), "t.db")
+        _seed(self.db, [("a", MP3), ("b", FLAC)])
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE tracks SET quality_tier=NULL")
+        conn.commit(); conn.close()
+
+    def _tiers(self):
+        conn = sqlite3.connect(self.db)
+        try:
+            return dict(conn.execute("SELECT title, quality_tier FROM tracks"))
+        finally:
+            conn.close()
+
+    def test_a_missing_file_is_marked_not_retried_forever(self):
+        # The seeded paths do not exist. Re-probing them every cycle would burn the
+        # batch and hide the real problem, which is a stale path.
+        qu.backfill_scores(self.db, 10)
+        self.assertEqual(set(self._tiers().values()), {"missing-file"})
+
+    def test_a_real_file_is_scored(self):
+        import subprocess as sp, shutil as sh
+        tmp = tempfile.mkdtemp(prefix="qsbf_")
+        self.addCleanup(sh.rmtree, tmp, True)
+        flac = os.path.join(tmp, "real.flac")
+        sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                "-i", "anoisesrc=d=2:c=pink:r=44100", "-ac", "2",
+                "-ar", "44100", "-sample_fmt", "s16", flac], check=True)
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE tracks SET file_path=? WHERE title='a'", (flac,))
+        conn.commit(); conn.close()
+
+        self.assertEqual(qu.backfill_scores(self.db, 10), 1)
+        self.assertEqual(self._tiers()["a"], "lossless")
+
+    def test_scoring_runs_even_when_upgrades_are_gated_off(self):
+        # It is read-only, and it is what makes the Settings histogram meaningful
+        # before anything is switched on.
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT OR REPLACE INTO app_config (key,value) VALUES ('relocation_enabled','0')")
+        conn.commit(); conn.close()
+        result = qu.run(self.db)
+        self.assertIn("relocation_enabled", result["skipped"])
+        self.assertIn("scored", result)
+
+    def test_already_scored_tracks_are_not_rescored(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE tracks SET quality_tier='lossless'")
+        conn.commit(); conn.close()
+        self.assertEqual(qu.backfill_scores(self.db, 10), 0)

@@ -56,7 +56,7 @@ import sqlite3
 import subprocess
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 HOME = os.path.expanduser("~")
 DEFAULT_LEXICON_DB = f"{HOME}/Library/Application Support/lexicon/main.db"
@@ -302,7 +302,7 @@ def main() -> int:
             conn.execute("BEGIN IMMEDIATE")
             conn.executemany(
                 "UPDATE Track SET location = ?, dateModified = ? WHERE id = ?",
-                [(p["new"], datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                [(p["new"], datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                   p["lexicon_id"]) for p in plan])
             conn.commit()
         except Exception as e:                                   # noqa: BLE001
