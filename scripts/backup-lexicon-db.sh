@@ -55,6 +55,43 @@ LOG_DIR="${LOG_DIR:-$HOME/.waxflow/logs}"
 SKIP_ON_HYPERBACKUP="${SKIP_ON_HYPERBACKUP:-1}"
 SSH_OPTS="-o ConnectTimeout=20 -o ServerAliveInterval=15"
 
+# LEXICON_SSH=local means "the Lexicon DB is on THIS machine". The header has
+# documented that since the script was written, but every call site went through
+# `ssh $LEXICON_SSH` unconditionally, so local mode tried to reach a host literally
+# named "local" and failed. That made the script unrunnable on the one machine it
+# is most natural to run it on -- the Lexicon Mac itself.
+#
+# Route through these two helpers instead of calling ssh directly.
+on_lexicon() {          # on_lexicon <command-string>
+    if [ "$LEXICON_SSH" = "local" ]; then
+        bash -c "$1"
+    else
+        # shellcheck disable=SC2086
+        ssh $SSH_OPTS "$LEXICON_SSH" "$1"
+    fi
+}
+
+# Same, but de-prioritised for the big file stream. `nice` execs a BINARY and
+# cannot invoke a shell function, so the nice has to live inside each branch
+# rather than being prefixed at the call site.
+on_lexicon_nice() {     # on_lexicon_nice <command-string>
+    if [ "$LEXICON_SSH" = "local" ]; then
+        nice -n 19 bash -c "$1"
+    else
+        # shellcheck disable=SC2086
+        nice -n 19 ssh $SSH_OPTS "$LEXICON_SSH" "$1"
+    fi
+}
+
+on_lexicon_stdin() {    # on_lexicon_stdin <args...>  -- script arrives on stdin
+    if [ "$LEXICON_SSH" = "local" ]; then
+        bash -s "$@"
+    else
+        # shellcheck disable=SC2086
+        ssh $SSH_OPTS "$LEXICON_SSH" bash -s "$@"
+    fi
+}
+
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/lexicon-backup.log"
 HEARTBEAT="$LOG_DIR/lexicon-backup-heartbeat.json"
@@ -112,9 +149,9 @@ ls -1t "$DIR"/lexicon-main-*.db.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs 
 echo "OK $SHA $TC $BYTES $GZ"
 REMOTE
 
-REMOTE_OUT="$(printf '%s' "$REMOTE_SCRIPT" | ssh $SSH_OPTS "$LEXICON_SSH" \
-    bash -s "$TS" "$KEEP" "${LEXICON_DB_OVERRIDE:-}" "${MAC_BACKUP_DIR_OVERRIDE:-}")" \
-    || fail "remote backup step failed (see log / stderr above)"
+REMOTE_OUT="$(printf '%s' "$REMOTE_SCRIPT" | on_lexicon_stdin \
+    "$TS" "$KEEP" "${LEXICON_DB_OVERRIDE:-}" "${MAC_BACKUP_DIR_OVERRIDE:-}")" \
+    || fail "backup step failed (see log / stderr above)"
 
 read -r TAG SHA TRACK_COUNT GZ_BYTES GZ_PATH <<<"$REMOTE_OUT"
 [ "$TAG" = "OK" ] || fail "remote backup did not report OK: $REMOTE_OUT"
@@ -131,7 +168,7 @@ else
     ssh $SSH_OPTS "$NAS_SSH" "mkdir -p '$NAS_BACKUP_DIR'" || fail "cannot create NAS dir $NAS_BACKUP_DIR"
     DEST="$NAS_BACKUP_DIR/$BASENAME"
     # scp's sftp subsystem is disabled on this Synology, so stream over ssh cat.
-    if nice -n 19 ssh $SSH_OPTS "$LEXICON_SSH" "cat \"$GZ_PATH\"" \
+    if on_lexicon_nice "cat \"$GZ_PATH\"" \
          | nice -n 19 ssh $SSH_OPTS "$NAS_SSH" "cat > '$DEST'"; then
         NAS_SHA="$(ssh $SSH_OPTS "$NAS_SSH" "gunzip -t '$DEST' && (command -v sha256sum >/dev/null && sha256sum '$DEST' | cut -d' ' -f1 || openssl dgst -sha256 '$DEST' | awk '{print \$NF}')")" \
             || fail "NAS copy failed gunzip -t / hash"

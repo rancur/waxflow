@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.14.1 — fix: the backup script could not run on the Lexicon Mac
+
+`backup-lexicon-db.sh` has documented `LEXICON_SSH=local` since it was written, and
+that is also its default -- but every call site went through
+`ssh $SSH_OPTS "$LEXICON_SSH"` unconditionally, so "local" was treated as a hostname
+and the script failed on the one machine it is most natural to run it on: the Mac
+that holds the database.
+
+Found while satisfying the fresh-backup gate for the `dateAdded` backfill. The
+newest verified backup was from the day before and recorded 5,852 tracks --
+pre-dating the dedup work, so restoring it would have undone the migration.
+
+Calls now route through `on_lexicon` / `on_lexicon_stdin` / `on_lexicon_nice`,
+which run locally or over SSH as appropriate. The third exists because `nice`
+execs a binary and cannot invoke a shell function, so the de-prioritisation has to
+live inside each branch rather than being prefixed at the call site.
+
+Verified end to end on the Lexicon Mac: Track=5612, integrity ok, pushed to the NAS
+with a matching sha256.
+
 ## 2.14.0 — retroactive dateAdded from your Spotify liked dates
 
 Lexicon stamps `dateAdded` with the moment a file was imported, so a library
