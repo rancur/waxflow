@@ -176,7 +176,7 @@ Two operational settings were raised to drain the backlog faster and should be p
 back once it is done: `quality_score_batch` 800 (default 250) and
 `quality_upgrade_interval_seconds` 180 (default 21600).
 
-### 3. Let the score backfill finish
+### 4. The remaining errors
 
 - **129 `wrong_version`** — the gates now prevent new ones. These predate them and
   need re-sourcing. `POST /api/tracks/bulk-retry {"category":"wrong_version"}`
@@ -187,7 +187,7 @@ back once it is done: `quality_score_batch` 800 (default 250) and
 - **56 ambiguous mappings** and **34 pointing at deleted Lexicon rows** — reported
   by `recheck-mappings.py`, deliberately untouched.
 
-### 4. Phase 3 — the UI overhaul (not started)
+### 5. Phase 3 — the UI overhaul (not started)
 
 Planned in detail, nothing built:
 
