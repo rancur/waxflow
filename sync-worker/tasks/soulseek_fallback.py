@@ -42,6 +42,7 @@ from tasks.helpers import (
     get_db,
     log_activity,
     sanitize_filename,
+    set_config,
     update_track,
 )
 from tasks.lossless_verify import verify_lossless
@@ -132,29 +133,112 @@ def reject_nonlossless_for_import(db_path: str, track: dict) -> bool:
     # Trust a prior genuine-lossless verdict (fast path for the common case).
     if track.get("verify_is_genuine_lossless") == 1:
         return False
-    # Definitive check: probe the actual file. A lossless container passes.
-    try:
-        from tasks.lossless_verify import ffprobe_audio, LOSSLESS_CODECS
-        probe = ffprobe_audio(file_path)
-        if probe["codec"] in LOSSLESS_CODECS and probe["sample_rate"] >= 44100:
-            return False  # genuinely lossless — allow import
-    except Exception as e:  # noqa: BLE001 — never block an import on a probe error
-        log.warning("import-guard probe failed for %s: %s — allowing", file_path, e)
-        return False
-    # Non-lossless file about to be imported — refuse and route to Soulseek.
+    # Definitive check: probe the actual file and score it.
+    #
+    # BEHAVIOUR CHANGE (2.16.0). This used to be lossless-or-nothing, so a 320 kbps
+    # file of a track available nowhere else was refused and the track simply stayed
+    # missing. For a DJ library that is the wrong trade: a 320k file you can play
+    # beats a perfect file you do not have.
+    #
+    # Now three outcomes rather than two:
+    #   at/above target (lossless)   -> import, as before
+    #   floor..target (>=320k lossy) -> IMPORT, flagged below_target, and queued for
+    #                                   an upgrade so the hunt continues
+    #   below the floor              -> refused, exactly as before
+    #
+    # Set quality_floor_tier to "lossless" to restore the old behaviour exactly.
     track_id = track["id"]
-    codec = (probe or {}).get("codec", "unknown")
-    reason = f"refused non-lossless import (codec={codec}) of {os.path.basename(file_path)}"
+    try:
+        from tasks import quality
+        score = quality.score_file(file_path)
+    except Exception as e:  # noqa: BLE001
+        # A probe failure used to mean "allow". With a lower floor that is the hole
+        # garbage would come through, so hold the track and let the next cycle retry
+        # rather than importing something we could not read.
+        log.warning("import-guard probe failed for %s: %s — holding", file_path, e)
+        return _hold_unprobeable(db_path, track_id, file_path, e)
+
+    floor_tier = _configured_floor_tier(db_path)
+
+    if score.tier >= quality.TARGET_TIER:
+        return False                                    # genuinely lossless — allow
+
+    if score.tier >= floor_tier:
+        # Good enough to use now, not good enough to stop looking.
+        update_track(
+            db_path, track_id,
+            quality_tier=score.tier_name, quality_score=score.score,
+            quality_bit_rate=score.bit_rate, below_target=1,
+            quality_checked_at=_now_iso(),
+        )
+        if is_enabled(db_path) and not already_attempted(db_path, track_id):
+            queue_for_fallback(
+                db_path, track_id,
+                f"below-target import ({score.tier_name}) — looking for lossless")
+        log_activity(
+            db_path, "import_below_target", track_id,
+            f"Imported {score.tier_name} ({score.codec} {score.bit_rate // 1000}k) — "
+            f"still hunting for lossless",
+            {"file_path": file_path, **score.as_dict()})
+        log.info("Track %d: importing below-target %s (%s) — upgrade queued",
+                 track_id, score.tier_name, os.path.basename(file_path))
+        return False
+
+    # Below the floor — refuse, exactly as before.
+    reason = (f"refused import below the quality floor "
+              f"(codec={score.codec}, {score.bit_rate // 1000}k) of "
+              f"{os.path.basename(file_path)}")
     if is_enabled(db_path) and not already_attempted(db_path, track_id):
         queue_for_fallback(db_path, track_id, reason)
     update_track(
         db_path, track_id,
         pipeline_stage="error", verify_status="fail", verify_is_genuine_lossless=0,
+        quality_tier=score.tier_name, quality_score=score.score,
+        quality_bit_rate=score.bit_rate, quality_checked_at=_now_iso(),
         pipeline_error=f"{reason} [queued for Soulseek lossless fallback]",
     )
     log_activity(db_path, "import_rejected_nonlossless", track_id, reason,
-                 {"file_path": file_path, "codec": codec})
-    log.warning("Track %d: REFUSED non-lossless import (%s) -> routed to Soulseek", track_id, file_path)
+                 {"file_path": file_path, **score.as_dict()})
+    log.warning("Track %d: REFUSED below-floor import (%s) -> routed to Soulseek",
+                track_id, file_path)
+    return True
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _configured_floor_tier(db_path: str) -> int:
+    """The lowest tier we will import, from config. Defaults to 320k."""
+    from tasks import quality
+    name = (get_config(db_path, "quality_floor_tier") or "").strip().lower()
+    by_name = {v: k for k, v in quality.TIER_NAMES.items()}
+    return by_name.get(name, quality.FLOOR_TIER)
+
+
+_UNPROBEABLE_ATTEMPT_CAP = 5
+
+
+def _hold_unprobeable(db_path: str, track_id: int, file_path: str, err) -> bool:
+    """Leave an unreadable file for the next cycle; error out after a few tries.
+
+    Returning True here means "do not import", NOT "this is garbage" -- the track
+    stays in organizing and is retried, so a transient read (mount blip, file still
+    being written) resolves itself.
+    """
+    key = f"_unprobeable_attempts_{track_id}"
+    try:
+        attempts = int(get_config(db_path, key) or 0) + 1
+    except (TypeError, ValueError):
+        attempts = 1
+    set_config(db_path, key, str(attempts))
+    if attempts >= _UNPROBEABLE_ATTEMPT_CAP:
+        update_track(
+            db_path, track_id, pipeline_stage="error",
+            pipeline_error=f"could not probe {os.path.basename(file_path)} after "
+                           f"{attempts} attempts: {err}")
+        log.warning("Track %d: unprobeable after %d attempts — erroring", track_id, attempts)
     return True
 
 

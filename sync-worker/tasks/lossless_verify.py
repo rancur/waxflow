@@ -69,10 +69,26 @@ def ffprobe_audio(path: str) -> dict:
                 break
             except (TypeError, ValueError):
                 pass
+    # Bitrate: take the larger of the stream's and the container's figure. VBR MP3
+    # commonly reports only one of the two, and for a lossy file the bitrate is the
+    # whole basis of the quality decision -- reading 0 would silently classify a
+    # 320k file as below the floor.
+    bit_rate = 0
+    for src in (audio.get("bit_rate"), data.get("format", {}).get("bit_rate")):
+        try:
+            bit_rate = max(bit_rate, int(src or 0))
+        except (TypeError, ValueError):
+            pass
+
     return {
         "codec": audio.get("codec_name", "unknown"),
         "sample_rate": int(audio.get("sample_rate") or 0),
+        # bits_per_raw_sample is absent on AIFF; bits_per_sample carries it there,
+        # and without the fallback every AIFF in the library reads as 0-bit.
         "bit_depth": int(audio.get("bits_per_raw_sample") or audio.get("bits_per_sample") or 0),
+        "bit_rate": bit_rate,
+        "channels": int(audio.get("channels") or 0),
+        "format_name": (data.get("format", {}) or {}).get("format_name", ""),
         "duration_s": dur,
     }
 

@@ -245,6 +245,10 @@ class TestImportGuard(unittest.TestCase):
                         "-ar", "44100", "-sample_fmt", "s16", cls.flac], check=True)
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", cls.flac,
                         "-c:a", "aac", "-b:a", "256k", cls.m4a], check=True)
+        # A genuine 320k MP3: at/above the floor, below the lossless target.
+        cls.mp3_320 = os.path.join(cls.tmp, "good320.mp3")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", cls.flac,
+                        "-c:a", "libmp3lame", "-b:a", "320k", cls.mp3_320], check=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -268,6 +272,8 @@ class TestImportGuard(unittest.TestCase):
                 id INTEGER PRIMARY KEY, artist TEXT, title TEXT, duration_ms INTEGER,
                 file_path TEXT, verify_status TEXT, verify_is_genuine_lossless INTEGER,
                 pipeline_error TEXT, updated_at TEXT,
+                quality_tier TEXT, quality_score INTEGER, quality_bit_rate INTEGER,
+                quality_checked_at TEXT, below_target INTEGER NOT NULL DEFAULT 0,
                 pipeline_stage TEXT NOT NULL DEFAULT 'organizing'
                     CHECK(pipeline_stage IN ('new','matching','downloading','verifying',
                         'organizing','complete','error','waiting','ignored','needs_import_review')));
@@ -321,3 +327,99 @@ class TestImportGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQualityFloor(unittest.TestCase):
+    """>=320k imports as below-target instead of being refused outright.
+
+    The old gate was lossless-or-nothing, so a 320k file of a track available
+    nowhere else was refused and the track simply stayed missing. For a DJ library
+    that is the wrong trade -- a 320k file you can play beats a perfect file you do
+    not have. What must NOT change is the bottom: genuine garbage is still refused.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="floor_")
+        cls.flac = os.path.join(cls.tmp, "src.flac")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                        "-i", "anoisesrc=d=3:c=pink:r=44100", "-ac", "2",
+                        "-ar", "44100", "-sample_fmt", "s16", cls.flac], check=True)
+        cls.mp3_320 = os.path.join(cls.tmp, "at_floor.mp3")
+        cls.mp3_128 = os.path.join(cls.tmp, "below_floor.mp3")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", cls.flac,
+                        "-c:a", "libmp3lame", "-b:a", "320k", cls.mp3_320], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", cls.flac,
+                        "-c:a", "libmp3lame", "-b:a", "128k", cls.mp3_128], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        self.db = os.path.join(tempfile.mkdtemp(prefix="floordb_"), "t.db")
+        conn = sqlite3.connect(self.db)
+        conn.executescript("""
+            CREATE TABLE app_config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+                track_id INTEGER, message TEXT, details TEXT,
+                created_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE fallback_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, track_id INTEGER NOT NULL,
+                source TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                search_query TEXT, result_count INTEGER,
+                attempted_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY, artist TEXT, title TEXT, duration_ms INTEGER,
+                file_path TEXT, verify_status TEXT, verify_is_genuine_lossless INTEGER,
+                pipeline_error TEXT, updated_at TEXT, pipeline_stage TEXT,
+                quality_tier TEXT, quality_score INTEGER, quality_bit_rate INTEGER,
+                quality_checked_at TEXT, below_target INTEGER NOT NULL DEFAULT 0);
+        """)
+        conn.commit(); conn.close()
+
+    def _row(self, path):
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO tracks (id, artist, title, file_path, pipeline_stage)"
+                     " VALUES (1,'A','T',?, 'organizing')", (path,))
+        conn.commit(); conn.close()
+        return {"id": 1, "artist": "A", "title": "T", "file_path": path}
+
+    def _get(self, col):
+        conn = sqlite3.connect(self.db)
+        try:
+            return conn.execute(f"SELECT {col} FROM tracks WHERE id=1").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_320k_is_imported_not_refused(self):
+        rejected = sf.reject_nonlossless_for_import(self.db, self._row(self.mp3_320))
+        self.assertFalse(rejected, "a genuine 320k file must be allowed to import")
+        self.assertEqual(self._get("below_target"), 1)
+        self.assertEqual(self._get("quality_tier"), "320k")
+        self.assertNotEqual(self._get("pipeline_stage"), "error")
+
+    def test_320k_import_still_queues_an_upgrade_hunt(self):
+        sf.reject_nonlossless_for_import(self.db, self._row(self.mp3_320))
+        conn = sqlite3.connect(self.db)
+        n = conn.execute("SELECT COUNT(*) FROM fallback_attempts WHERE track_id=1").fetchone()[0]
+        conn.close()
+        self.assertEqual(n, 1, "importing below target must not end the search")
+
+    def test_below_the_floor_is_still_refused(self):
+        rejected = sf.reject_nonlossless_for_import(self.db, self._row(self.mp3_128))
+        self.assertTrue(rejected)
+        self.assertEqual(self._get("pipeline_stage"), "error")
+
+    def test_lossless_passes_untouched(self):
+        rejected = sf.reject_nonlossless_for_import(self.db, self._row(self.flac))
+        self.assertFalse(rejected)
+        self.assertEqual(self._get("below_target"), 0)
+
+    def test_floor_can_be_raised_back_to_lossless(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO app_config (key,value) VALUES ('quality_floor_tier','lossless')")
+        conn.commit(); conn.close()
+        self.assertTrue(sf.reject_nonlossless_for_import(self.db, self._row(self.mp3_320)),
+                        "setting the floor to lossless must restore the old behaviour")

@@ -56,6 +56,13 @@ V3_TRACK_COLUMNS = (
     ("sourceability", "TEXT"),
     ("wanted_id", "INTEGER"),
     ("catchup_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    # Quality ladder (2.16.0). below_target marks a file that was good enough to
+    # import but not good enough to stop looking for something better.
+    ("quality_tier", "TEXT"),
+    ("quality_score", "INTEGER"),
+    ("quality_bit_rate", "INTEGER"),
+    ("quality_checked_at", "TEXT"),
+    ("below_target", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Nullable columns added to the existing ``import_queue`` table for Phase 3
@@ -198,6 +205,7 @@ V3_TRACK_INDEXES: tuple[tuple[str, str], ...] = (
     ("idx_tracks_spotify_added_at", "spotify_added_at"),
     ("idx_tracks_pipeline_stage", "pipeline_stage"),
     ("idx_tracks_lexicon_status", "lexicon_status"),
+    ("idx_tracks_quality_score", "quality_score"),
 )
 
 

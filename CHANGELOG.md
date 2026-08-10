@@ -1,5 +1,58 @@
 # Changelog
 
+## 2.16.0 — a 320k file you can play beats a perfect file you don't have
+
+The import gate was lossless-or-nothing. A 320 kbps file of a track that exists
+nowhere else was refused outright and the track simply stayed missing -- 37 errors
+in this library are that and nothing else, plus 95 AAC files already sitting in
+the collection with no way to describe them.
+
+For a DJ library that is the wrong trade. The gate now has three outcomes instead
+of two:
+
+    at/above target (lossless)   -> import, unchanged
+    floor..target (>=320k lossy) -> IMPORT, flagged below_target, upgrade queued
+    below the floor              -> refused, unchanged
+
+### The ladder
+
+    hi-res lossless   50   lossless and sample rate > 48 kHz
+    24-bit lossless   40   lossless and bit depth >= 24
+    16-bit lossless   30   44.1-48 kHz                      <- TARGET
+    320k lossy        20   effective bitrate >= 320k (5% tolerance)
+    below floor        0   refused
+
+`score` also orders strictly *within* a tier, so `is_upgrade` is a plain
+comparison and two candidates of the same tier still rank sensibly.
+
+`quality.py` is mirrored byte-for-byte into `sync-api/` -- sync-api cannot import
+worker code, and a test asserts the two copies match, because an API and a worker
+that disagree about "good enough" is worse than either rule alone.
+
+### Two measurement details that decide correctness
+
+**AIFF bit depth.** ffprobe reports it in `bits_per_sample`, not
+`bits_per_raw_sample`. Without the fallback all 974 AIFFs here read as 0-bit and
+drop a tier. (`ffprobe_audio` already handled this; the scorer additionally
+recovers depth from the codec name for `pcm_s24be` and friends.)
+
+**Bitrate.** Take the larger of the stream's and the container's figure. VBR MP3
+frequently reports only one, and for a lossy file the bitrate *is* the decision --
+reading 0 would classify a real 320k file as garbage. The 95 AAC files here
+measure 320000/326415 and now correctly clear the floor.
+
+Validated by scoring 120 real files from the library: 107 lossless, 11 24-bit,
+1 hi-res (192 kHz), 1 AAC. No probe failures, no misclassification.
+
+### One behaviour change worth naming
+
+A probe failure used to mean "allow the import". With a lower floor that is the
+hole garbage comes through, so an unreadable file is now HELD and retried, and
+only errors after five attempts. A transient cause -- mount blip, file still being
+written -- resolves itself instead of poisoning the library.
+
+`quality_floor_tier=lossless` restores the old behaviour exactly.
+
 ## 2.15.2 — the mis-mapping was in the LINK step, not the file matchers
 
 Unmapping 20 of the 252 mis-mapped rows and watching them re-resolve showed 14 of

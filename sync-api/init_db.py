@@ -603,6 +603,25 @@ def init():
                 "ALTER TABLE tracks ADD COLUMN catchup_attempts INTEGER NOT NULL DEFAULT 0"
             )
             print("Added tracks.catchup_attempts column.")
+        # Quality ladder (2.16.0). Mirrors V3_TRACK_COLUMNS in
+        # sync-worker/tasks/v3_schema.py -- both containers apply the schema and
+        # either may start first, so a column added in one must exist in the other.
+        for name, decl in (
+            ("quality_tier", "TEXT"),
+            ("quality_score", "INTEGER"),
+            ("quality_bit_rate", "INTEGER"),
+            ("quality_checked_at", "TEXT"),
+            ("below_target", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE tracks ADD COLUMN {name} {decl}")
+                print(f"Added tracks.{name} column.")
+        # AFTER the ALTER, never in the DDL script above: on an existing database
+        # the column does not exist when that script runs, and a CREATE INDEX naming
+        # a missing column aborts every statement after it in the same executescript.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tracks_quality_score ON tracks(quality_score)")
+
         iq_cols = {r[1] for r in conn.execute("PRAGMA table_info(import_queue)").fetchall()}
         if "next_retry_at" not in iq_cols:
             conn.execute("ALTER TABLE import_queue ADD COLUMN next_retry_at TEXT")
