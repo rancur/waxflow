@@ -1,6 +1,6 @@
 # Handoff — quality profiles, matching, and what's left
 
-**Written 2026-08-10. Live instance is on v2.17.1.** Everything described as shipped
+**Written 2026-08-10. Live instance is on v2.18.0.** Everything described as shipped
 is deployed and verified against the real library, not just tested.
 
 This document is written for a fresh agent picking the work up cold. Read
@@ -17,7 +17,7 @@ three of them contradict what the code's own comments used to claim.
 | Parity | 94.93% (5,163 / 5,439) |
 | Errors | 265 — `wrong_version` 129, `no_tidal_match` 57, `other` 70, `lexicon_sync_failed` 3, `not_lossless` 5, `download_failed` 1 |
 | Library scoring | 135 lossless, 43 at 320k, 7 24-bit, 4,978 not yet scored |
-| Automatic upgrades | **On** (`relocation_enabled=1`) — the rechecker stages; applying is still a deliberate manual step |
+| Automatic upgrades | **On and self-applying** for same-container upgrades (845 of 939 scored tracks). Container changes (94) still stage for the manual relocator. |
 | Relocator | Write path **verified** against a copy of the live DB (see below); has not yet applied a real staged upgrade |
 | Library scoring | Backfilling now, ~40 tracks/min. ~932 tracks have stale paths and are marked `missing-file` |
 
@@ -106,10 +106,28 @@ drill-down, post-processing coverage, and CI that actually runs the tests.
 
 ## What is left
 
-### 1. Apply the first real upgrade — the last remaining step
+### 1. Watch the first real in-place upgrade land
 
-The chain is on and staging works. What has **not** happened is a real
-`Track.location` write against the live database.
+**Most upgrades no longer need a human at all** (v2.18.0). A FLAC replacing a FLAC
+keeps its filename, so the better bytes are written over the old file, Lexicon's
+`location` never changes, and there is nothing to rewrite and nothing to quit.
+Measured here: **845 of 939 scored tracks** are in that position.
+
+The remaining 94 are lossy (m4a) and must change container, so those still stage
+into `relocation_queue` and need the relocator with Lexicon quit.
+
+Nothing has come through the in-place path yet only because the rechecker is still
+waiting on Soulseek to actually find something better. Watch for it:
+
+    SELECT * FROM activity_log WHERE event_type = 'upgrade_applied' ORDER BY id DESC;
+
+Verify the first one by hand: the file at the original path should be bigger/better,
+`.superseded/` should hold the original, and the track's cues should be intact.
+
+### 2. Apply the container-changing upgrades (still manual)
+
+For the m4a -> flac cases, a real `Track.location` write against the live database
+has still never happened.
 
 The write path itself IS verified. It was exercised against an online `.backup`
 copy of the live 5,714-track database, on a real track with real cue points:
@@ -156,7 +174,7 @@ Two operational settings were raised to drain the backlog faster and should be p
 back once it is done: `quality_score_batch` 800 (default 250) and
 `quality_upgrade_interval_seconds` 180 (default 21600).
 
-### 3. The remaining errors
+### 3. Let the score backfill finish
 
 - **129 `wrong_version`** — the gates now prevent new ones. These predate them and
   need re-sourcing. `POST /api/tracks/bulk-retry {"category":"wrong_version"}`
