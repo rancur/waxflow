@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.15.0 — the duration gate now covers every matching path
+
+Investigating why 252 Lexicon tracks were each claimed by more than one Spotify
+track showed that **2.13.0 gated two of the four matching paths, and missed the two
+that caused most of the damage.**
+
+None of the 252 are legitimate duplicates. They have different Spotify IDs,
+different ISRCs, 249 have different titles, and 221 differ in duration by more than
+five seconds (median spread: 53s). Every one is a mis-match.
+
+Wrong claimants, by the path that produced them:
+
+| path | wrong claimants | gated in 2.13.0 |
+|---|---|---|
+| `file_index_isrc` | 188 | no |
+| `lexicon_existing` | 75 | no |
+| `file_index_title_artist` | 1 | yes |
+| `search` | 1 | -- |
+
+### The ISRC branch
+
+2.13.0 deliberately left this ungated, reasoning that an ISRC identifies a
+recording exactly. That reasoning was wrong in practice: `file_index.isrc` comes
+from the **file's embedded tags**, not from an authority, and remix and edit files
+routinely carry the original's ISRC from compilation rips. "Same ISRC" really means
+"someone once wrote the same string into this file". It is now duration-checked
+like every other path.
+
+### The Lexicon search
+
+`_check_existing_in_lexicon` is the most permissive matcher in the pipeline: it
+deliberately searches the BASE title with "(Extended Mix)" / "(Remix)" stripped in
+order to widen the net, and its result sits on the `trusted_match` list, so a wrong
+answer skips later verification entirely. That is how
+
+    "Running Blind - Original Mix"  (335s)
+    -> file "Running Blind (Fre4knc Remix)"  (312s)
+
+happened. Now gated on Lexicon's `duration` field (reported in SECONDS).
+
+Applied retroactively, a 5s gate resolves **195 of the 252** contested rows to a
+single correct claimant.
+
+### Note
+
+This fixes the cause, not the existing rows. The 252 already-wrong mappings are
+still there; `wrong_version` in the Errors page is the related symptom.
+
 ## 2.14.2 — fix: the dateAdded backfill never converged
 
 A second run of the backfill still wanted to change 240 rows. The cause is not in

@@ -292,12 +292,26 @@ def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
         if not tbl:
             return None
 
-        # Primary: exact ISRC match (guaranteed same recording)
+        # Primary: ISRC match.
+        #
+        # An ISRC identifies a RECORDING, so this looks like it should be exact --
+        # and 2.13.0 deliberately left it ungated on that reasoning. Measuring the
+        # damage proved that wrong: of 252 Lexicon rows claimed by more than one
+        # Spotify track, this path produced 188 of the wrong claimants, more than
+        # any other.
+        #
+        # The reason is that file_index.isrc comes from the FILE'S EMBEDDED TAGS,
+        # not from an authority. Remix and edit files routinely carry the original's
+        # ISRC (compilation rips, tagging tools copying the album's identifier), so
+        # "same ISRC" really means "someone once typed the same string here".
+        # Duration is the independent check that catches it.
         if isrc:
             row = conn.execute(
-                "SELECT file_path, title, artist FROM file_index WHERE isrc = ?", (isrc,)
+                """SELECT file_path, title, artist, duration_seconds
+                   FROM file_index WHERE isrc = ?""",
+                (isrc,),
             ).fetchone()
-            if row:
+            if row and _durations_match(db_path, track, row[3], row[0]):
                 return {"file_path": row[0], "match_type": "isrc"}
 
         # Secondary: fuzzy title + artist match. The SQL LIKE prefix is only a
@@ -335,7 +349,10 @@ def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
     return None
 
 
-def _durations_match(db_path: str, track: dict, file_seconds, file_path: str) -> bool:
+DEFAULT_DURATION_TOLERANCE_SECONDS = 5.0
+
+
+def _durations_match(db_path: str | None, track: dict, file_seconds, file_path: str) -> bool:
     """Is this file plausibly the same recording as the Spotify track?
 
     FAILS OPEN when either duration is unknown: ~0.4% of indexed files have no
@@ -346,7 +363,15 @@ def _durations_match(db_path: str, track: dict, file_seconds, file_path: str) ->
     if not spotify_ms or not file_seconds:
         return True
 
-    tolerance = float(get_config(db_path, "match_duration_tolerance_seconds") or 5)
+    tolerance = DEFAULT_DURATION_TOLERANCE_SECONDS
+    if db_path:
+        try:
+            tolerance = float(
+                get_config(db_path, "match_duration_tolerance_seconds")
+                or DEFAULT_DURATION_TOLERANCE_SECONDS
+            )
+        except (TypeError, ValueError):
+            pass
     delta = abs((spotify_ms / 1000.0) - float(file_seconds))
     if delta <= tolerance:
         return True
@@ -414,7 +439,7 @@ def _process_new(db_path: str):
             # track), regardless of whether Lexicon's file looks lossless. This
             # is the primary duplicate-safety guardrail and the main reason the
             # backfill stays fast: most liked songs link here without downloading.
-            lexicon_existing = _check_existing_in_lexicon(track)
+            lexicon_existing = _check_existing_in_lexicon(track, db_path)
             if lexicon_existing:
                 log.info(
                     "Track %d (%s - %s) already in Lexicon (track_id=%s): %s — linking, no download",
@@ -605,8 +630,12 @@ def _titles_match(sp_title: str, lex_title: str) -> bool:
     return False
 
 
-def _check_existing_in_lexicon(track: dict) -> dict | None:
-    """Check if a track already exists in Lexicon's database."""
+def _check_existing_in_lexicon(track: dict, db_path: str | None = None) -> dict | None:
+    """Check if a track already exists in Lexicon's database.
+
+    db_path is optional only so existing callers/tests keep working; without it the
+    duration gate falls back to its default tolerance rather than reading config.
+    """
     artist = track.get("artist", "")
     title = track.get("title", "")
     if not artist or not title:
@@ -649,11 +678,27 @@ def _check_existing_in_lexicon(track: dict) -> dict | None:
                     if not _artists_match(artist, lex_artist):
                         continue
 
-                    if _titles_match(title, lex_title):
-                        return {
-                            "lexicon_track_id": str(tid),
-                            "file_path": t.get("location", ""),
-                        }
+                    if not _titles_match(title, lex_title):
+                        continue
+
+                    # Duration gate. This path is the most permissive matcher in
+                    # the pipeline: search_queries above deliberately includes the
+                    # BASE title, with "(Extended Mix)" / "(Remix)" stripped, to
+                    # widen the net. That is exactly what let "Running Blind -
+                    # Original Mix" (335s) match the file "Running Blind (Fre4knc
+                    # Remix)" (312s). It is also on the trusted_match list, so a
+                    # wrong answer here skips later verification entirely.
+                    #
+                    # Lexicon reports `duration` in SECONDS (a float, despite the
+                    # INTEGER column declaration).
+                    if not _durations_match(db_path, track, t.get("duration"),
+                                            t.get("location", "")):
+                        continue
+
+                    return {
+                        "lexicon_track_id": str(tid),
+                        "file_path": t.get("location", ""),
+                    }
     except Exception as e:
         log.warning("Lexicon check failed: %s", e)
 

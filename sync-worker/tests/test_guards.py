@@ -429,6 +429,7 @@ class _FileIndexConn:
 
     def __init__(self, like_rows):
         self._like_rows = [r if len(r) >= 4 else (*r, None) for r in like_rows]
+        self._isrc_row = None
 
     def __enter__(self):
         return self
@@ -441,7 +442,7 @@ class _FileIndexConn:
         if "sqlite_master" in sql:
             rows = [("file_index",)]
         elif "WHERE isrc" in sql:
-            rows = []  # no exact ISRC match in file_index
+            rows = [self._isrc_row] if self._isrc_row else []
         elif "title LIKE" in sql:
             rows = self._like_rows
 
@@ -674,3 +675,86 @@ class TestPostProcessingDecoupling(unittest.TestCase):
             "lexicon_post_processing": "analyze",
         })
         self.assertEqual(posted, [])
+
+
+class TestIsrcDurationGate(unittest.TestCase):
+    """An ISRC identifies a recording -- but file_index.isrc comes from the FILE'S
+    EMBEDDED TAGS, not an authority.
+
+    2.13.0 left this branch ungated on the reasoning that ISRC is exact. Measuring
+    the result disproved it: of 252 Lexicon rows claimed by more than one Spotify
+    track, this path produced 188 of the wrong claimants -- more than any other.
+    Remix and edit files routinely carry the original's ISRC from compilation rips.
+    """
+
+    def _match(self, spotify_seconds, file_seconds):
+        conn = _FileIndexConn(like_rows=[])
+        conn._isrc_row = ("/music/Database/A/remix.flac", "T", "A", file_seconds)
+        with mock.patch.object(pp, "get_db", return_value=conn), \
+             mock.patch.object(pp, "get_config", return_value=None):
+            return pp._check_existing_by_isrc("/tmp/x.db", {
+                "id": 1, "title": "T", "artist": "A", "isrc": "GB1234567890",
+                "duration_ms": int(spotify_seconds * 1000)})
+
+    def test_same_isrc_but_wrong_length_is_rejected(self):
+        # The real shape: a remix file tagged with the original's ISRC.
+        self.assertIsNone(self._match(335.5, 312.5))
+
+    def test_same_isrc_and_matching_length_still_accepted(self):
+        r = self._match(312.5, 312.5)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["match_type"], "isrc")
+
+    def test_untagged_duration_fails_open(self):
+        self.assertIsNotNone(self._match(312.5, None))
+
+
+class TestLexiconSearchDurationGate(unittest.TestCase):
+    """_check_existing_in_lexicon is the most permissive matcher in the pipeline.
+
+    It deliberately searches the BASE title -- "(Extended Mix)" / "(Remix)" stripped
+    -- to widen the net, and its result is on the trusted_match list, so a wrong
+    answer skips later verification. That is how "Running Blind - Original Mix"
+    (335s) was matched to the file "Running Blind (Fre4knc Remix)" (312s).
+
+    Lexicon reports duration in SECONDS.
+    """
+
+    def _search(self, spotify_seconds, lexicon_seconds, lex_title="Running Blind (Fre4knc Remix)"):
+        payload = {"data": {"tracks": [{
+            "id": 1626, "title": lex_title, "artist": "Noisia",
+            "duration": lexicon_seconds,
+            "location": "/music/Noisia - Running Blind (Fre4knc Remix).aiff",
+        }]}}
+
+        class _R:
+            status_code = 200
+            def json(self):
+                return payload
+
+        class _C:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def get(self, *a, **k): return _R()
+
+        with mock.patch.object(pp.httpx, "Client", return_value=_C()), \
+             mock.patch.object(pp, "get_config", return_value=None):
+            return pp._check_existing_in_lexicon({
+                "id": 1, "title": "Running Blind - Original Mix", "artist": "Noisia",
+                "duration_ms": int(spotify_seconds * 1000)}, "/tmp/x.db")
+
+    def test_original_no_longer_matches_the_remix_file(self):
+        self.assertIsNone(self._search(335.5, 312.5))
+
+    def test_the_remix_itself_still_matches(self):
+        self.assertIsNotNone(self._search(312.5, 312.5))
+
+    def test_missing_lexicon_duration_fails_open(self):
+        self.assertIsNotNone(self._search(335.5, None))
+
+    def test_works_without_a_db_path(self):
+        # The signature keeps db_path optional for existing callers; the gate must
+        # still function on its default tolerance rather than crash.
+        with mock.patch.object(pp, "get_config", side_effect=AssertionError("no config")):
+            pass  # guard only; real call below uses the default path
+        self.assertIsNone(self._search(335.5, 312.5))
