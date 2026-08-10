@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.14.2 — fix: the dateAdded backfill never converged
+
+A second run of the backfill still wanted to change 240 rows. The cause is not in
+the script: **252 Lexicon tracks are claimed by more than one WaxFlow track, and
+203 of those disagree on the date.** An original and its remix are separate Spotify
+tracks that were matched to the same file --
+
+    lexicon 4659   "Concussion - Mefjus Remix"   liked 2026-07-21
+                   "Concussion"                  liked 2014-12-26
+
+-- so writing per-WaxFlow-row means the last one wins and those rows flip on every
+run. This is the same wrong-version matching fixed in 2.13.0; these mappings
+predate the duration gate.
+
+The script now resolves to one date per Lexicon track before writing anything, and
+takes the **earliest** like date. That is deterministic, and it is the right answer
+to "when did this enter my library": the original is what the file actually is, and
+the original is what you saved first.
+
+The first full run happened to produce the same result only because the API returns
+tracks newest-first, so the oldest write landed last. That was luck, not design, and
+it would have broken the moment the sort order changed.
+
+Verified: two consecutive dry-runs both report `contested 303, would_change 0`.
+
+### Worth knowing
+
+Those 252 duplicate mappings are a real data-quality issue in their own right --
+two Spotify tracks pointing at one file means one of them is mis-matched. The
+duration gate stops new ones; the existing ones are still there.
+
 ## 2.14.1 — fix: the backup script could not run on the Lexicon Mac
 
 `backup-lexicon-db.sh` has documented `LEXICON_SSH=local` since it was written, and

@@ -203,10 +203,21 @@ def main() -> int:
               conn.execute("SELECT id, location, dateAdded FROM Track WHERE location IS NOT NULL")}
     print(f"  lexicon tracks: {len(by_id)}")
 
-    planned: list[tuple[int, str, str, str]] = []   # (lexicon_id, old, new, how)
     stats = {"matched_by_id": 0, "matched_by_path": 0, "unmatched": 0,
-             "already_correct": 0, "no_spotify_date": 0}
+             "already_correct": 0, "no_spotify_date": 0, "contested": 0}
 
+    # Resolve to ONE desired date per Lexicon track before writing anything.
+    #
+    # 252 Lexicon tracks are claimed by more than one WaxFlow track, and 203 of
+    # those disagree on the date -- an original and its remix are separate Spotify
+    # tracks that got matched to the same file (the wrong-version matching fixed in
+    # 2.13.0; these predate the duration gate). Writing per-WaxFlow-row means the
+    # last one wins, so those rows flip on every run and the script never converges.
+    #
+    # The earliest like date is both deterministic and the right answer to "when did
+    # this enter my library": the original is what the file actually is, and the
+    # original is what you saved first.
+    wanted: dict[int, tuple[str, str]] = {}          # lexicon_id -> (date, how)
     for t in wf_tracks:
         want = to_lexicon_ts(t.get("spotify_added_at"))
         if not want:
@@ -215,21 +226,33 @@ def main() -> int:
 
         lid = as_int(t.get("lexicon_track_id"))
         if lid is not None and lid in by_id:
-            current, how = by_id[lid], "id"
+            how = "id"
             stats["matched_by_id"] += 1
         else:
             hit = by_loc.get(to_mac_path(t.get("file_path")))
             if not hit:
                 stats["unmatched"] += 1
                 continue
-            lid, current = hit
+            lid, _current = hit
             how = "path"
             stats["matched_by_path"] += 1
 
+        prior = wanted.get(lid)
+        if prior is None:
+            wanted[lid] = (want, how)
+        else:
+            stats["contested"] += 1
+            if want < prior[0]:                       # ISO-8601 sorts correctly
+                wanted[lid] = (want, how + "+earliest")
+
+    planned: list[tuple[int, str, str, str]] = []     # (lexicon_id, old, new, how)
+    for lid, (want, how) in wanted.items():
+        current = by_id.get(lid)
         if current == want:
             stats["already_correct"] += 1
             continue
         planned.append((lid, current or "", want, how))
+    planned.sort(key=lambda r: r[0])
 
     if args.limit:
         planned = planned[:args.limit]
