@@ -13,15 +13,14 @@ three of them contradict what the code's own comments used to claim.
 
 | | |
 |---|---|
-| Version | 2.17.0 |
+| Version | 2.18.0 |
 | Parity | 94.93% (5,163 / 5,439) |
 | Errors | 265 — `wrong_version` 129, `no_tidal_match` 57, `other` 70, `lexicon_sync_failed` 3, `not_lossless` 5, `download_failed` 1 |
-| Library scoring | 135 lossless, 43 at 320k, 7 24-bit, 4,978 not yet scored |
-| Automatic upgrades | **On and self-applying** for same-container upgrades (845 of 939 scored tracks). Container changes (94) still stage for the manual relocator. |
-| Relocator | Write path **verified** against a copy of the live DB (see below); has not yet applied a real staged upgrade |
-| Library scoring | Backfilling now, ~40 tracks/min. ~932 tracks have stale paths and are marked `missing-file` |
+| Automatic upgrades | **On and self-applying** for same-container upgrades (845 of 939 scored). Container changes (94) still stage for the manual relocator. |
+| Relocator | Write path **verified** against a copy of the live DB; has not yet applied a real staged upgrade |
+| Library scoring | Backfilling, ~40 tracks/min. ~770 and counting have stale paths, marked `missing-file` |
 
-Tests: 360 in `sync-worker`, 51 in `sync-api`, all passing. CI runs them on every
+Tests: 370 in `sync-worker`, 51 in `sync-api`, all passing. CI runs them on every
 push (`.github/workflows/tests.yml`).
 
 ---
@@ -34,7 +33,10 @@ push (`.github/workflows/tests.yml`).
 > low quality with higher quality if the system automatically finds it, replaces the
 > file and updates Lexicon, so we always have the highest quality files.
 
-Most of that is built. The last mile — actually turning it on — is not.
+All of it is built and switched on. The common case (a FLAC replacing a FLAC)
+applies itself with no human involved. The exception is a container change
+(m4a → flac), where the filename must move and Lexicon's `location` therefore has
+to be rewritten — that still needs Lexicon quit, and has not been run for real yet.
 
 ---
 
@@ -160,7 +162,7 @@ finding an upgrade nothing can install leaves the better file on disk unreferenc
 while Lexicon keeps playing the worse copy, because `_lexicon_find_or_import`
 short-circuits on the existing `lexicon_track_id`.
 
-### 2. Let the score backfill finish
+### 3. Let the score backfill finish
 
 `quality_upgrade.backfill_scores()` drains a bounded batch each cycle and is
 running now. It matters because the rechecker cannot evaluate a track whose
