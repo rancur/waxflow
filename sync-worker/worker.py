@@ -23,6 +23,8 @@ from tasks.index_library import index_library
 from tasks.analyze_tracks import analyze_tracks
 from tasks.create_playlists import create_playlists
 from tasks.lexicon_health import lexicon_health_check
+from tasks.soulseek_health import soulseek_health_check
+from tasks.lexicon_coverage import lexicon_coverage
 from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.plex_sync import plex_sync
 from tasks.mac_availability import sample_availability
@@ -254,6 +256,20 @@ async def main():
         asyncio.create_task(
             run_task("lexicon_health_check", lexicon_health_check,
                      interval_key="lexicon_canary_interval_seconds", default_interval=900)
+        ),
+        # Soulseek reachability. sync-api cannot import worker code and has no slskd
+        # credentials, so the worker probes and persists the verdict to app_config
+        # for /api/dashboard to read. One cheap GET; 120s keeps the dashboard honest.
+        asyncio.create_task(
+            run_task("soulseek_health", soulseek_health_check,
+                     interval_key="soulseek_health_interval_seconds", default_interval=120)
+        ),
+        # Post-processing coverage (cues/tags/key/bpm). GET /v1/tracks returns the
+        # WHOLE library, so this is deliberately hourly and worker-side; the API
+        # serves the cached rollup instead of ever making this call itself.
+        asyncio.create_task(
+            run_task("lexicon_coverage", lexicon_coverage,
+                     interval_key="lexicon_coverage_interval_seconds", default_interval=3600)
         ),
         # Lossy-only auto-upgrade re-check: tracks kept as lossy because no lossless
         # existed at import time are periodically re-sourced through the Tidal +

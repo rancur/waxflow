@@ -89,7 +89,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     const fetchErrorCount = async () => {
       try {
-        const res = await fetch('/api/tracks/errors')
+        // /tracks/errors returns every errored track in full; this badge needs a
+        // single integer, and it polls every 30s.
+        const res = await fetch('/api/tracks/errors/summary')
         if (res.ok) {
           const data = await res.json()
           setErrorCount(data.total_errors ?? 0)

@@ -72,6 +72,45 @@ async def list_backups():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/coverage")
+async def lexicon_coverage():
+    """Post-processing coverage: how much of the library has cues, tags, key, bpm.
+
+    Serves the rollup the worker's lexicon_coverage task computed. This endpoint
+    deliberately does NOT call Lexicon: /v1/tracks returns the whole library, which
+    is far too expensive for a request handler.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM app_config WHERE key IN (?, ?)",
+                ("lexicon_coverage", "lexicon_coverage_checked_at"),
+            ).fetchall()
+            cfg = {r["key"]: r["value"] for r in rows}
+
+        raw = cfg.get("lexicon_coverage")
+        if not raw:
+            return {
+                "available": False,
+                "reason": "no coverage sample recorded yet — the worker collects "
+                          "this hourly and skips while the Mac is asleep",
+                "checked_at": None,
+            }
+        try:
+            summary = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {"available": False, "reason": "stored coverage sample is unreadable",
+                    "checked_at": cfg.get("lexicon_coverage_checked_at")}
+
+        return {
+            "available": True,
+            "checked_at": cfg.get("lexicon_coverage_checked_at"),
+            **summary,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/protected")
 async def protected_tracks():
     try:

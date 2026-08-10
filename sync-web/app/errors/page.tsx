@@ -65,13 +65,13 @@ const CATEGORIES: CategoryInfo[] = [
     description: 'Tracks with files that could not be added to Lexicon',
   },
   {
-    key: 'fingerprint_mismatch',
-    label: 'Fingerprint Mismatch',
+    key: 'wrong_version',
+    label: 'Wrong Version',
     color: 'orange',
     borderColor: 'border-orange-500/30',
     bgColor: 'bg-orange-500/10',
     textColor: 'text-orange-400',
-    description: 'Tracks where the downloaded file might be the wrong version',
+    description: 'The file is a different edit of the right song (radio vs extended, live, remix)',
   },
   {
     key: 'other',
@@ -205,7 +205,7 @@ export default function ErrorsPage() {
     const toIgnore = selected.length > 0 ? selected : tracks
     if (toIgnore.length === 0) return
 
-    setBulkLoading(categoryKey)
+    setBulkLoading(`ignore:${categoryKey}`)
     try {
       await apiFetch('/tracks/bulk-ignore', {
         method: 'POST',
@@ -214,8 +214,46 @@ export default function ErrorsPage() {
       setToast(`${toIgnore.length} track${toIgnore.length !== 1 ? 's' : ''} ignored`)
       setSelectedTracks(new Set())
       fetchData()
-    } catch {
-      setToast('Bulk ignore failed')
+    } catch (err) {
+      setToast(err instanceof Error ? `Bulk ignore failed: ${err.message}` : 'Bulk ignore failed')
+    } finally {
+      setBulkLoading(null)
+    }
+  }
+
+  // Retrying a whole category sends every one of those tracks back through a
+  // pipeline that picks up work every 10 seconds, so it is worth a confirmation
+  // once the count gets large. When nothing is explicitly selected we send the
+  // CATEGORY rather than thousands of ids and let the server resolve membership
+  // with the same classifier that produced the number on the button.
+  const handleBulkRetry = async (categoryKey: string) => {
+    const tracks = filterTracks(data?.categories[categoryKey] || [])
+    const selected = tracks.filter(t => selectedTracks.has(t.id))
+    const count = selected.length > 0 ? selected.length : tracks.length
+    if (count === 0) return
+
+    if (count > 100 && !confirm(
+      `Retry ${count} tracks? They will all re-enter the pipeline, which processes ` +
+      `continuously in the background.`
+    )) return
+
+    setBulkLoading(`retry:${categoryKey}`)
+    try {
+      const body = selected.length > 0
+        ? { track_ids: selected.map(t => t.id) }
+        : { category: categoryKey }
+      const result = await apiFetch<{ count: number; skipped: number }>('/tracks/bulk-retry', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      setToast(
+        `${result.count} track${result.count !== 1 ? 's' : ''} queued for retry` +
+        (result.skipped ? ` (${result.skipped} protected, skipped)` : '')
+      )
+      setSelectedTracks(new Set())
+      fetchData()
+    } catch (err) {
+      setToast(err instanceof Error ? `Bulk retry failed: ${err.message}` : 'Bulk retry failed')
     } finally {
       setBulkLoading(null)
     }
@@ -387,11 +425,22 @@ export default function ErrorsPage() {
                 {/* Bulk actions bar */}
                 <div className="flex items-center gap-3 px-5 py-2 border-b border-slate-800/50">
                   <button
+                    onClick={() => handleBulkRetry(cat.key)}
+                    disabled={bulkLoading !== null}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-emerald-600/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+                  >
+                    {bulkLoading === `retry:${cat.key}`
+                      ? 'Retrying...'
+                      : someSelected
+                        ? `Retry Selected (${tracks.filter(t => selectedTracks.has(t.id)).length})`
+                        : `Retry All ${count}`}
+                  </button>
+                  <button
                     onClick={() => handleBulkIgnore(cat.key)}
-                    disabled={bulkLoading === cat.key}
+                    disabled={bulkLoading !== null}
                     className="text-xs px-3 py-1.5 rounded-lg border border-slate-600 bg-slate-700/50 text-slate-300 hover:bg-slate-600/50 transition-colors disabled:opacity-50"
                   >
-                    {bulkLoading === cat.key
+                    {bulkLoading === `ignore:${cat.key}`
                       ? 'Ignoring...'
                       : someSelected
                         ? `Ignore Selected (${tracks.filter(t => selectedTracks.has(t.id)).length})`

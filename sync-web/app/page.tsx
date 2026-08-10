@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import Link from 'next/link'
 import { apiFetch } from './api'
 import ParityMeter from './components/ParityMeter'
 import ActivityFeed from './components/ActivityFeed'
@@ -39,8 +40,28 @@ interface RawDashboard {
   }>
 }
 
+interface CoverageData {
+  available: boolean
+  checked_at?: string | null
+  active_tracks?: number
+  coverage?: Record<string, { count: number; pct: number }>
+  unavailable?: string[]
+}
+
+// Order and labels for the post-processing tiles. Keys mirror the fields Lexicon's
+// /v1/tracks actually reports; artwork and cloud state are not among them.
+const COVERAGE_FIELDS = [
+  { key: 'cuepoints', label: 'Cue Points' },
+  { key: 'tempomarkers', label: 'Beat Grid' },
+  { key: 'bpm', label: 'BPM' },
+  { key: 'key', label: 'Key' },
+  { key: 'genre', label: 'Genre' },
+  { key: 'tags', label: 'Tags' },
+] as const
+
 export default function DashboardPage() {
   const [data, setData] = useState<RawDashboard | null>(null)
+  const [coverage, setCoverage] = useState<CoverageData | null>(null)
   const [monthly, setMonthly] = useState<MonthlyRow[]>([])
   const [syncMode, setSyncMode] = useState<string>('full')
   const [switchingMode, setSwitchingMode] = useState(false)
@@ -63,6 +84,14 @@ export default function DashboardPage() {
     } finally {
       setLoading(false)
     }
+  }, [])
+
+  // Fetched once rather than on the 10s poll: the worker only recomputes this
+  // hourly, so re-requesting it every tick would be pure noise.
+  useEffect(() => {
+    apiFetch<CoverageData>('/lexicon/coverage')
+      .then(setCoverage)
+      .catch(() => setCoverage(null))
   }, [])
 
   const handleStartDownloads = async () => {
@@ -191,9 +220,10 @@ export default function DashboardPage() {
           <div className="space-y-2">
             {monthly.map((m) => {
               const pct = m.total > 0 ? Math.round((m.complete / m.total) * 100) : 0
-              const errPct = m.total > 0 ? Math.round((m.errors / m.total) * 100) : 0
               const remaining = m.total - m.complete - m.errors
-              const remainPct = m.total > 0 ? Math.round((remaining / m.total) * 100) : 0
+              // Segment widths come from flex-grow on the RAW counts, not from
+              // percentages: three independently rounded values can total 101% and
+              // overflow the bar. pct is only used for the colour/glow threshold.
               const [year, mon] = m.month.split('-')
               const label = new Date(Number(year), Number(mon) - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
               const glowColor = pct > 90 ? '0 0 8px rgba(34,197,94,0.4)' : pct >= 50 ? '0 0 8px rgba(245,158,11,0.3)' : '0 0 8px rgba(239,68,68,0.3)'
@@ -206,22 +236,28 @@ export default function DashboardPage() {
                     style={{ background: 'rgb(30,41,59)', boxShadow: glowColor }}
                   >
                     <div className="flex h-full">
-                      {pct > 0 && (
-                        <div
-                          style={{ width: `${pct}%` }}
-                          className="bg-emerald-500 transition-all duration-500"
+                      {m.complete > 0 && (
+                        <Link
+                          href={`/tracks?month=${m.month}&pipeline_stage=complete`}
+                          style={{ flexGrow: m.complete }}
+                          title={`${m.complete} complete in ${label} — click to view`}
+                          className="bg-emerald-500 transition-all duration-500 hover:brightness-125"
                         />
                       )}
-                      {errPct > 0 && (
-                        <div
-                          style={{ width: `${errPct}%` }}
-                          className="bg-red-500 transition-all duration-500"
+                      {m.errors > 0 && (
+                        <Link
+                          href={`/tracks?month=${m.month}&pipeline_stage=error`}
+                          style={{ flexGrow: m.errors }}
+                          title={`${m.errors} errored in ${label} — click to view`}
+                          className="bg-red-500 transition-all duration-500 hover:brightness-125"
                         />
                       )}
-                      {remainPct > 0 && (
-                        <div
-                          style={{ width: `${remainPct}%` }}
-                          className="bg-slate-600 transition-all duration-500"
+                      {remaining > 0 && (
+                        <Link
+                          href={`/tracks?month=${m.month}`}
+                          style={{ flexGrow: remaining }}
+                          title={`${remaining} still in progress in ${label} — click to view`}
+                          className="bg-slate-600 transition-all duration-500 hover:brightness-125"
                         />
                       )}
                     </div>
@@ -255,6 +291,42 @@ export default function DashboardPage() {
           <p className="text-xs text-slate-500 mt-1">Verified Lossless</p>
         </div>
       </div>
+
+      {/* Post-processing coverage. Answers "are cues/tags actually being generated?"
+          with a measurement instead of a hunch. */}
+      {coverage?.available && (
+        <div className="card">
+          <div className="flex items-baseline justify-between mb-4">
+            <h2 className="text-sm font-semibold text-slate-300">Lexicon Post-Processing</h2>
+            <span className="text-xs text-slate-500">
+              {coverage.active_tracks?.toLocaleString()} tracks
+              {coverage.checked_at && ` · checked ${new Date(coverage.checked_at).toLocaleString()}`}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+            {COVERAGE_FIELDS.map(({ key, label }) => {
+              const c = coverage.coverage?.[key]
+              if (!c) return null
+              const good = c.pct >= 95
+              return (
+                <div key={key} className="text-center">
+                  <p className={`text-2xl font-bold ${good ? 'text-emerald-400' : c.pct >= 80 ? 'text-amber-400' : 'text-red-400'}`}>
+                    {c.pct}%
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">{label}</p>
+                  <p className="text-[10px] text-slate-600 tabular-nums">{c.count.toLocaleString()}</p>
+                </div>
+              )
+            })}
+          </div>
+          {(coverage.unavailable?.length ?? 0) > 0 && (
+            <p className="text-[11px] text-slate-600 mt-4">
+              Not measurable via Lexicon&apos;s API: {coverage.unavailable?.join(', ')} —
+              these live in Lexicon&apos;s own database rather than its track feed.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Activity + Health */}
       <div className="grid lg:grid-cols-3 gap-6">
@@ -293,28 +365,42 @@ export default function DashboardPage() {
         <div className="card">
           <h2 className="text-sm font-semibold text-slate-300 mb-4">Service Health</h2>
           <div className="space-y-4">
-            {(['spotify', 'tidal', 'lexicon'] as const).map((name) => {
-              const svc = getService(name)
-              const spotifyOk = name === 'spotify' ? data !== null : undefined
-              const isOk = svc ? svc.status === 'ok' : spotifyOk
-              return (
-                <div key={name} className="flex items-center justify-between py-2">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-2.5 h-2.5 rounded-full ${
-                      loading ? 'bg-slate-600 animate-pulse'
-                        : isOk ? 'bg-emerald-400'
-                        : 'bg-red-400'
-                    }`} />
-                    <span className="text-sm text-slate-300 capitalize">{name}</span>
+            {/* Rendered from whatever the API reports, so a newly added service
+                (soulseek) shows up without a matching frontend change. 'spotify' is
+                still inferred: reaching this page at all means the API answered. */}
+            {(() => {
+              const reported = data?.services ?? []
+              const names = ['spotify', ...reported.map(s => s.name).filter(n => n !== 'spotify')]
+              return names.map((name) => {
+                const svc = getService(name)
+                const spotifyOk = name === 'spotify' ? data !== null : undefined
+                const isOk = svc ? svc.status === 'ok' : spotifyOk
+                const isInactive = svc?.status === 'disabled' || svc?.status === 'unknown'
+                return (
+                  <div key={name} className="flex items-center justify-between py-2">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-2.5 h-2.5 rounded-full ${
+                        loading ? 'bg-slate-600 animate-pulse'
+                          : isOk ? 'bg-emerald-400'
+                          : isInactive ? 'bg-slate-600'
+                          : 'bg-red-400'
+                      }`} />
+                      <span className="text-sm text-slate-300 capitalize">{name}</span>
+                    </div>
+                    {!loading && svc && (
+                      <span
+                        className="text-xs text-slate-500 tabular-nums"
+                        title={svc.error ?? undefined}
+                      >
+                        {svc.status === 'ok' && svc.latency_ms
+                          ? `${Math.round(svc.latency_ms)}ms`
+                          : svc.status}
+                      </span>
+                    )}
                   </div>
-                  {!loading && svc && (
-                    <span className="text-xs text-slate-500 tabular-nums">
-                      {svc.latency_ms ? `${Math.round(svc.latency_ms)}ms` : svc.status}
-                    </span>
-                  )}
-                </div>
-              )
-            })}
+                )
+              })
+            })()}
           </div>
         </div>
       </div>

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { apiFetch, apiUpload } from '../api'
+import { apiFetch, apiFetchAll, apiUpload } from '../api'
 import StatusBadge from '../components/StatusBadge'
 
 interface MissingTrack {
@@ -28,15 +28,22 @@ export default function MissingTracksPage() {
   const [retrying, setRetrying] = useState<Set<number>>(new Set())
   const [uploading, setUploading] = useState<Set<number>>(new Set())
   const [toast, setToast] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const fileInputRefs = useRef<Record<number, HTMLInputElement | null>>({})
 
+  // This page shows every errored track at once (it sorts and filters client-side),
+  // but /tracks caps per_page at 200. It used to ask for 500, get a 422, and render
+  // an empty table -- which read as "nothing is wrong" rather than "the request
+  // failed". Page through instead, and never swallow the failure.
   const fetchTracks = useCallback(async () => {
     setLoading(true)
     try {
-      const result = await apiFetch<any>('/tracks?pipeline_stage=error&per_page=500')
-      setTracks(result.tracks || [])
-    } catch {
+      const { items } = await apiFetchAll<MissingTrack>('/tracks?pipeline_stage=error')
+      setTracks(items)
+      setLoadError(null)
+    } catch (err) {
       setTracks([])
+      setLoadError(err instanceof Error ? err.message : 'Failed to load tracks')
     } finally {
       setLoading(false)
     }
@@ -147,6 +154,13 @@ export default function MissingTracksPage() {
         </div>
       )}
 
+      {loadError && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-5 py-3 flex items-center justify-between gap-4">
+          <p className="text-sm text-red-400">Could not load tracks — {loadError}</p>
+          <button className="btn-secondary text-xs shrink-0" onClick={fetchTracks}>Retry</button>
+        </div>
+      )}
+
       <div className="card p-0 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left">
@@ -178,7 +192,7 @@ export default function MissingTracksPage() {
               ) : sorted.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-slate-500">
-                    {search ? 'No matching tracks' : 'No missing tracks'}
+                    {loadError ? 'Could not load tracks' : search ? 'No matching tracks' : 'No missing tracks'}
                   </td>
                 </tr>
               ) : (

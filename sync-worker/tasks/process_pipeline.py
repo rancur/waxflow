@@ -305,18 +305,59 @@ def _check_existing_by_isrc(db_path: str, track: dict) -> dict | None:
         # candidate MUST be confirmed with the word-boundary-aware _titles_match /
         # _artists_match before it is accepted. (Bug: the 2026 Bonobo single
         # "Drift" was wrongly matched to the file "Bonobo - Drifting".)
+        #
+        # DURATION GATE (2.13.0). Title and artist agreeing does NOT mean the file is
+        # the same RECORDING — an extended mix, a radio edit, a live take and a remix
+        # all share a title and an artist. Without this check the pipeline accepted
+        # whichever edit happened to be on disk, then the downstream verify step
+        # rejected it for a duration mismatch and parked it as an error. That is what
+        # produced the "fingerprint mismatch" bucket: 108 tracks matched here, none of
+        # them a fingerprint problem.
+        #
+        # Measured on the live library across 265 such matches: 155 land within 5s
+        # (correct, mastering variance) and 110 exceed it, of which 95 are more than
+        # 15s out. 5s separates the two populations cleanly.
         if title and artist:
             title_prefix = title[:15]
             artist_first = artist.split(",")[0].strip()
             rows = conn.execute(
-                "SELECT file_path, title, artist FROM file_index WHERE title LIKE ? AND artist LIKE ?",
+                """SELECT file_path, title, artist, duration_seconds
+                   FROM file_index WHERE title LIKE ? AND artist LIKE ?""",
                 (f"{title_prefix}%", f"{artist_first}%"),
             ).fetchall()
             for row in rows:
-                if _titles_match(title, row[1] or "") and _artists_match(artist, row[2] or ""):
-                    return {"file_path": row[0], "match_type": "title_artist"}
+                if not (_titles_match(title, row[1] or "") and _artists_match(artist, row[2] or "")):
+                    continue
+                if not _durations_match(db_path, track, row[3], row[0]):
+                    continue
+                return {"file_path": row[0], "match_type": "title_artist"}
 
     return None
+
+
+def _durations_match(db_path: str, track: dict, file_seconds, file_path: str) -> bool:
+    """Is this file plausibly the same recording as the Spotify track?
+
+    FAILS OPEN when either duration is unknown: ~0.4% of indexed files have no
+    duration, and refusing those would regress matching for tracks that are fine.
+    The gate exists to catch the confident-but-wrong case, not to demand metadata.
+    """
+    spotify_ms = track.get("duration_ms")
+    if not spotify_ms or not file_seconds:
+        return True
+
+    tolerance = float(get_config(db_path, "match_duration_tolerance_seconds") or 5)
+    delta = abs((spotify_ms / 1000.0) - float(file_seconds))
+    if delta <= tolerance:
+        return True
+
+    log.info(
+        "Rejecting file-index match for track %d (%s - %s): duration differs by %.0fs "
+        "(spotify %.0fs, file %.0fs) — likely a different edit: %s",
+        track.get("id") or -1, track.get("artist"), track.get("title"), delta,
+        spotify_ms / 1000.0, float(file_seconds), file_path,
+    )
+    return False
 
 
 def _process_new(db_path: str):
@@ -639,11 +680,13 @@ def _check_existing_in_library(track: dict, db_path: str | None = None) -> dict 
                     # substrings ("Drift" -> "Drifting"); confirm each candidate
                     # with the word-boundary-aware matchers before accepting.
                     rows = conn.execute(
-                        "SELECT file_path, title, artist FROM file_index WHERE title LIKE ? AND artist LIKE ?",
+                        """SELECT file_path, title, artist, duration_seconds
+                           FROM file_index WHERE title LIKE ? AND artist LIKE ?""",
                         (f"%{title[:20]}%", f"%{artist.split(',')[0].strip()[:15]}%"),
                     ).fetchall()
                     for row in rows:
                         if (_titles_match(title, row[1] or "") and _artists_match(artist, row[2] or "")
+                                and _durations_match(db_path, track, row[3], row[0])
                                 and os.path.exists(row[0])):
                             return {"file_path": row[0]}
         except Exception:
@@ -2498,11 +2541,19 @@ def _trigger_lexicon_post_processing_batch(db_path: str, synced_count: int):
 
     Non-fatal: logs warnings but never fails the pipeline.
     """
-    if get_config(db_path, "auto_analyze_enabled") == "0":
-        return
-
     actions_csv = get_config(db_path, "lexicon_post_processing") or "analyze,cues,tags,cloud"
     enabled_actions = {a.strip() for a in actions_csv.split(",") if a.strip()}
+
+    # auto_analyze_enabled governs BPM/key ANALYSIS -- that is what the setting says
+    # it does ("Run BPM/key detection after each track is organized"). It used to
+    # return early here, silently taking cue-point generation, tag lookup and cloud
+    # upload down with it, even though those have their own checkboxes in Settings.
+    # Turning off analysis now turns off exactly analysis.
+    if get_config(db_path, "auto_analyze_enabled") == "0":
+        enabled_actions.discard("analyze")
+
+    if not enabled_actions:
+        return
 
     # Map our config keys -> Lexicon /v1/control action names
     ACTION_MAP = {

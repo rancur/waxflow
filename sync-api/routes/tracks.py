@@ -4,9 +4,53 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
 from db import get_db
-from models import TrackOut, TrackUpdate, TrackListResponse, ParityResponse
+from error_categories import ERROR_CATEGORIES, canonical_category, categorize_error
+from models import (
+    BulkRetryRequest,
+    TrackOut,
+    TrackUpdate,
+    TrackListResponse,
+    ParityResponse,
+)
 
 router = APIRouter(prefix="/api", tags=["tracks"])
+
+# Putting a track back at the head of the pipeline. Shared by the single-track and
+# bulk retry paths so they can never reset different sets of columns.
+_RETRY_RESET_SQL = """
+    UPDATE tracks SET
+        pipeline_stage = 'new',
+        pipeline_error = NULL,
+        match_status = 'pending',
+        download_status = 'pending',
+        download_error = NULL,
+        download_attempts = 0,
+        verify_status = 'pending',
+        lexicon_status = 'pending',
+        updated_at = datetime('now')
+    WHERE id = ?
+"""
+
+
+def _clear_retry_blockers(conn, track_ids: list[int]) -> None:
+    """Remove the rows that would otherwise make a retry a no-op.
+
+    soulseek_fallback.already_attempted() treats ANY fallback_attempts row --
+    including a finalised, failed one -- as "we tried this already" and refuses to
+    re-queue the track. So resetting the pipeline columns alone produces a track
+    that marches straight back to the same error without ever re-contacting
+    Soulseek. Clearing the attempt history is what makes a retry mean anything.
+    """
+    if not track_ids:
+        return
+    conn.executemany(
+        "DELETE FROM fallback_attempts WHERE track_id = ?",
+        [(tid,) for tid in track_ids],
+    )
+    conn.executemany(
+        "DELETE FROM source_attempts WHERE track_id = ?",
+        [(tid,) for tid in track_ids],
+    )
 
 
 def row_to_track(row) -> dict:
@@ -34,6 +78,10 @@ async def list_tracks(
     verify_status: Optional[str] = Query(None, description="Filter by verify_status"),
     lexicon_status: Optional[str] = Query(None, description="Filter by lexicon_status"),
     search: Optional[str] = Query(None, description="Search title/artist/album"),
+    month: Optional[str] = Query(
+        None, pattern=r"^\d{4}-\d{2}$",
+        description="Filter by Spotify added month, YYYY-MM (dashboard drill-down)",
+    ),
     playlist_id: Optional[int] = Query(None, description="Filter by playlist"),
     sort_by: Optional[str] = Query(None, description="Column to sort by"),
     sort_dir: Optional[str] = Query("desc", description="Sort direction: asc or desc"),
@@ -64,6 +112,14 @@ async def list_tracks(
                 conditions.append("(t.title LIKE ? OR t.artist LIKE ? OR t.album LIKE ?)")
                 like = f"%{search}%"
                 params.extend([like, like, like])
+            if month:
+                # Half-open range rather than substr(spotify_added_at, 1, 7) = ?, so
+                # the index on spotify_added_at can actually be used. The regex on the
+                # query param is what makes this string arithmetic safe.
+                year, mon = int(month[:4]), int(month[5:7])
+                next_month = f"{year + 1:04d}-01" if mon == 12 else f"{year:04d}-{mon + 1:02d}"
+                conditions.append("t.spotify_added_at >= ? AND t.spotify_added_at < ?")
+                params.extend([f"{month}-01", f"{next_month}-01"])
 
             join_clause = ""
             if playlist_id is not None:
@@ -150,40 +206,10 @@ async def get_error_tracks():
                    ORDER BY title"""
             ).fetchall()
 
-            categories = {
-                "not_lossless": [],
-                "no_tidal_match": [],
-                "download_failed": [],
-                "lexicon_sync_failed": [],
-                "fingerprint_mismatch": [],
-                "other": [],
-            }
+            categories: dict[str, list] = {key: [] for key in ERROR_CATEGORIES}
             for r in errors:
                 t = row_to_track(r)
-                err = (t.get("pipeline_error") or "").lower()
-                verify_status = t.get("verify_status")
-                verify_codec = (t.get("verify_codec") or "").lower()
-
-                # Check verify_status and codec first for accurate not_lossless detection
-                # (Bug #31: lossy tracks were misclassified as download_failed)
-                if verify_codec in ("aac", "mp3"):
-                    categories["not_lossless"].append(t)
-                elif verify_status == "fail" and "not lossless" in err:
-                    categories["not_lossless"].append(t)
-                elif "not lossless" in err or "aac" in err or "mp3" in err:
-                    categories["not_lossless"].append(t)
-                elif "no tidal match" in err or "no match" in err or "not found on tidal" in err or "permanently unavailable" in err:
-                    categories["no_tidal_match"].append(t)
-                elif "geo-restricted" in err or "unavailable on tidal" in err:
-                    categories["download_failed"].append(t)
-                elif "download failed" in err or "download error" in err:
-                    categories["download_failed"].append(t)
-                elif "lexicon" in err:
-                    categories["lexicon_sync_failed"].append(t)
-                elif "fingerprint" in err or "mismatched" in err:
-                    categories["fingerprint_mismatch"].append(t)
-                else:
-                    categories["other"].append(t)
+                categories[categorize_error(t)].append(t)
 
             return {
                 "categories": categories,
@@ -195,22 +221,131 @@ async def get_error_tracks():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/tracks/errors/summary")
+async def get_error_summary():
+    """Counts only, for the nav badge.
+
+    The layout polls for a badge number every 30s; it used to call
+    /tracks/errors, which returns every errored track in full.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """SELECT pipeline_error, verify_status, verify_codec
+                   FROM tracks WHERE pipeline_stage = 'error'"""
+            ).fetchall()
+            ignored = conn.execute(
+                "SELECT COUNT(*) FROM tracks WHERE pipeline_stage = 'ignored'"
+            ).fetchone()[0]
+
+            by_category = {key: 0 for key in ERROR_CATEGORIES}
+            for r in rows:
+                by_category[categorize_error(dict(r))] += 1
+
+            return {
+                "total_errors": len(rows),
+                "total_ignored": ignored,
+                "by_category": by_category,
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/tracks/bulk-ignore")
 async def bulk_ignore_tracks(track_ids: list[int]):
     """Ignore multiple tracks at once."""
     try:
         with get_db() as conn:
-            for track_id in track_ids:
-                conn.execute(
-                    """UPDATE tracks SET pipeline_stage = 'ignored', is_protected = 1,
-                       updated_at = datetime('now') WHERE id = ?""",
-                    (track_id,),
-                )
-                conn.execute(
-                    "INSERT INTO activity_log (event_type, track_id, message) VALUES (?, ?, ?)",
-                    ("track_ignored", track_id, f"Track {track_id} bulk-ignored by user"),
-                )
+            conn.executemany(
+                """UPDATE tracks SET pipeline_stage = 'ignored', is_protected = 1,
+                   updated_at = datetime('now') WHERE id = ?""",
+                [(tid,) for tid in track_ids],
+            )
+            # One summary row, not one per track: bulk-ignoring a category used to
+            # insert thousands of activity rows and bury the dashboard feed.
+            conn.execute(
+                "INSERT INTO activity_log (event_type, message, details) VALUES (?, ?, ?)",
+                (
+                    "pipeline_bulk_ignore",
+                    f"{len(track_ids)} track(s) bulk-ignored by user",
+                    json.dumps({"track_ids": track_ids[:500], "count": len(track_ids)}),
+                ),
+            )
         return {"status": "ok", "count": len(track_ids)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tracks/bulk-retry")
+async def bulk_retry_tracks(payload: BulkRetryRequest):
+    """Re-enter the pipeline for many tracks at once.
+
+    Accepts either explicit ids or a category name. Category mode resolves the
+    membership SERVER-SIDE using the same classifier the Errors page renders with,
+    so "Retry All 47" retries exactly those 47 -- and the client never has to POST
+    thousands of ids.
+
+    Protected/ignored tracks are skipped: ignoring something is a deliberate user
+    decision and a bulk retry should not silently undo it.
+    """
+    try:
+        with get_db() as conn:
+            if payload.track_ids:
+                rows = conn.execute(
+                    f"""SELECT * FROM tracks
+                        WHERE id IN ({','.join('?' * len(payload.track_ids))})""",
+                    payload.track_ids,
+                ).fetchall()
+            elif payload.category:
+                rows = conn.execute(
+                    "SELECT * FROM tracks WHERE pipeline_stage = 'error'"
+                ).fetchall()
+            else:
+                raise HTTPException(
+                    status_code=400, detail="Provide either track_ids or category"
+                )
+
+            wanted = canonical_category(payload.category) if payload.category else None
+            if wanted and wanted not in ERROR_CATEGORIES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown category '{payload.category}'. "
+                           f"Expected one of: {', '.join(ERROR_CATEGORIES)}",
+                )
+
+            eligible, skipped = [], 0
+            for r in rows:
+                t = row_to_track(r)
+                if t.get("is_protected") or t.get("pipeline_stage") == "ignored":
+                    skipped += 1
+                    continue
+                if wanted and categorize_error(t) != wanted:
+                    continue
+                eligible.append(t["id"])
+
+            eligible = eligible[: payload.limit]
+            if eligible:
+                conn.executemany(_RETRY_RESET_SQL, [(tid,) for tid in eligible])
+                _clear_retry_blockers(conn, eligible)
+                conn.execute(
+                    "INSERT INTO activity_log (event_type, message, details) VALUES (?, ?, ?)",
+                    (
+                        "pipeline_bulk_retry",
+                        f"{len(eligible)} track(s) re-entered the pipeline"
+                        + (f" (category: {wanted})" if wanted else ""),
+                        json.dumps(
+                            {
+                                "track_ids": eligible[:500],
+                                "count": len(eligible),
+                                "category": wanted,
+                            }
+                        ),
+                    ),
+                )
+
+        return {"status": "ok", "count": len(eligible), "skipped": skipped}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -355,20 +490,8 @@ async def retry_track(track_id: int):
             if not row:
                 raise HTTPException(status_code=404, detail="Track not found")
 
-            conn.execute(
-                """UPDATE tracks SET
-                    pipeline_stage = 'new',
-                    pipeline_error = NULL,
-                    match_status = 'pending',
-                    download_status = 'pending',
-                    download_error = NULL,
-                    download_attempts = 0,
-                    verify_status = 'pending',
-                    lexicon_status = 'pending',
-                    updated_at = datetime('now')
-                WHERE id = ?""",
-                (track_id,),
-            )
+            conn.execute(_RETRY_RESET_SQL, (track_id,))
+            _clear_retry_blockers(conn, [track_id])
             conn.execute(
                 "INSERT INTO activity_log (event_type, track_id, message) VALUES (?, ?, ?)",
                 ("pipeline_retry", track_id, f"Track {track_id} re-entered pipeline"),
