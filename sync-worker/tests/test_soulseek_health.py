@@ -58,10 +58,17 @@ class SoulseekHealthTest(unittest.TestCase):
             return sh.check("/tmp/x.db")
 
     def test_logged_in_is_ok(self):
-        status, _ = self._run(client=_FakeClient({"isLoggedIn": True, "username": "dj"}))
+        # Shape taken from a live slskd /api/v0/server response. Note there is no
+        # username field -- an earlier version reported "logged in as ?" because it
+        # asked for one.
+        status, _ = self._run(client=_FakeClient({
+            "isLoggedIn": True, "isConnected": True,
+            "address": "vps.slsknet.org", "state": "Connected, LoggedIn",
+        }))
         self.assertEqual(status, "ok")
         self.assertIs(self.recorded["ok"], True)
-        self.assertIn("dj", self.recorded["detail"])
+        self.assertIn("vps.slsknet.org", self.recorded["detail"])
+        self.assertNotIn("?", self.recorded["detail"])
 
     def test_running_but_logged_out_is_not_ok(self):
         # The failure this whole module exists to catch: slskd answers, so a naive

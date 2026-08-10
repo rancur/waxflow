@@ -93,8 +93,10 @@ def check(db_path: str) -> tuple[str, str]:
     latency = (time.monotonic() - t0) * 1000
 
     if state.get("isLoggedIn"):
-        username = state.get("username") or "?"
-        detail = f"logged in to Soulseek as {username}"
+        # slskd's /api/v0/server reports address/state/isLoggedIn -- there is no
+        # username field, so describe the connection rather than inventing one.
+        server = state.get("address") or "the Soulseek network"
+        detail = f"connected to {server} ({state.get('state') or 'LoggedIn'})"
         record(db_path, "ok", detail, True, latency)
         return "ok", detail
 

@@ -21,13 +21,19 @@ _SOULSEEK_STALE_AFTER_SECONDS = 900
 _SOULSEEK_INACTIVE = {"disabled", "not_configured"}
 
 
-def _soulseek_service(conn) -> ServiceHealth:
-    """Report the verdict last persisted by the worker's soulseek_health task."""
+def _soulseek_service() -> ServiceHealth:
+    """Report the verdict last persisted by the worker's soulseek_health task.
+
+    Opens its own connection rather than borrowing the caller's: the service-health
+    section of get_dashboard() runs AFTER the `with get_db() as conn:` block has
+    exited, so the handle in scope there is already closed.
+    """
     keys = ("soulseek_health", "soulseek_detail", "soulseek_checked_at", "soulseek_latency_ms")
-    rows = conn.execute(
-        f"SELECT key, value FROM app_config WHERE key IN ({','.join('?' * len(keys))})",
-        keys,
-    ).fetchall()
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT key, value FROM app_config WHERE key IN ({','.join('?' * len(keys))})",
+            keys,
+        ).fetchall()
     cfg = {r["key"]: r["value"] for r in rows}
 
     status = (cfg.get("soulseek_health") or "").strip()
@@ -165,7 +171,7 @@ async def get_dashboard():
 
         # Soulseek. The API has neither the slskd credentials nor the worker's client,
         # so it reports what the worker's soulseek_health probe last persisted.
-        services.append(_soulseek_service(conn))
+        services.append(_soulseek_service())
 
         return DashboardResponse(
             spotify_total=spotify_total,

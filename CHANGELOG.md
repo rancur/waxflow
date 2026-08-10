@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.13.2 — fix: /api/dashboard returned 500
+
+The service-health section of `get_dashboard()` runs *after* the
+`with get_db() as conn:` block has exited, so the connection still in lexical
+scope there is already closed. 2.13.0 added a Soulseek row that read from
+`app_config` using it, and the app's front page started returning:
+
+    {"detail":"Cannot operate on a closed database."}
+
+Nothing caught it. The unit tests passed, all four containers came up healthy,
+and `/api/admin/health` was green -- because none of them actually requested the
+page. **The dashboard endpoint had no test at all.** It has one now, and it
+reproduces the exact 500 when the fix is reverted.
+
+The health helper opens its own connection instead of borrowing one whose
+lifetime it does not control.
+
+Also: the Soulseek status detail claimed "logged in as ?" because slskd's
+`/api/v0/server` has no username field. It now reports the server address and
+connection state, which is what the response actually contains.
+
 ## 2.13.1 — fix: coverage measured only the first 1000 tracks
 
 Lexicon caps `GET /v1/tracks` at 1000 rows per request and rejects any larger
