@@ -1,6 +1,6 @@
 # Handoff — quality profiles, matching, and what's left
 
-**Written 2026-08-10. Live instance is on v2.17.0.** Everything described as shipped
+**Written 2026-08-10. Live instance is on v2.17.1.** Everything described as shipped
 is deployed and verified against the real library, not just tested.
 
 This document is written for a fresh agent picking the work up cold. Read
@@ -17,7 +17,9 @@ three of them contradict what the code's own comments used to claim.
 | Parity | 94.93% (5,163 / 5,439) |
 | Errors | 265 — `wrong_version` 129, `no_tidal_match` 57, `other` 70, `lexicon_sync_failed` 3, `not_lossless` 5, `download_failed` 1 |
 | Library scoring | 135 lossless, 43 at 320k, 7 24-bit, 4,978 not yet scored |
-| Automatic upgrades | **Off** (`relocation_enabled=0`) — deliberately, see below |
+| Automatic upgrades | **On** (`relocation_enabled=1`) — the rechecker stages; applying is still a deliberate manual step |
+| Relocator | Write path **verified** against a copy of the live DB (see below); has not yet applied a real staged upgrade |
+| Library scoring | Backfilling now, ~40 tracks/min. ~932 tracks have stale paths and are marked `missing-file` |
 
 Tests: 360 in `sync-worker`, 51 in `sync-api`, all passing. CI runs them on every
 push (`.github/workflows/tests.yml`).
@@ -104,41 +106,55 @@ drill-down, post-processing coverage, and CI that actually runs the tests.
 
 ## What is left
 
-### 1. Turn on automatic upgrades — the actual last mile
+### 1. Apply the first real upgrade — the last remaining step
 
-Everything is built and nothing is running, on purpose. `relocation_enabled=0`
-gates the whole chain: with it off the rechecker stages nothing and no hunts are
-queued.
+The chain is on and staging works. What has **not** happened is a real
+`Track.location` write against the live database.
 
-**Why it is off:** finding an upgrade that nothing can install is *worse* than not
-looking. `_lexicon_find_or_import` short-circuits on an existing
-`lexicon_track_id`, so the better file lands on disk unreferenced while Lexicon
-keeps playing the worse copy and disk usage grows. See
-`process_pipeline._upgrade_replacement_available`.
+The write path itself IS verified. It was exercised against an online `.backup`
+copy of the live 5,714-track database, on a real track with real cue points:
 
-**To finish it, in order:**
+    integrity_check      ok
+    fk violations        0
+    location changed     yes
+    locationUnique kept  yes   (CloudFile links depend on this)
+    cues                 4 -> 4
+    table counts         all unchanged
 
-1. Take a fresh backup: `scripts/backup-lexicon-db.sh` (works locally now — see
-   v2.14.1; `LEXICON_SSH=local NAS_SSH=nas-lan`).
-2. Set `relocation_enabled=1` in Settings.
-3. Let the rechecker run (6h timer, or lower `quality_upgrade_interval_seconds`).
-4. Confirm rows appear: `SELECT * FROM relocation_queue WHERE state='pending'`.
-5. Quit Lexicon.
-6. `scripts/apply-relocations.py` — dry run, read it carefully.
-7. `scripts/apply-relocations.py --apply --limit 5`, then verify **cue counts are
-   unchanged** and the upgraded tracks play.
-8. Full run.
+So the mechanism is proven; what remains is running it for real, which needs
+Lexicon quit and therefore a human:
 
-**This is the highest-risk thing left.** It writes to the Lexicon database and moves
-audio files. Every gate is in place, but it has never executed a real write — treat
-the first run as an experiment with a verified backup, not a routine deploy.
+1. `LEXICON_SSH=local NAS_SSH=nas-lan bash scripts/backup-lexicon-db.sh`
+2. Confirm something is staged:
+   `SELECT * FROM relocation_queue WHERE state='pending'`
+3. **Quit Lexicon.**
+4. `scripts/apply-relocations.py` — dry run, read the plan.
+5. `scripts/apply-relocations.py --apply --limit 5`, then check cue counts are
+   unchanged and the upgraded tracks play.
+6. Full run.
 
-### 2. Score the existing library
+Treat the first real run as an experiment with a verified backup, not a routine
+deploy. It moves audio files and writes to the library database.
 
-4,978 tracks have no `quality_tier` — scoring only happens as tracks pass through
-verification. The rechecker can't evaluate what it can't see, so a backfill pass is
-needed: probe each `complete` track, write `quality_tier`/`quality_score`/
-`quality_bit_rate`. Bounded batches; `quality.score_file()` does the work.
+Note the stranding guard in `process_pipeline._upgrade_replacement_available`:
+with `relocation_enabled=0`, hunts are not queued at all. That is deliberate --
+finding an upgrade nothing can install leaves the better file on disk unreferenced
+while Lexicon keeps playing the worse copy, because `_lexicon_find_or_import`
+short-circuits on the existing `lexicon_track_id`.
+
+### 2. Let the score backfill finish
+
+`quality_upgrade.backfill_scores()` drains a bounded batch each cycle and is
+running now. It matters because the rechecker cannot evaluate a track whose
+current quality is unknown, and 4,978 of 5,163 had no score.
+
+**~932 tracks are marked `missing-file`** — their `file_path` does not resolve in
+the container. That is a real, separate problem worth investigating: those tracks
+read as `complete` but their audio is not where the database says it is.
+
+Two operational settings were raised to drain the backlog faster and should be put
+back once it is done: `quality_score_batch` 800 (default 250) and
+`quality_upgrade_interval_seconds` 180 (default 21600).
 
 ### 3. The remaining errors
 
@@ -218,6 +234,14 @@ index after the guarded `ALTER TABLE`.
 ---
 
 ## How to work on this safely
+
+**Cutting a release:** the image workflow triggers on `release: published`, NOT on
+push. Committing a version bump without `gh release create` means no images are
+ever built and the update silently has nothing to pull.
+
+**Changing a task interval requires a worker restart.** `run_task` reads the
+interval when it sleeps, so a config change does not wake a task already sleeping
+its old interval — this looked exactly like the backfill silently stalling.
 
 **Deploying:** push a tag, wait for images, then `POST /api/admin/update`. Wait for
 the images **by tag**, not by polling the latest workflow run — `gh run list
