@@ -235,7 +235,7 @@ def init():
             ('metadata_fallback_enabled', '1'),
             ('metadata_fallback_batch', '8'),
             ('metadata_fallback_interval_seconds', '3600'),
-            ('musicbrainz_user_agent', 'WaxFlow/2.12 (https://github.com/rancur/waxflow)'),
+            ('musicbrainz_user_agent', 'WaxFlow/2.19 (https://github.com/rancur/waxflow)'),
             -- Acoustic-fingerprint fallback (tasks/acoustid_fallback.py). fpcalc is
             -- in the image; provide a free AcoustID key here + flip enabled to
             -- activate (both read live, no redeploy). OFF until provisioned.
