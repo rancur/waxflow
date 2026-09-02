@@ -38,7 +38,8 @@ from tasks.helpers import get_db  # noqa: E402
 
 
 def _db() -> str:
-    path = tempfile.mktemp(suffix=".db")
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
     conn = sqlite3.connect(path)
     conn.executescript(
         """

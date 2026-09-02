@@ -18,7 +18,8 @@ SYNC_API_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if SYNC_API_DIR not in sys.path:
     sys.path.insert(0, SYNC_API_DIR)
 
-_DB = tempfile.mktemp(suffix=".db")
+_DB_FD, _DB = tempfile.mkstemp(suffix=".db")
+os.close(_DB_FD)
 os.environ["SLS_DB_PATH"] = _DB
 
 import db as db_mod  # noqa: E402
