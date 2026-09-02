@@ -69,6 +69,11 @@ def _is_newer(latest: str, current: str) -> bool:
     """
     if not latest or not current:
         return False
+    # An unparseable current version ("unknown": image built without /app/VERSION)
+    # must never read as "older than everything" -- that made the scheduled check
+    # re-apply the same release every night. No information means no update.
+    if not current.lstrip("vV")[:1].isdigit() or not latest.lstrip("vV")[:1].isdigit():
+        return False
     return _version_tuple(latest) > _version_tuple(current)
 
 

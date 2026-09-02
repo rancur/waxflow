@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.19.2 — fix: the worker never knew its own version
+
+Follow-up to 2.19.1. Once the auto-update check actually ran, it logged
+`Update available: unknown -> 2.19.1`: the worker image is built from `./sync-worker`,
+which cannot `COPY` the repo-root `VERSION` file, so `/app/VERSION` never existed and
+`_is_newer("2.19.1", "unknown")` was True. At 3am that would have re-applied the
+current release every single night.
+
+- The release workflow (and `docker-compose build`) now pass `VERSION` as a build arg
+  and the worker Dockerfile bakes it into `/app/VERSION`.
+- `_is_newer` refuses to compare an unparseable current version — no information means
+  no update, never "older than everything". Test added.
+
 ## 2.19.1 — fix: the scheduled auto-update never ran
 
 `tasks/auto_update.py` (2.12.0) decides when to write the update signal — but it was

@@ -14,4 +14,10 @@ COPY . .
 RUN chmod +x entrypoint.sh
 RUN mkdir -p /app/data
 
+# /app/VERSION is what tasks/auto_update.py compares against the latest GitHub
+# release. This context is ./sync-worker, so the repo-root VERSION file cannot be
+# COPYed; the release workflow (and docker-compose) pass it as a build arg.
+ARG VERSION=unknown
+RUN echo "$VERSION" > /app/VERSION
+
 ENTRYPOINT ["./entrypoint.sh"]
