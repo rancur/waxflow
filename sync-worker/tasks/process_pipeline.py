@@ -472,6 +472,49 @@ def _durations_match(db_path: str | None, track: dict, file_seconds, file_path: 
     return False
 
 
+def _tombstone_blocks(db_path: str, track: dict, *, tidal_id=None, isrc=None,
+                      file_path=None, file_hash=None, via: str = "") -> bool:
+    """Same-crap-match guard (2.19.0).
+
+    If the candidate the matcher is about to accept names the same Tidal track, ISRC
+    or file as something the user deliberately DELETED from Lexicon (a live
+    tombstone — see tasks/lexicon_reconcile.py), do not auto-import it again for a
+    different like. Route the track to needs_import_review so a human decides.
+    Returns True when the track was diverted (caller must `continue`/return).
+    """
+    try:
+        from tasks.lexicon_reconcile import find_tombstone_collision
+        tb = find_tombstone_collision(
+            db_path, tidal_id=tidal_id, isrc=isrc, file_path=file_path,
+            file_hash=file_hash, exclude_track_id=track["id"],
+        )
+    except Exception as e:  # noqa: BLE001 — the guard must never break matching
+        log.warning("tombstone guard error (continuing): %s", e)
+        return False
+    if not tb:
+        return False
+    reason = (
+        f"tombstone_match: candidate via {via} collides with a track deleted in Lexicon "
+        f"(tombstone #{tb['id']}, {tb.get('reason')}, tidal={tb.get('tidal_id')}, "
+        f"isrc={tb.get('isrc')}) — held for review instead of re-importing"
+    )
+    update_track(
+        db_path, track["id"],
+        pipeline_stage="needs_import_review",
+        lexicon_status="skipped",
+        pipeline_error=reason,
+    )
+    log_activity(
+        db_path, "tombstone_match_review", track["id"],
+        f"Held for review — matches a track you deleted from Lexicon: "
+        f"{track.get('artist')} - {track.get('title')}",
+        {"tombstone_id": tb["id"], "via": via, "tidal_id": tidal_id, "isrc": isrc,
+         "file_path": file_path},
+    )
+    log.warning("Track %d: %s", track["id"], reason)
+    return True
+
+
 def _process_new(db_path: str):
     # One-time reset: move downloading tracks back to new for Lexicon re-check
     if get_config(db_path, "_lexicon_recheck_done") != "1":
@@ -492,6 +535,11 @@ def _process_new(db_path: str):
         try:
             # Check ISRC index first (fastest, most reliable)
             isrc_match = _check_existing_by_isrc(db_path, track)
+            if isrc_match and _tombstone_blocks(
+                db_path, track, file_path=isrc_match.get("file_path"),
+                isrc=track.get("isrc"), via=f"file_index_{isrc_match.get('match_type')}",
+            ):
+                continue
             if isrc_match and _is_likely_lossless(isrc_match.get("file_path", "")):
                 log.info(
                     "Track %d (%s - %s) found via %s in file index: %s",
@@ -552,6 +600,10 @@ def _process_new(db_path: str):
 
             # Check if track already exists in the music library on disk
             existing = _check_existing_in_library(track, db_path)
+            if existing and _tombstone_blocks(
+                db_path, track, file_path=existing.get("file_path"), via="library_existing",
+            ):
+                continue
             if existing and _is_likely_lossless(existing.get("file_path", "")):
                 log.info("Track %d (%s - %s) already exists: %s", track["id"], track["artist"], track["title"], existing["file_path"])
                 update_track(
@@ -1097,6 +1149,12 @@ def _match_track(db_path: str, track: dict):
                     matched = True
             except Exception as e:
                 log.warning("Title/artist search failed for track %d: %s", track_id, e)
+
+    if matched and tidal_id and _tombstone_blocks(
+        db_path, track, tidal_id=tidal_id, isrc=isrc if match_source == "isrc" else None,
+        via=f"tidal_{match_source}",
+    ):
+        return
 
     if matched and tidal_id:
         update_track(
@@ -2760,6 +2818,18 @@ def _add_to_recent_sync_playlist(db_path: str, lexicon_track_id: str | None, tra
         pass  # Non-fatal
 
 
+def _lexicon_available_now(db_path: str) -> bool:
+    """Cheap 'is it safe to talk to Lexicon right now' check shared by the
+    Lexicon-touching side tasks. Fails OPEN (True) if the probe itself errors so a
+    broken probe can never silently switch off post-processing."""
+    try:
+        from tasks.mac_availability import probe
+        return probe(db_path, record=False).lexicon_available
+    except Exception as e:  # noqa: BLE001
+        log.warning("availability probe failed (%s) — assuming available", e)
+        return True
+
+
 def _trigger_lexicon_post_processing_batch(db_path: str, synced_count: int):
     """Fire Lexicon control actions after a batch of tracks sync.
 
@@ -2771,6 +2841,14 @@ def _trigger_lexicon_post_processing_batch(db_path: str, synced_count: int):
     """
     actions_csv = get_config(db_path, "lexicon_post_processing") or "analyze,cues,tags,cloud"
     enabled_actions = {a.strip() for a in actions_csv.split(",") if a.strip()}
+
+    # Sleep-tolerance: don't fire control actions at a Mac that just went away
+    # (a batch can finish organizing right as the Mac sleeps). Silent skip — the
+    # imports themselves are already in Lexicon; post-processing catches up on the
+    # next synced batch.
+    if not _lexicon_available_now(db_path):
+        log.info("Lexicon post-processing skipped — Mac/Lexicon unavailable")
+        return
 
     # auto_analyze_enabled governs BPM/key ANALYSIS -- that is what the setting says
     # it does ("Run BPM/key detection after each track is organized"). It used to

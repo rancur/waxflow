@@ -13,7 +13,7 @@ three of them contradict what the code's own comments used to claim.
 
 | | |
 |---|---|
-| Version | 2.18.0 |
+| Version | 2.19.0 |
 | Parity | 94.93% (5,163 / 5,439) |
 | Errors | 265 — `wrong_version` 129, `no_tidal_match` 57, `other` 70, `lexicon_sync_failed` 3, `not_lossless` 5, `download_failed` 1 |
 | Automatic upgrades | **On and self-applying** for same-container upgrades (845 of 939 scored). Container changes (94) still stage for the manual relocator. |
@@ -41,6 +41,24 @@ to be rewritten — that still needs Lexicon quit, and has not been run for real
 ---
 
 ## What is built and shipped
+
+### Deleted-in-Lexicon tombstones + sleep-tolerance gating (v2.19.0)
+
+`tasks/lexicon_reconcile.py` runs every 15 min while the Mac is awake, lists the live
+Lexicon library and tombstones every complete track whose row is gone/archived:
+`ignored` + protected, a `tombstones` row (spotify/isrc/tidal/lexicon id/path/hash),
+NAS master moved to the share's Synology Recycle Bin (`/music/#recycle/...`, purged by
+WaxFlow after 30 d), `file_index` row dropped. Terminal: retry/unignore/bulk-retry/reject
+refuse (409); `POST /api/tracks/{id}/restore` is the only way back (Errors page →
+"Deleted in Lexicon" → Restore). The matcher diverts any candidate colliding with a live
+tombstone to `needs_import_review` (`_tombstone_blocks`). The canary records a sleeping
+Mac as advisory `mac_asleep` instead of paging; analyze/playlists/post-processing skip
+while unavailable. See `docs/superpowers/specs/2026-09-01-lexicon-deletion-tombstones-and-offline-hardening-design.md`.
+
+**Verify after deploy:** `SELECT COUNT(*) FROM tombstones` should reach ~34 within
+15 min of the Mac being awake, and `activity_log` should carry `lexicon_reconcile_pass`.
+Then check `/volume1/music/#recycle/Database/` holds the moved masters.
+
 
 ### Quality profile (v2.17.0)
 

@@ -618,6 +618,26 @@ def init():
         CREATE INDEX IF NOT EXISTS idx_relocation_state ON relocation_queue(state);
         CREATE INDEX IF NOT EXISTS idx_wanted_track ON wanted(track_id);
         CREATE INDEX IF NOT EXISTS idx_import_queue_state ON import_queue(state);
+        -- Deleted-in-Lexicon tombstones (2.19.0). Mirrors sync-worker/tasks/v3_schema.py.
+        CREATE TABLE IF NOT EXISTS tombstones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER REFERENCES tracks(id),
+            spotify_id TEXT,
+            isrc TEXT,
+            tidal_id TEXT,
+            lexicon_track_id TEXT,
+            file_path TEXT,
+            file_hash_sha256 TEXT,
+            reason TEXT NOT NULL,
+            trashed_path TEXT,
+            purge_after TEXT,
+            purged_at TEXT,
+            restored_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tombstones_track ON tombstones(track_id);
+        CREATE INDEX IF NOT EXISTS idx_tombstones_tidal ON tombstones(tidal_id);
+        CREATE INDEX IF NOT EXISTS idx_tombstones_isrc ON tombstones(isrc);
         -- tracks carried no index at all beyond its implicit PK one. These three
         -- back the dashboard month drill-down and the filters every list view uses.
         CREATE INDEX IF NOT EXISTS idx_tracks_spotify_added_at

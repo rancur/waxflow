@@ -53,6 +53,30 @@ def _clear_retry_blockers(conn, track_ids: list[int]) -> None:
     )
 
 
+def _live_tombstone(conn, track_id: int):
+    """The un-restored tombstones row for a track, or None. A tombstone marks a
+    track the user DELETED in Lexicon (tasks/lexicon_reconcile.py); it is terminal
+    for every re-arm path here — only /restore may reverse it."""
+    try:
+        return conn.execute(
+            """SELECT * FROM tombstones WHERE track_id = ? AND restored_at IS NULL
+               ORDER BY id DESC LIMIT 1""",
+            (track_id,),
+        ).fetchone()
+    except Exception:  # table absent on a pre-2.19 DB the worker hasn't migrated yet
+        return None
+
+
+def _is_tombstoned(conn, track: dict) -> bool:
+    return track.get("pipeline_stage") == "ignored" and _live_tombstone(conn, track["id"]) is not None
+
+
+_TOMBSTONE_REFUSAL = (
+    "This track was deleted in Lexicon and is tombstoned so it is never re-downloaded "
+    "or re-imported. Use POST /api/tracks/{id}/restore to deliberately bring it back."
+)
+
+
 def row_to_track(row) -> dict:
     d = dict(row)
     if "is_protected" in d:
@@ -211,11 +235,31 @@ async def get_error_tracks():
                 t = row_to_track(r)
                 categories[categorize_error(t)].append(t)
 
+            # Deleted-in-Lexicon tombstones live in 'ignored' too, but they are a
+            # different thing from a user dismissal: split them out so the page can
+            # show them with Restore instead of Un-ignore.
+            deleted_in_lexicon: list[dict] = []
+            plain_ignored: list[dict] = []
+            for r in ignored:
+                t = row_to_track(r)
+                tb = _live_tombstone(conn, t["id"])
+                if tb is not None:
+                    t["tombstone"] = {
+                        "id": tb["id"], "reason": tb["reason"],
+                        "trashed_path": tb["trashed_path"], "purge_after": tb["purge_after"],
+                        "created_at": tb["created_at"],
+                    }
+                    deleted_in_lexicon.append(t)
+                else:
+                    plain_ignored.append(t)
+
             return {
                 "categories": categories,
-                "ignored": [row_to_track(r) for r in ignored],
+                "ignored": plain_ignored,
+                "deleted_in_lexicon": deleted_in_lexicon,
                 "total_errors": len(errors),
-                "total_ignored": len(ignored),
+                "total_ignored": len(plain_ignored),
+                "total_deleted_in_lexicon": len(deleted_in_lexicon),
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -463,9 +507,11 @@ async def ignore_track(track_id: int):
 async def unignore_track(track_id: int):
     try:
         with get_db() as conn:
-            row = conn.execute("SELECT id FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Track not found")
+            if _is_tombstoned(conn, row_to_track(row)):
+                raise HTTPException(status_code=409, detail=_TOMBSTONE_REFUSAL)
             conn.execute(
                 """UPDATE tracks SET pipeline_stage = 'new', is_protected = 0,
                    pipeline_error = NULL, updated_at = datetime('now') WHERE id = ?""",
@@ -489,6 +535,8 @@ async def retry_track(track_id: int):
             row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Track not found")
+            if _is_tombstoned(conn, row_to_track(row)):
+                raise HTTPException(status_code=409, detail=_TOMBSTONE_REFUSAL)
 
             conn.execute(_RETRY_RESET_SQL, (track_id,))
             _clear_retry_blockers(conn, [track_id])
@@ -499,6 +547,67 @@ async def retry_track(track_id: int):
 
             row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
             return TrackOut(**row_to_track(row))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tracks/{track_id}/restore")
+async def restore_track(track_id: int):
+    """Deliberately reverse a deleted-in-Lexicon tombstone.
+
+    Moves the NAS master back out of the share's recycle bin if it is still there,
+    closes the tombstone (restored_at), and re-enters the track from 'new' so the
+    normal pipeline re-resolves it. This is the ONLY way a tombstoned track comes
+    back — retry / unignore / bulk-retry / reject all refuse.
+    """
+    import os
+    import shutil
+    from datetime import datetime, timezone
+
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Track not found")
+            tb = _live_tombstone(conn, track_id)
+            if tb is None:
+                raise HTTPException(status_code=409, detail="Track has no live tombstone to restore")
+
+            restored_file = None
+            trashed, original = tb["trashed_path"], tb["file_path"]
+            if trashed and original and os.path.isfile(trashed):
+                try:
+                    os.makedirs(os.path.dirname(original), exist_ok=True)
+                    shutil.move(trashed, original)
+                    restored_file = original
+                except OSError as e:
+                    # Not fatal: the pipeline re-sources the track instead.
+                    conn.execute(
+                        "INSERT INTO activity_log (event_type, track_id, message) VALUES (?, ?, ?)",
+                        ("tombstone_restore_file_failed", track_id,
+                         f"Could not move {trashed} back: {e}"),
+                    )
+
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("UPDATE tombstones SET restored_at = ? WHERE id = ?", (now, tb["id"]))
+            conn.execute(_RETRY_RESET_SQL, (track_id,))
+            conn.execute(
+                """UPDATE tracks SET is_protected = 0, lexicon_track_id = NULL, file_path = ?,
+                   updated_at = datetime('now') WHERE id = ?""",
+                (restored_file, track_id),
+            )
+            _clear_retry_blockers(conn, [track_id])
+            conn.execute(
+                "INSERT INTO activity_log (event_type, track_id, message, details) VALUES (?, ?, ?, ?)",
+                ("tombstone_restored", track_id,
+                 "Tombstone restored by user — track re-entered the pipeline"
+                 + (" (file recovered from recycle bin)" if restored_file else ""),
+                 json.dumps({"tombstone_id": tb["id"], "restored_file": restored_file})),
+            )
+            row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            return {"status": "ok", "restored_file": restored_file, "track": row_to_track(row)}
     except HTTPException:
         raise
     except Exception as e:

@@ -87,8 +87,10 @@ const CATEGORIES: CategoryInfo[] = [
 interface ErrorsResponse {
   categories: Record<string, ErrorTrack[]>
   ignored: ErrorTrack[]
+  deleted_in_lexicon?: ErrorTrack[]
   total_errors: number
   total_ignored: number
+  total_deleted_in_lexicon?: number
 }
 
 export default function ErrorsPage() {
@@ -97,6 +99,7 @@ export default function ErrorsPage() {
   const [search, setSearch] = useState('')
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
   const [ignoredExpanded, setIgnoredExpanded] = useState(false)
+  const [deletedExpanded, setDeletedExpanded] = useState(false)
   const [selectedTracks, setSelectedTracks] = useState<Set<number>>(new Set())
   const [actionLoading, setActionLoading] = useState<Set<number>>(new Set())
   const [bulkLoading, setBulkLoading] = useState<string | null>(null)
@@ -156,6 +159,24 @@ export default function ErrorsPage() {
       fetchData()
     } catch {
       setToast('Failed to ignore track')
+    } finally {
+      setActionLoading(prev => {
+        const next = new Set(prev)
+        next.delete(trackId)
+        return next
+      })
+    }
+  }
+
+  const handleRestore = async (trackId: number) => {
+    if (!confirm('Restore this track? WaxFlow will move its file back out of the recycle bin (if still there) and re-import it into Lexicon.')) return
+    setActionLoading(prev => new Set(prev).add(trackId))
+    try {
+      await apiFetch(`/tracks/${trackId}/restore`, { method: 'POST' })
+      setToast('Track restored — re-entering the pipeline')
+      await fetchData()
+    } catch {
+      setToast('Failed to restore track')
     } finally {
       setActionLoading(prev => {
         const next = new Set(prev)
@@ -292,7 +313,7 @@ export default function ErrorsPage() {
     return new Date(dateStr).toLocaleDateString()
   }
 
-  const renderTrackRow = (track: ErrorTrack, options: { showIgnore?: boolean; showUnignore?: boolean; showSearchLinks?: boolean }) => {
+  const renderTrackRow = (track: ErrorTrack, options: { showIgnore?: boolean; showUnignore?: boolean; showRestore?: boolean; showSearchLinks?: boolean }) => {
     const isLoading = actionLoading.has(track.id)
     return (
       <tr key={track.id} className="hover:bg-slate-800/40 transition-colors">
@@ -340,6 +361,16 @@ export default function ErrorsPage() {
                   {isLoading ? '...' : 'Ignore'}
                 </button>
               </>
+            )}
+            {options.showRestore && (
+              <button
+                onClick={() => handleRestore(track.id)}
+                disabled={actionLoading.has(track.id)}
+                className="text-xs px-2.5 py-1 rounded-lg border border-emerald-600/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+                title="Bring this track back: un-trash its file and re-import it"
+              >
+                Restore
+              </button>
             )}
             {options.showUnignore && (
               <button
@@ -487,6 +518,8 @@ export default function ErrorsPage() {
   const totalErrors = data?.total_errors ?? 0
   const totalIgnored = data?.total_ignored ?? 0
   const filteredIgnored = filterTracks(data?.ignored || [])
+  const totalDeleted = data?.total_deleted_in_lexicon ?? 0
+  const filteredDeleted = filterTracks(data?.deleted_in_lexicon || [])
 
   return (
     <div className="space-y-6">
@@ -530,6 +563,59 @@ export default function ErrorsPage() {
           <div className="space-y-4">
             {CATEGORIES.map(cat => renderCategory(cat))}
           </div>
+
+          {/* Deleted in Lexicon (tombstones) */}
+          {totalDeleted > 0 && (
+            <div className="rounded-xl border border-rose-500/30 overflow-hidden mt-8">
+              <button
+                onClick={() => setDeletedExpanded(!deletedExpanded)}
+                className="w-full flex items-center justify-between px-5 py-4 bg-rose-500/10 hover:brightness-110 transition-all"
+              >
+                <div className="flex items-center gap-3">
+                  <svg
+                    className={`w-4 h-4 text-rose-400 transition-transform ${deletedExpanded ? 'rotate-90' : ''}`}
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                  </svg>
+                  <h3 className="text-sm font-semibold text-rose-400">Deleted in Lexicon</h3>
+                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-rose-500/30 bg-rose-500/10 text-rose-400">
+                    {filteredDeleted.length}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 hidden sm:block">You deleted these in Lexicon — WaxFlow will never re-download or re-import them. Files sit in the NAS recycle bin for 30 days.</p>
+              </button>
+
+              {deletedExpanded && (
+                <div className="bg-slate-900/40">
+                  {filteredDeleted.length === 0 ? (
+                    <p className="px-5 py-8 text-center text-sm text-slate-600">
+                      {search ? 'No matching deleted tracks' : 'No deleted tracks'}
+                    </p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm text-left">
+                        <thead>
+                          <tr className="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-500">
+                            <th className="px-4 py-2">Title</th>
+                            <th className="px-4 py-2">Artist</th>
+                            <th className="px-4 py-2">Error</th>
+                            <th className="px-4 py-2">Added</th>
+                            <th className="px-4 py-2 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/50">
+                          {filteredDeleted.map(track => renderTrackRow(track, {
+                            showRestore: true,
+                          }))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Ignored section */}
           {totalIgnored > 0 && (

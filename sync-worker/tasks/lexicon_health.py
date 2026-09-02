@@ -83,8 +83,8 @@ def record_import_health(
         set_config(db_path, MOUNT_OK_KEY, "1")
     elif ok is False:
         set_config(db_path, MOUNT_OK_KEY, "0")
-    else:
-        set_config(db_path, MOUNT_OK_KEY, "")
+    # ok is None (advisory, e.g. mac_asleep): leave the last authoritative mount
+    # verdict alone — a sleeping Mac says nothing about whether its mount is fine.
 
     is_critical = status in CRITICAL_STATUSES
     if not is_critical:
@@ -227,6 +227,16 @@ def _stuck_empty_imports(db_path: str) -> tuple[int, int]:
     return count, oldest
 
 
+def _mac_state(db_path: str) -> str:
+    """'asleep' | 'lexicon_down' | 'available' | 'unknown' — from the shared
+    availability detector, without recording a sample."""
+    try:
+        from tasks.mac_availability import probe
+        return probe(db_path, record=False).state
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
 def run_canary(db_path: str) -> dict:
     """Proactive import-health self-check for the watch-folder flow.
 
@@ -247,6 +257,16 @@ def run_canary(db_path: str) -> dict:
     #    and an unreachable Lexicon means the whole import surface is down.
     lex_ok, lex_detail = _check_lexicon_reachable(api)
     if not lex_ok:
+        # Sleep-tolerance (2.19.0): an unreachable Lexicon is only an OUTAGE when the
+        # Mac is up and Lexicon is not answering. A Mac that is asleep / shut down is
+        # the EXPECTED, self-healing case the offline queue exists for — record it
+        # as advisory (never paged, never flips lexicon_mount_ok to 0) so a night
+        # with the Mac off does not page anyone or mask a real mount problem later.
+        mac_state = _mac_state(db_path)
+        if mac_state == "asleep":
+            detail = f"Mac asleep/off — {lex_detail}. Imports are held in the offline queue."
+            record_import_health(db_path, "mac_asleep", detail, ok=None, source="canary")
+            return {"status": "mac_asleep", "detail": detail, "ok": None}
         detail = f"{lex_detail}. New imports/links will fail."
         record_import_health(db_path, "lexicon_unreachable", detail, ok=False, source="canary")
         return {"status": "lexicon_unreachable", "detail": detail, "ok": False}
