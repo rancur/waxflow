@@ -42,6 +42,7 @@ services:
       context: ./sync-worker
       args:
         - GIT_SHA=${GIT_SHA:-unknown}
+        - VERSION=${VERSION:-unknown}
     image: ${WAXFLOW_REGISTRY:-ghcr.io/rancur}/waxflow-worker:${WAXFLOW_IMAGE_TAG:-${VERSION:-latest}}
     container_name: waxflow-worker
     ports:

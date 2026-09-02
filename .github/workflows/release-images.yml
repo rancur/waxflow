@@ -58,6 +58,12 @@ jobs:
             web)    echo "context=./sync-web" >> "$GITHUB_OUTPUT"; echo "dockerfile=./sync-web/Dockerfile" >> "$GITHUB_OUTPUT" ;;
           esac
           echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          # Baked into every image as /app/VERSION. The worker build context is
+          # ./sync-worker, which cannot COPY the repo-root VERSION file -- without
+          # this arg its auto-update check read "unknown" and would re-apply the
+          # same release every night (2.19.2). The merge job still refuses to
+          # publish if this disagrees with the release tag.
+          echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -76,6 +82,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           build-args: |
             GIT_SHA=${{ github.sha }}
+            VERSION=${{ steps.ctx.outputs.version }}
           outputs: type=image,name=ghcr.io/${{ steps.ctx.outputs.owner }}/waxflow-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}

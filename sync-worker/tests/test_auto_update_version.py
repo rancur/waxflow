@@ -55,6 +55,12 @@ class VersionCompareTest(unittest.TestCase):
         self.assertEqual(_version_tuple("2.11.0-rc1"), (2, 11, 0))
         self.assertTrue(_is_newer("2.12.0-beta", "2.11.0"))
 
+    def test_unknown_current_is_never_newer(self):
+        # Worker image built without /app/VERSION reports "unknown". Treating that
+        # as "older than everything" re-applied the same release nightly (2.19.2).
+        self.assertFalse(_is_newer("2.19.1", "unknown"))
+        self.assertFalse(_is_newer("unknown", "2.19.1"))
+
     def test_missing_or_empty_is_never_newer(self):
         for latest, current in (("", "2.11.0"), ("2.11.0", ""), ("", ""), (None, "2.11.0")):
             self.assertFalse(_is_newer(latest, current), f"{latest!r} vs {current!r}")
