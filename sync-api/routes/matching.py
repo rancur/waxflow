@@ -317,6 +317,10 @@ async def reject_match(track_id: int):
             row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Track not found")
+            # A deleted-in-Lexicon tombstone is terminal; rejecting would re-arm it.
+            from routes.tracks import _is_tombstoned, _TOMBSTONE_REFUSAL, row_to_track as _rtt
+            if _is_tombstoned(conn, _rtt(row)):
+                raise HTTPException(status_code=409, detail=_TOMBSTONE_REFUSAL)
 
             conn.execute(
                 """UPDATE tracks SET

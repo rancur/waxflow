@@ -696,6 +696,17 @@ def _run_create_playlists(db_path: str):
     rebuild = get_config(db_path, "auto_playlists_rebuild")
     force = rebuild == "1"
 
+    # Sleep-tolerance: the whole job is Lexicon API writes. While the Mac sleeps,
+    # leave last_run / the rebuild flag untouched so the run happens on wake.
+    try:
+        from tasks.mac_availability import probe
+        avail = probe(db_path, record=False)
+        if not avail.lexicon_available:
+            log.debug("Auto-playlists: skipping, Mac is %s", avail.state)
+            return
+    except Exception as e:  # noqa: BLE001 — fail open
+        log.warning("Auto-playlists: availability probe failed (%s) — continuing", e)
+
     if not force:
         # Check if enough time has passed since last run
         last_run_str = get_config(db_path, "auto_playlists_last_run") or "0"

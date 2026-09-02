@@ -35,7 +35,7 @@ log = logging.getLogger("worker.v3_schema")
 # Bumped whenever the additive v3 schema surface changes. Recorded in
 # direct_write_audit rows so a written-back change can be tied to the schema it
 # was produced under. Phase A == 1. Phase 3 sleep-tolerance catch-up counter == 2.
-V3_SCHEMA_VERSION = 2
+V3_SCHEMA_VERSION = 3
 
 # The new tables introduced by the v3 foundation. Exposed for tests + tooling.
 V3_TABLES = (
@@ -46,6 +46,7 @@ V3_TABLES = (
     "plex_sync",
     "direct_write_audit",
     "mac_availability",
+    "tombstones",
 )
 
 # The new (nullable) columns added to the existing ``tracks`` table.
@@ -218,6 +219,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_relocation_one_pending
 CREATE INDEX IF NOT EXISTS idx_relocation_state ON relocation_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_track ON wanted(track_id);
 CREATE INDEX IF NOT EXISTS idx_import_queue_state ON import_queue(state);
+
+-- Deleted-in-Lexicon tombstones (2.19.0, tasks/lexicon_reconcile.py). One row per
+-- deletion the reconciler observed, keyed by everything a future re-match could
+-- collide on (spotify/isrc/tidal/lexicon id/file). trashed_path is where the NAS
+-- master went (the share's Synology Recycle Bin); purge_after bounds how long it
+-- stays recoverable; restored_at closes the tombstone on an explicit user Restore.
+CREATE TABLE IF NOT EXISTS tombstones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id INTEGER REFERENCES tracks(id),
+    spotify_id TEXT,
+    isrc TEXT,
+    tidal_id TEXT,
+    lexicon_track_id TEXT,
+    file_path TEXT,
+    file_hash_sha256 TEXT,
+    reason TEXT NOT NULL,
+    trashed_path TEXT,
+    purge_after TEXT,
+    purged_at TEXT,
+    restored_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tombstones_track ON tombstones(track_id);
+CREATE INDEX IF NOT EXISTS idx_tombstones_tidal ON tombstones(tidal_id);
+CREATE INDEX IF NOT EXISTS idx_tombstones_isrc ON tombstones(isrc);
 """
 
 # Indexes on `tracks`, which this module does NOT own -- sync-api's init_db.py

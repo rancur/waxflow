@@ -1,5 +1,85 @@
 # Changelog
 
+## 2.19.0 — deleting a track in Lexicon now means it
+
+Two things the user asked to be *sure* of, measured first.
+
+### Deleted in Lexicon → tombstone (new)
+
+Deleting a track inside Lexicon was invisible to WaxFlow. The row stayed `complete`,
+pointing at a `Track.id` Lexicon no longer had — which is why nothing re-downloaded
+it *immediately*, and also why every re-arm path (Retry, Bulk Retry, the hunter, the
+catch-up pass, `recheck-mappings --apply`, Un-ignore) would cheerfully re-download and
+re-import the exact match the user had just thrown out. The quality rechecker kept
+"upgrading" it. `file_index` kept offering the NAS master to the next like of that song.
+
+Worse: this install has Lexicon set to delete-from-disk, so the Mac copy went — but
+the NAS master survived (the NAS→Mac rsync is pull-only, no `--delete`), and the
+6-hourly reconcile copied the deleted file **straight back onto the Mac**.
+
+Measured on the live library before writing any code: **34** complete tracks pointed
+at Lexicon rows that no longer exist; **27** still had a NAS master waiting to be
+resurrected. (The same 34 `recheck-mappings.py` reported on Aug 10 and deliberately
+left alone.)
+
+`tasks/lexicon_reconcile.py` (default on, every 15 min, **only while the Mac is
+awake**) pages the live library and, for every complete track whose Lexicon row is
+gone or archived:
+
+- parks it in `ignored` + `is_protected`, error `deleted_in_lexicon:<ts>`;
+- writes a `tombstones` row keyed by everything a future match could collide on
+  (spotify id, ISRC, Tidal id, Lexicon id, path, hash);
+- moves the NAS master into the share's **Synology Recycle Bin**
+  (`/music/#recycle/<same relative path>`) — the Mac sync already excludes
+  `#recycle`, so nothing can copy it back — and forgets it in `file_index`.
+  WaxFlow purges only files it trashed itself, after 30 days. A `lexicon_existing`
+  track (a library file WaxFlow only linked, never downloaded) keeps its file.
+
+**A tombstone is terminal.** `/retry`, `/unignore`, `/bulk-retry` and `/reject` refuse
+it (409); the worker's re-arm selectors never see `ignored`. The only way back is the
+new `POST /api/tracks/{id}/restore`, which un-trashes the file and re-enters the
+pipeline. The Errors page gains a **Deleted in Lexicon** section with a Restore button.
+
+**Same-crap-match guard.** When the matcher is about to accept a Tidal track, ISRC or
+file that collides with a live tombstone *for a different like*, it routes the track to
+`needs_import_review` instead of auto-importing — the user decides, not the matcher.
+
+Safety: never writes to Lexicon; a page failure mid-listing aborts with zero writes; a
+library smaller than `lexicon_reconcile_min_library` (100) refuses to run; at most
+`tombstone_batch` (200) tombstones per pass.
+
+### Sleep tolerance — the parts that were not gated
+
+The offline queue (2.10.x) already holds imports while the Mac sleeps — but four
+Lexicon-touching tasks were not availability-gated and produced pages/noise on a
+deliberately-off Mac:
+
+- `lexicon_health` canary: a Mac that is **asleep/off** is now recorded as advisory
+  `mac_asleep` (never paged, never flips `lexicon_mount_ok`); `lexicon_down` (Mac up,
+  Lexicon quit) still pages as before.
+- `analyze_tracks`, `create_playlists` and the post-import `/v1/control` batch skip
+  quietly while unavailable and pick up on wake. All fail open if the probe errors.
+
+### Ops findings worth recording
+
+- The NAS `waxflow-worker` container had been **stopped since Aug 23** (explicit
+  `docker stop`; `unless-stopped` does not revive that). Nothing had synced for 9 days.
+  Restarted Sep 1; 19 backlogged likes flowed through within minutes.
+- Local checkout was 26 commits behind origin.
+
+### Config keys (read live)
+`lexicon_reconcile_enabled` (1), `lexicon_reconcile_interval_seconds` (900),
+`lexicon_reconcile_min_library` (100), `tombstone_trash_enabled` (1),
+`tombstone_purge_days` (30), `tombstone_batch` (200).
+
+### Schema (additive, mirrored in `init_db.py` + `v3_schema.py`, `V3_SCHEMA_VERSION` → 3)
+`tombstones` table + indexes on track_id / tidal_id / isrc.
+
+### Tests
+`sync-worker/tests/test_lexicon_reconcile.py` (16), `sync-api/tests/test_tombstones.py`
+(5), two new canary cases. 387 worker + 56 API passing.
+
+
 ## 2.18.0 — upgrades that apply themselves
 
 Replacing a file meant rewriting Lexicon's `Track.location`, which meant quitting

@@ -457,6 +457,17 @@ def _analyze_batch(db_path: str):
     if enabled == "0":
         return
 
+    # Sleep-tolerance: GET /v1/tracks + PATCH per track need the Mac awake. Skip
+    # quietly while it sleeps rather than logging a failed fetch every hour.
+    try:
+        from tasks.mac_availability import probe
+        avail = probe(db_path, record=False)
+        if not avail.lexicon_available:
+            log.debug("analyze_tracks: skipping, Mac is %s", avail.state)
+            return
+    except Exception as e:  # noqa: BLE001 — fail open
+        log.warning("analyze_tracks: availability probe failed (%s) — continuing", e)
+
     batch_size = 20
     try:
         val = get_config(db_path, "analyze_batch_size")

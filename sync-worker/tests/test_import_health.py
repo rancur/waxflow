@@ -198,6 +198,9 @@ class _CanaryHarness:
         if config:
             self.config.update(config)
         self.recorded = []
+        # What the shared availability detector would say. Default: Mac is UP but
+        # Lexicon is not answering -> a real outage, not sleep.
+        self.mac_state = "lexicon_down"
 
     def get_config(self, db_path, key):
         return self.config.get(key)
@@ -211,7 +214,8 @@ class _CanaryHarness:
              mock.patch.object(lh, "_check_watch_dir_writable",
                                return_value=(self.write_ok, "watch detail")), \
              mock.patch.object(lh, "_check_lexicon_reachable",
-                               return_value=(self.lexicon_ok, "lexicon detail")):
+                               return_value=(self.lexicon_ok, "lexicon detail")), \
+             mock.patch.object(lh, "_mac_state", return_value=self.mac_state):
             return lh.run_canary("/tmp/x.db")
 
 
@@ -236,6 +240,27 @@ class TestCanary(unittest.TestCase):
         self.assertEqual(out["status"], "lexicon_unreachable")
         self.assertFalse(out["ok"])
         self.assertEqual(h.recorded[-1]["ok"], False)
+
+    def test_mac_asleep_is_advisory_not_critical(self):
+        # Sleep-tolerance: the Mac being asleep/off is the EXPECTED case the offline
+        # queue handles. It must not page, and must not flip the mount verdict.
+        h = _CanaryHarness(write_ok=True, lexicon_ok=False)
+        h.mac_state = "asleep"
+        out = h.run()
+        self.assertEqual(out["status"], "mac_asleep")
+        self.assertIsNone(out["ok"])
+        self.assertNotIn("mac_asleep", lh.CRITICAL_STATUSES)
+        self.assertIsNone(h.recorded[-1]["ok"])
+
+    def test_advisory_status_leaves_mount_verdict_alone(self):
+        # record_import_health(ok=None) must not overwrite lexicon_mount_ok.
+        cfg = {lh.MOUNT_OK_KEY: "1"}
+        with mock.patch.object(lh, "get_config", side_effect=lambda d, k: cfg.get(k)), \
+             mock.patch.object(lh, "set_config", side_effect=lambda d, k, v: cfg.__setitem__(k, v)), \
+             mock.patch.object(lh, "log_activity"), \
+             mock.patch.object(lh, "_post_webhook"):
+            lh.record_import_health("/tmp/x.db", "mac_asleep", "zzz", ok=None, source="canary")
+        self.assertEqual(cfg[lh.MOUNT_OK_KEY], "1")
 
     def test_writability_check_is_evaluated_before_lexicon(self):
         # If the staging dir is unwritable, that is reported even when Lexicon is

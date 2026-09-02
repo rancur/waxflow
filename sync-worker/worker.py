@@ -30,6 +30,7 @@ from tasks.lossless_upgrade import run_lossless_upgrade
 from tasks.plex_sync import plex_sync
 from tasks.mac_availability import sample_availability
 from tasks.import_catchup import import_catchup
+from tasks.lexicon_reconcile import lexicon_reconcile
 from tasks.hunter import hunter
 from tasks.metadata_fallback import metadata_fallback
 from tasks.acoustid_fallback import acoustid_fallback
@@ -353,6 +354,17 @@ async def main():
         asyncio.create_task(
             run_task("import_catchup", import_catchup,
                      interval_key="import_catchup_interval_seconds", default_interval=900)
+        ),
+        # Deleted-in-Lexicon reconciler (2.19.0). Runs only when Lexicon is available,
+        # lists the live library, and TOMBSTONES every complete track whose Lexicon
+        # row is gone: parks it in 'ignored' (terminal — no re-arm path may revive it),
+        # records the collision keys so the same match is never auto-imported for
+        # another like, and moves the NAS master into the share's recycle bin so the
+        # one-way NAS->Mac sync cannot resurrect it. Default ON; disable live via
+        # lexicon_reconcile_enabled=0.
+        asyncio.create_task(
+            run_task("lexicon_reconcile", lexicon_reconcile,
+                     interval_key="lexicon_reconcile_interval_seconds", default_interval=900)
         ),
     ]
 
