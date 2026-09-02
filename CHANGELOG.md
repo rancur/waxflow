@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.19.1 — fix: the scheduled auto-update never ran
+
+`tasks/auto_update.py` (2.12.0) decides when to write the update signal — but it was
+never registered in `worker.py`'s task loop, so `auto_update_enabled=1` with
+`daily_3am` fired exactly never. Every update since 2.12 was applied by hand via
+"Update Now". Registered hourly (`auto_update_check_interval_seconds`, default 3600);
+`_is_right_time()` accepts any minute inside the 3am hour.
+
+`tests/test_worker_registration.py` pins the list of tasks that must be scheduled so a
+module can no longer exist without running.
+
 ## 2.19.0 — deleting a track in Lexicon now means it
 
 Two things the user asked to be *sure* of, measured first.

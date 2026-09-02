@@ -31,6 +31,7 @@ from tasks.plex_sync import plex_sync
 from tasks.mac_availability import sample_availability
 from tasks.import_catchup import import_catchup
 from tasks.lexicon_reconcile import lexicon_reconcile
+from tasks.auto_update import auto_update
 from tasks.hunter import hunter
 from tasks.metadata_fallback import metadata_fallback
 from tasks.acoustid_fallback import acoustid_fallback
@@ -365,6 +366,14 @@ async def main():
         asyncio.create_task(
             run_task("lexicon_reconcile", lexicon_reconcile,
                      interval_key="lexicon_reconcile_interval_seconds", default_interval=900)
+        ),
+        # Scheduled auto-update (2.19.1). tasks/auto_update.py has existed since 2.12
+        # and was never registered here, so `auto_update_enabled` + `daily_3am` never
+        # fired — only the manual "Update Now" ever wrote the signal file. Hourly is
+        # enough: _is_right_time() accepts any minute inside the 3am hour.
+        asyncio.create_task(
+            run_task("auto_update", auto_update,
+                     interval_key="auto_update_check_interval_seconds", default_interval=3600)
         ),
     ]
 
