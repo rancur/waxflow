@@ -10,7 +10,6 @@ from models import DashboardResponse, ServiceHealth
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
 LEXICON_API = os.environ.get("LEXICON_API_URL", "http://localhost:48624")
-TIDARR_API = os.environ.get("TIDARR_URL", "http://localhost:8484")  # optional legacy fallback
 
 # The worker re-probes Soulseek every 120s. If the last verdict is older than this,
 # the worker itself is the thing that is unwell, and reporting its last known "ok"
@@ -154,24 +153,22 @@ async def get_dashboard():
         except Exception as e:
             services.append(ServiceHealth(name="lexicon", status="error", error=str(e)))
 
-        # Tidal Downloader (optional legacy Tidarr check)
-        try:
-            t0 = time.monotonic()
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{TIDARR_API}")
-            latency = round((time.monotonic() - t0) * 1000, 1)
-            services.append(ServiceHealth(
-                name="tidal",
-                status="ok" if resp.status_code < 500 else "error",
-                latency_ms=latency,
-                error=None if resp.status_code < 500 else f"HTTP {resp.status_code}",
-            ))
-        except Exception as e:
-            services.append(ServiceHealth(name="tidal", status="error", error=str(e)))
-
-        # Soulseek. The API has neither the slskd credentials nor the worker's client,
-        # so it reports what the worker's soulseek_health probe last persisted.
-        services.append(_soulseek_service())
+        # Download sources, in the user's order (2.20.0). Soulseek reports what the
+        # worker's soulseek_health probe last persisted (the API has no slskd
+        # client); Tidal reports whether its login is usable (it used to probe the
+        # legacy Tidarr URL, which said nothing about whether tiddl could download).
+        # A source switched off in Settings shows as "disabled", not as broken.
+        from routes.sources import _availability
+        import sources_config as sc
+        with get_db() as conn:
+            rows = conn.execute("SELECT key, value FROM app_config").fetchall()
+        src_cfg = {r["key"]: r["value"] for r in rows}
+        for name in sc.parse_priority(src_cfg.get(sc.PRIORITY_KEY)):
+            if name == "soulseek" and sc.is_enabled(src_cfg, name):
+                services.append(_soulseek_service())
+                continue
+            status, detail = _availability(name, sc.is_enabled(src_cfg, name))
+            services.append(ServiceHealth(name=name, status=status, error=detail))
 
         return DashboardResponse(
             spotify_total=spotify_total,

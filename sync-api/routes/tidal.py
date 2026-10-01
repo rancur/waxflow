@@ -17,6 +17,28 @@ _AUTH_PATHS = [
 ]
 
 
+def tidal_auth_health() -> tuple[str, str | None]:
+    """("ok"|"error", detail) for the Tidal login the worker downloads with.
+
+    Local check only (auth file present + token not expired) — this is polled by the
+    dashboard and must not call Tidal. The worker refreshes the token itself before
+    downloading, so "expired" here means the refresh has stopped working.
+    """
+    for path in _AUTH_PATHS:
+        try:
+            with open(path) as f:
+                auth = json.load(f)
+        except Exception:
+            continue
+        expires = auth.get("expires_at", 0) or 0
+        if not auth.get("token") and not auth.get("access_token"):
+            return "error", f"no token in {path}"
+        if expires and expires < time.time():
+            return "error", f"token expired {round((time.time() - expires) / 3600, 1)}h ago"
+        return "ok", None
+    return "error", "not connected (no Tidal auth file)"
+
+
 @router.get("/tidal/status")
 async def tidal_status():
     """Check if Tidal is connected and token is valid."""

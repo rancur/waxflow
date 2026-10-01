@@ -712,6 +712,14 @@ def init():
                     )
                     print(f"Set {cfg_key} from {env_key}: {val}")
 
+    # Acquire-source order (2.20.0): Soulseek first, Tidal second. Seeds new
+    # installs AND migrates existing ones (the key did not exist before 2.20.0);
+    # an order the user has since chosen is never overwritten.
+    from sources_config import migrate_source_priority
+    with get_db() as conn:
+        if migrate_source_priority(conn):
+            print("Set source_priority to the Soulseek-first default.")
+
     print("Database initialized successfully.")
 
 

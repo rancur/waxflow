@@ -46,6 +46,14 @@ async def get_settings():
 
 @router.patch("/settings")
 async def update_settings(body: ConfigUpdate):
+    # The generic settings write must not be a way round /api/sources validation.
+    if "source_priority" in body.settings:
+        import sources_config as sc
+        try:
+            body.settings["source_priority"] = ",".join(
+                sc.validate_priority(body.settings["source_priority"]))
+        except sc.SourceConfigError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     try:
         with get_db() as conn:
             for key, value in {k: v for k, v in body.settings.items() if k not in SENSITIVE_KEYS}.items():

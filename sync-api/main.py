@@ -16,6 +16,7 @@ from routes.spotify import router as spotify_router
 from routes.tidal import router as tidal_router
 from routes.status import router as status_router
 from routes.wanted import router as wanted_router
+from routes.sources import router as sources_router
 
 # Version comes from the VERSION file baked into the image at build time, so
 # it can never drift from the release tag (it used to be hardcoded "2.1.0"
@@ -54,6 +55,7 @@ app.include_router(spotify_router)
 app.include_router(tidal_router)
 app.include_router(status_router)
 app.include_router(wanted_router)
+app.include_router(sources_router)
 
 
 @app.get("/")
