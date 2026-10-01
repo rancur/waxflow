@@ -72,8 +72,9 @@ class TestRegistry(unittest.TestCase):
 
     def test_acquire_sources_priority_order(self):
         ordered = registry.acquire_sources()
-        # Only Tidal + Soulseek acquire audio (the stores are link-only).
-        self.assertEqual([s.name for s in ordered], ["tidal", "soulseek"])
+        # Only Soulseek + Tidal acquire audio (the stores are link-only). Since
+        # 2.20.0 the DEFAULT order is Soulseek first (Tidal is being phased out).
+        self.assertEqual([s.name for s in ordered], ["soulseek", "tidal"])
         # priorities strictly ascending
         prios = [s.priority for s in ordered]
         self.assertEqual(prios, sorted(prios))

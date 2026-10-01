@@ -165,6 +165,12 @@ def _recover(db_path: str, track: dict, rec: dict) -> dict | None:
                 "match_source": "musicbrainz_local", "confidence": 0.85,
                 "matched_isrc": None}
 
+    # Strategies 1-2 search Tidal. With Tidal switched off (2.20.0) there is no Tidal
+    # call at all; the local recovery above is all this task can offer.
+    from tasks.sources import order as source_order
+    if not source_order.tidal_allowed(db_path):
+        return None
+
     # Strategy 1 — Tidal via alternate ISRCs from MusicBrainz (skip the one we tried).
     for alt in rec.get("isrcs") or []:
         if not alt or alt == original_isrc:

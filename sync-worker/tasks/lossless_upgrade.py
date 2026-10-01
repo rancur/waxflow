@@ -313,13 +313,19 @@ def _source_via_soulseek(db_path: str, track: dict) -> str | None:
 
 
 def _source_verified_lossless(db_path: str, track: dict) -> tuple[str, str] | None:
-    """Try Tidal first, then Soulseek. Returns (library_path, source) or None."""
-    dest = _source_via_tidal(db_path, track)
-    if dest:
-        return dest, "tidal"
-    dest = _source_via_soulseek(db_path, track)
-    if dest:
-        return dest, "soulseek"
+    """Try each enabled acquire source in the user's ``source_priority`` order
+    (Soulseek, then Tidal, by default). A disabled source is never called.
+    Returns (library_path, source) or None."""
+    from tasks.sources import order
+
+    attempts = {"tidal": _source_via_tidal, "soulseek": _source_via_soulseek}
+    for name in order.enabled_order(db_path):
+        fn = attempts.get(name)
+        if fn is None:
+            continue
+        dest = fn(db_path, track)
+        if dest:
+            return dest, name
     return None
 
 

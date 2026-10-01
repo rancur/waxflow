@@ -1,8 +1,11 @@
-"""Soulseek (slskd) fallback stage — a LOSSLESS-VERIFIED alternative to Tidal.
+"""Soulseek (slskd) acquire stage — LOSSLESS-VERIFIED downloads from Soulseek.
 
-When Tidal (tiddl) cannot deliver a genuinely-lossless copy of a liked track —
-either there is no Tidal match, or the Tidal copy is lossy AAC and fails the verify
-stage — the track is queued here. This stage:
+Since 2.20.0 Soulseek is the DEFAULT FIRST source (``source_priority``, see
+tasks/sources/order.py): a new track is queued here straight away, and on a miss it
+falls through to the next enabled source (``fall_through``). With Tidal first, it is
+the fallback it always was: when Tidal (tiddl) cannot deliver a genuinely-lossless
+copy — no Tidal match, a lossy AAC copy that fails the verify stage, or a download
+that keeps failing — the track is queued here. This stage:
 
   1. searches slskd for the track (artist + title),
   2. ranks true-.flac candidates and tries them best-first (multi-peer, because the
@@ -281,7 +284,7 @@ def _queued_tracks(db_path: str, limit: int) -> list[dict]:
     """
     with get_db(db_path) as conn:
         rows = conn.execute(
-            """SELECT t.*, fa.id AS _fa_id
+            """SELECT t.*, fa.id AS _fa_id, fa.search_query AS _fa_reason
                FROM tracks t
                JOIN fallback_attempts fa
                  ON fa.track_id = t.id AND fa.source = 'soulseek' AND fa.status = 'queued'
@@ -576,6 +579,39 @@ def search_best_available(client: SlskdClient, artist: str, title: str,
     return None, [], (seen[-1][0] if seen else f"{artist} {title}".strip())
 
 
+def fall_through(db_path: str, track: dict, miss: str) -> bool:
+    """After a Soulseek MISS, hand the track to the next enabled source (2.20.0).
+
+    Only for tracks that were sent here because Soulseek is FIRST in
+    ``source_priority`` (their queue row carries ``SOULSEEK_FIRST_REASON``). A track
+    that reached Soulseek AFTER another source missed has already been through the
+    earlier sources, so it stays at 'error' exactly as before — no loop.
+
+    The hand-off is to the 'matching' stage: the pipeline's dispatcher sees that
+    Soulseek has been attempted and moves on to the next enabled source (Tidal by
+    default). Returns True when the track was handed on.
+    """
+    from tasks.sources import order  # late: tasks.sources.soulseek imports this module
+
+    reason = track.get("_fa_reason") or ""
+    if not reason.startswith(order.SOULSEEK_FIRST_REASON):
+        return False
+    nxt = order.next_after(db_path, "soulseek")
+    if nxt is None:
+        log.info("Track %d: Soulseek missed and no later source is enabled — stays at error",
+                 track["id"])
+        return False
+    update_track(db_path, track["id"], pipeline_stage="matching",
+                 match_status="pending", pipeline_error=None)
+    log_activity(
+        db_path, "source_fallthrough", track["id"],
+        f"Soulseek miss ({miss}) — falling through to {nxt}",
+        {"from": "soulseek", "to": nxt, "miss": miss},
+    )
+    log.info("Track %d: Soulseek miss (%s) -> %s", track["id"], miss, nxt)
+    return True
+
+
 def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
     track_id = track["id"]
     fa_id = track["_fa_id"]
@@ -600,6 +636,7 @@ def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
         log_activity(db_path, "soulseek_no_candidates", track_id,
                      f"No candidates for {artist} - {title}")
         log.info("Track %d: no soulseek candidates at any tier", track_id)
+        fall_through(db_path, track, "no candidates")
         return
 
     tmpdir = tempfile.mkdtemp(prefix="slsk_")
@@ -670,6 +707,7 @@ def _process_one(db_path: str, track: dict, client: SlskdClient) -> None:
                      pipeline_error=f"Soulseek: tried {tried} peer(s), none delivered a verified-lossless FLAC")
         log_activity(db_path, "soulseek_all_failed", track_id,
                      f"{tried} peer(s) tried, none passed the lossless gate")
+        fall_through(db_path, track, f"{tried} peer(s) tried, none verified lossless")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -690,6 +728,11 @@ def process_soulseek_fallback(db_path: str) -> None:
     client = build_client(db_path)
     if not client.configured:
         log.warning("slskd not configured (slskd_url/slskd_api_key) — cannot run fallback")
+        # A Soulseek-FIRST track must not sit here forever on an install with no
+        # slskd: treat "not configured" as a miss and hand it to the next source.
+        for track in tracks:
+            if fall_through(db_path, track, "slskd not configured"):
+                _finalize(db_path, track["_fa_id"], "unavailable", 0, "slskd not configured")
         return
     for track in tracks:
         try:
@@ -700,3 +743,4 @@ def process_soulseek_fallback(db_path: str) -> None:
             update_track(db_path, track["id"], pipeline_stage="error",
                          pipeline_error=f"Soulseek fallback error: {e}")
             log_activity(db_path, "soulseek_error", track["id"], f"Fallback failed: {e}")
+            fall_through(db_path, track, f"error: {str(e)[:120]}")

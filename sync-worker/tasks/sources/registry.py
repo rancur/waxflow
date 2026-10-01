@@ -1,14 +1,16 @@
 """Source registry (Phase A foundation).
 
-Central list of available source plugins + priority-sorted views the pipeline (or
-Phase B code) can iterate without hard-coding which sources exist. Registration is
+Central list of available source plugins + ordered views the pipeline iterates
+without hard-coding which sources exist. Static ``priority`` gives the DEFAULT order
+(Soulseek, then Tidal, since 2.20.0); the live order is the user-selectable
+``source_priority`` app_config key (tasks/sources/order.py). Registration is
 static for Phase A (Tidal + Soulseek); Beatport/Qobuz/Bandcamp will register here
 in Phase B. Enable/disable is per-source via ``app_config`` (each source's
 ``is_enabled(db_path)``), so the registry never needs a schema change to gate a
 source.
 
-Inert: constructing the registry has no side effects and nothing here is invoked
-by the live worker loop yet.
+Constructing the registry has no side effects. Since 2.20.0 the live pipeline
+routes new tracks through it (process_pipeline._dispatch_acquire).
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from tasks.sources.tidal import TidalSource
 # Static registry. Instances are cheap + stateless (all state lives in the DB), so
 # a module-level singleton list is fine.
 #
-# ACQUIRE sources (Tidal, Soulseek) come first by priority; the Phase 4 SEARCH_LINK
+# ACQUIRE sources (Soulseek, Tidal) come first by priority; the Phase 4 SEARCH_LINK
 # stores (Qobuz/Beatport/Bandcamp) generate buy-links only and NEVER auto-purchase.
 _REGISTRY: list[Source] = [
     TidalSource(),
@@ -64,10 +66,21 @@ def get_source(name: str) -> Source | None:
     return None
 
 
+def ordered_acquire_sources(db_path: str) -> list[Source]:
+    """Every ACQUIRE source in the USER-CONFIGURED order (``source_priority``).
+
+    Falls back to the static ``priority`` order when nothing is configured.
+    """
+    from tasks.sources import order  # late: order imports this module
+    by_name = {s.name: s for s in acquire_sources()}
+    return [by_name[n] for n in order.configured_priority(db_path) if n in by_name]
+
+
 def enabled_acquire_sources(db_path: str) -> list[Source]:
-    """ACQUIRE sources that are both enabled (app_config) and available, priority-sorted."""
+    """ACQUIRE sources that are both enabled (app_config) and available, in the
+    user-configured order (``source_priority``)."""
     return [
-        s for s in acquire_sources()
+        s for s in ordered_acquire_sources(db_path)
         if s.is_enabled(db_path) and s.is_available(db_path)
     ]
 

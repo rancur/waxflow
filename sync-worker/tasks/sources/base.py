@@ -89,6 +89,9 @@ class Source:
     name: str = "base"
     capabilities: frozenset[SourceCapability] = frozenset()
     priority: int = 100
+    # app_config key holding this source's enable toggle. The default ORDER comes
+    # from ``priority``; the live order is ``source_priority`` (tasks/sources/order.py).
+    toggle_key: str | None = None
 
     # ----------------------------------------------------------------- capability
     def has(self, cap: SourceCapability) -> bool:

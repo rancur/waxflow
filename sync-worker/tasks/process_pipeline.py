@@ -32,6 +32,7 @@ from tasks.helpers import (
 # behavior change: the adapters delegate to the same implementations that still live
 # here / in soulseek_fallback. See tasks/sources/. Soulseek's surface is re-exported
 # by the sources.soulseek facade, so importing it from there is the abstraction seam.
+from tasks.sources import order as _source_order
 from tasks.sources import soulseek as _soulseek_source
 from tasks.sources import tidal as _tidal_source
 from tasks.sources.soulseek import (
@@ -247,7 +248,7 @@ def _upgrade_replacement_available(db_path: str) -> bool:
 
 
 def _route_lossless_gap(db_path: str, track_id: int, error_msg: str) -> bool:
-    """Route a track that Tidal couldn't provide as true-lossless.
+    """Route a track that another source couldn't provide as true-lossless.
 
     If the Soulseek fallback is enabled and this track hasn't already been tried on
     Soulseek, queue it for the fallback: the track is parked at the allowed 'error'
@@ -267,6 +268,74 @@ def _route_lossless_gap(db_path: str, track_id: int, error_msg: str) -> bool:
     except Exception as e:  # noqa: BLE001 — never let routing break the pipeline
         log.warning("Track %d: Soulseek routing/queue failed (%s); using error state", track_id, e)
     return False
+
+
+def _queue_soulseek_first(db_path: str, track: dict) -> bool:
+    """Send a NEW track straight to Soulseek because it is first in source_priority.
+
+    Same queue model as _route_lossless_gap (parked at 'error' + a queued
+    fallback_attempts row), but the row carries SOULSEEK_FIRST_REASON so that a
+    Soulseek miss falls through to the next enabled source instead of ending at
+    'error' (soulseek_fallback.fall_through). match_status stays 'pending': nothing
+    has failed to match, and the no-match recovery tasks key on 'failed'.
+    Returns True if it queued.
+    """
+    track_id = track["id"]
+    try:
+        if not _soulseek_enabled(db_path) or _soulseek_already_attempted(db_path, track_id):
+            return False
+        _soulseek_queue(db_path, track_id, _source_order.SOULSEEK_FIRST_REASON)
+        update_track(db_path, track_id, pipeline_stage="error", match_status="pending",
+                     pipeline_error="Queued for Soulseek (source order: Soulseek first)")
+        log_activity(db_path, "soulseek_queued", track_id,
+                     "Queued for Soulseek — first in source order",
+                     {"source_priority": _source_order.enabled_order(db_path)})
+        log.info("Track %d (%s - %s) -> Soulseek first", track_id,
+                 track.get("artist", ""), track.get("title", ""))
+        return True
+    except Exception as e:  # noqa: BLE001 — never let routing break the pipeline
+        log.warning("Track %d: Soulseek-first queue failed (%s); trying next source", track_id, e)
+        return False
+
+
+def _dispatch_acquire(db_path: str, track: dict) -> None:
+    """Send a track that is not already owned to the first enabled source that has
+    not yet been tried for it, in the user's ``source_priority`` order (2.20.0).
+
+    * soulseek -> queued for the Soulseek stage (process_soulseek_fallback); a miss
+      there falls through back to this dispatcher.
+    * tidal    -> the Tidal search/match (_match_track); a miss there routes to
+      Soulseek only if Soulseek has not been tried yet.
+
+    Dedup (ISRC index, Lexicon, on-disk) has already run in _process_new and does
+    not depend on any source. A disabled source is never called.
+    """
+    track_id = track["id"]
+    order = _source_order.enabled_order(db_path)
+    for name in order:
+        if name == "soulseek":
+            if _soulseek_already_attempted(db_path, track_id):
+                continue
+            isrc = track.get("isrc")
+            if isrc and _tombstone_blocks(db_path, track, isrc=isrc, via="soulseek_first"):
+                return
+            if _queue_soulseek_first(db_path, track):
+                return
+            continue
+        if name == "tidal":
+            _match_track(db_path, track)
+            return
+        log.warning("Track %d: source %r has no acquire path in the pipeline; skipping",
+                    track_id, name)
+
+    if not order:
+        msg = "No acquire source is enabled (Settings > Sources)"
+    else:
+        msg = f"Not found on any enabled source ({', '.join(order)})"
+    update_track(db_path, track_id, pipeline_stage="error", match_status="failed",
+                 pipeline_error=msg)
+    log_activity(db_path, "match_failed", track_id, f"{msg}: {track.get('artist')} - {track.get('title')}")
+    log.warning("Track %d: %s", track_id, msg)
 
 
 async def process_pipeline(db_path: str):
@@ -1005,7 +1074,7 @@ def _process_matching(db_path: str):
                     track["id"], track.get("artist", ""), track.get("title", ""),
                 )
                 continue
-            _match_track(db_path, track)
+            _dispatch_acquire(db_path, track)
         except Exception as e:
             log.error("Match error for track %d: %s", track["id"], e, exc_info=True)
             update_track(
@@ -1038,6 +1107,13 @@ def _normalize_title(title: str) -> str:
 def _match_track(db_path: str, track: dict):
     """Try to find a Tidal match via Tidal API search."""
     track_id = track["id"]
+    if not _source_order.tidal_allowed(db_path):
+        # Defence in depth: the dispatcher never sends a track here with Tidal off.
+        log.warning("Track %d: Tidal is disabled — not searching Tidal", track_id)
+        if not _route_lossless_gap(db_path, track_id, "Tidal disabled"):
+            update_track(db_path, track_id, pipeline_stage="error", match_status="failed",
+                         pipeline_error="Tidal disabled and no other source left to try")
+        return
     isrc = track.get("isrc")
     artist = track.get("artist", "")
     title = track.get("title", "")
@@ -1544,6 +1620,23 @@ def _process_downloading(db_path: str):
     if str(get_config(db_path, "downloads_paused") or "0").strip() in ("1", "true", "yes", "on"):
         return
 
+    # Tidal switched off (2.20.0): no tiddl, no token refresh, no Tidarr. Anything
+    # still parked here from a Tidal match goes back to the dispatcher, which sends
+    # it to the next enabled source.
+    if not _source_order.tidal_allowed(db_path):
+        with get_db(db_path) as conn:
+            moved = conn.execute(
+                """UPDATE tracks SET pipeline_stage = 'matching', match_status = 'pending',
+                          updated_at = datetime('now')
+                    WHERE pipeline_stage = 'downloading'
+                      AND download_status IN ('pending', 'failed')"""
+            ).rowcount
+        if moved:
+            log.info("Tidal disabled: re-dispatched %d track(s) waiting on a Tidal download", moved)
+            log_activity(db_path, "tidal_disabled_redispatch", None,
+                         f"Tidal disabled — {moved} track(s) re-routed to the next enabled source")
+        return
+
     # When tiddl is available, use it directly (primary path)
     if _TIDDL_AVAILABLE:
         _ensure_tidal_auth()
@@ -1568,6 +1661,10 @@ def _process_downloading(db_path: str):
                     pipeline_error=f"Download failed after {attempts} attempts: {e}" if attempts >= fail_limit else None,
                 )
                 log_activity(db_path, "download_error", track["id"], f"Download attempt {attempts} failed: {e}")
+                if attempts >= fail_limit:
+                    # Tidal gave up: fall through to Soulseek if it has not been tried.
+                    _route_lossless_gap(db_path, track["id"],
+                                        f"Tidal download failed after {attempts} attempts")
         return
 
     # --- Legacy Tidarr fallback path (when tiddl is not available) ---
