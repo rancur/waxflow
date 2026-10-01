@@ -15,7 +15,9 @@ Delegation is intentional and load-bearing for byte-identical behavior; the
 characterization tests assert the source path is identical to calling the inline
 functions directly.
 
-Capabilities: ACQUIRE + LOSSLESS. Tidal is the primary source (priority 10).
+Capabilities: ACQUIRE + LOSSLESS. Since 2.20.0 Tidal is the default SECOND source
+(priority 20, after Soulseek) and can be switched off entirely with
+``source_tidal_enabled=0``; the live order is ``source_priority``.
 """
 
 from __future__ import annotations
@@ -47,11 +49,13 @@ def acquire_raw(db_path: str, track: dict) -> str:
 class TidalSource(Source):
     name = "tidal"
     capabilities = frozenset({SourceCapability.ACQUIRE, SourceCapability.LOSSLESS})
-    priority = 10  # primary source — tried first
+    priority = 20  # default second source (2.20.0) — live order is source_priority
+    toggle_key = "source_tidal_enabled"
 
     # ------------------------------------------------------------- availability
     def is_enabled(self, db_path: str) -> bool:
-        # Tidal is the primary source: default ON, overridable via app_config.
+        # Default ON (an install with Tidal creds keeps working), overridable via
+        # app_config. When OFF, the worker makes no Tidal call of any kind.
         val = get_config(db_path, "source_tidal_enabled")
         if val is None:
             return True

@@ -484,6 +484,12 @@ export default function SettingsPage() {
       </div>
 
       {/* ================================================================ */}
+      {/* DOWNLOAD SOURCES                                                  */}
+      {/* ================================================================ */}
+
+      <SourcesSection />
+
+      {/* ================================================================ */}
       {/* SYNC SETTINGS                                                     */}
       {/* ================================================================ */}
 
@@ -1254,6 +1260,178 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Download sources: order + toggles (2.20.0). Saved immediately via
+// PUT /api/sources, independent of the page-wide Save button, so a reorder can
+// never be lost by navigating away.
+// ---------------------------------------------------------------------------
+
+interface SourceRow {
+  name: string
+  label: string
+  kind: 'acquire' | 'link'
+  enabled: boolean
+  position?: number
+  status?: string
+  detail?: string | null
+}
+
+interface SourcesPayload {
+  priority: string[]
+  active_order: string[]
+  default_priority: string[]
+  acquire: SourceRow[]
+  links: SourceRow[]
+}
+
+const STATUS_DOT: Record<string, string> = {
+  ok: 'bg-emerald-400',
+  error: 'bg-red-400',
+  unknown: 'bg-amber-400',
+  disabled: 'bg-slate-600',
+}
+
+function SourcesSection() {
+  const [data, setData] = useState<SourcesPayload | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      setData(await apiFetch<SourcesPayload>('/sources'))
+      setErr(null)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to load sources')
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const save = async (body: { priority?: string[]; enabled?: Record<string, boolean> }) => {
+    setBusy(true)
+    try {
+      setData(await apiFetch<SourcesPayload>('/sources', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }))
+      setErr(null)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Save failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const move = (index: number, delta: number) => {
+    if (!data) return
+    const next = [...data.priority]
+    const target = index + delta
+    if (target < 0 || target >= next.length) return
+    ;[next[index], next[target]] = [next[target], next[index]]
+    save({ priority: next })
+  }
+
+  const toggle = (row: SourceRow) => save({ enabled: { [row.name]: !row.enabled } })
+
+  const Toggle = ({ row }: { row: SourceRow }) => (
+    <button
+      type="button"
+      aria-label={`${row.enabled ? 'Disable' : 'Enable'} ${row.label}`}
+      disabled={busy}
+      onClick={() => toggle(row)}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+        row.enabled ? 'bg-emerald-500' : 'bg-slate-700'
+      }`}
+    >
+      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+        row.enabled ? 'translate-x-6' : 'translate-x-1'
+      }`} />
+    </button>
+  )
+
+  return (
+    <div className="card">
+      <div className="flex items-baseline justify-between mb-1">
+        <h2 className="text-sm font-semibold text-slate-300">Download Sources</h2>
+        {data && (
+          <span className="text-xs text-slate-500">
+            {data.active_order.length > 0
+              ? `Order: ${data.active_order.join(' \u2192 ')}`
+              : 'No download source enabled'}
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-slate-600 mb-4">
+        New tracks try the first enabled source and move down the list only when it
+        has no verified-lossless copy. A disabled source is never contacted.
+      </p>
+
+      {err && <p className="text-xs text-red-400 mb-3">{err}</p>}
+      {!data && !err && <p className="text-xs text-slate-500">Loading...</p>}
+
+      {data && (
+        <div className="space-y-2">
+          {data.acquire.map((row, i) => (
+            <div
+              key={row.name}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${
+                row.enabled ? 'border-slate-700 bg-slate-800/40' : 'border-slate-800 bg-slate-900/40 opacity-60'
+              }`}
+            >
+              <span className="text-xs text-slate-500 tabular-nums w-4">{i + 1}</span>
+              <div className="flex flex-col">
+                <button
+                  type="button"
+                  aria-label={`Move ${row.label} up`}
+                  className="text-slate-400 hover:text-slate-200 disabled:opacity-30 text-xs leading-none px-1"
+                  disabled={busy || i === 0}
+                  onClick={() => move(i, -1)}
+                >
+                  &#9650;
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Move ${row.label} down`}
+                  className="text-slate-400 hover:text-slate-200 disabled:opacity-30 text-xs leading-none px-1"
+                  disabled={busy || i === data.acquire.length - 1}
+                  onClick={() => move(i, 1)}
+                >
+                  &#9660;
+                </button>
+              </div>
+              <div className={`w-2.5 h-2.5 rounded-full ${STATUS_DOT[row.status || 'unknown'] || 'bg-slate-600'}`} />
+              <div className="flex-1 min-w-0">
+                <span className="text-sm text-slate-200">{row.label}</span>
+                <p className="text-[11px] text-slate-600 truncate" title={row.detail || undefined}>
+                  {row.status === 'ok' ? 'available' : row.detail || row.status}
+                </p>
+              </div>
+              <Toggle row={row} />
+            </div>
+          ))}
+
+          {data.links.length > 0 && (
+            <div className="pt-4 mt-2 border-t border-slate-800">
+              <p className="text-xs text-slate-500 mb-2">
+                Buy-link stores (never download or purchase; they add store links for
+                tracks no source could find)
+              </p>
+              <div className="grid sm:grid-cols-3 gap-2">
+                {data.links.map((row) => (
+                  <div key={row.name} className="flex items-center justify-between px-3 py-2 rounded-lg border border-slate-800">
+                    <span className="text-sm text-slate-300">{row.label}</span>
+                    <Toggle row={row} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

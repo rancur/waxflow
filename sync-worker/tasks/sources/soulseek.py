@@ -7,8 +7,9 @@ thin facade: it re-exports the exact functions the pipeline uses (so process_pip
 imports its Soulseek surface from the sources package) and adds a ``SoulseekSource``
 for the registry. No behavior is copied or altered — the same functions run.
 
-Capabilities: ACQUIRE + LOSSLESS. Soulseek is the lossless FALLBACK after Tidal,
-so it has a lower priority (higher number: 20) than Tidal.
+Capabilities: ACQUIRE + LOSSLESS. Since 2.20.0 Soulseek is the DEFAULT PRIMARY
+source (priority 10, ahead of Tidal); the live order is the user-selectable
+``source_priority`` (see tasks/sources/order.py).
 """
 
 from __future__ import annotations
@@ -36,7 +37,8 @@ def run_fallback(db_path: str) -> None:
 class SoulseekSource(Source):
     name = "soulseek"
     capabilities = frozenset({SourceCapability.ACQUIRE, SourceCapability.LOSSLESS})
-    priority = 20  # lossless fallback — after Tidal
+    priority = 10  # default primary (2.20.0) — the live order is source_priority
+    toggle_key = "soulseek_fallback_enabled"  # historical name, kept for compat
 
     def is_enabled(self, db_path: str) -> bool:
         # Delegates to the existing soulseek_fallback toggle (unchanged semantics).

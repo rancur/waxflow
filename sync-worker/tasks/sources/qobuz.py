@@ -51,6 +51,7 @@ class QobuzSource(Source):
     # unless creds exist (see is_available + acquire below).
     capabilities = frozenset({SourceCapability.SEARCH_LINK})
     priority = 30
+    toggle_key = "source_qobuz_enabled"
 
     def is_enabled(self, db_path: str) -> bool:
         from tasks.helpers import get_config

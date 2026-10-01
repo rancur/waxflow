@@ -1,12 +1,12 @@
 # CLAUDE.md -- WaxFlow / Spotify-Lexicon-Sync
 
 ## Project Overview
-WaxFlow syncs Spotify Liked Songs to Lexicon DJ with lossless FLAC downloads from Tidal. It runs as 3 Docker containers backed by a shared SQLite database.
+WaxFlow syncs Spotify Liked Songs to Lexicon DJ with verified-lossless FLAC. Download sources are user-ordered (Soulseek first, Tidal second and optional, since 2.20.0). It runs as 3 Docker containers backed by a shared SQLite database.
 
 ## Architecture
 ```
-Spotify API --> sync-worker --> [Scan Library] --> [Match via Tidal] --> [Download via tiddl] --> [Verify] --> [Lexicon API]
-                                       |
+Spotify API --> sync-worker --> [Scan Library / dedup] --> [Source order: Soulseek -> Tidal] --> [Verify lossless] --> [Lexicon API]
+                                       |                           (user-selectable, each toggleable)
                                  sync-api (FastAPI + SQLite)
                                        |
                                  sync-web (Next.js Dashboard)
@@ -69,8 +69,37 @@ Key variables (see `.env.example` or README for full list):
 ## Key Concepts
 - **Parity**: percentage of Spotify Liked Songs that exist in Lexicon
 - **Pipeline stages**: new -> matching -> downloading -> verifying -> organizing -> complete
-- **5-layer dedup**: ISRC file index, Lexicon DB lookup, on-disk scan, Tidal ISRC, Tidal metadata
+- **Dedup** (`_process_new`): ISRC file index, Lexicon DB lookup, on-disk scan. Source-independent — runs before any source is contacted, so it holds with Tidal disabled.
 - **Scan mode vs Full mode**: scan mode only matches existing library; full mode downloads new tracks
+
+## Download sources (2.20.0)
+- **Order** = `app_config.source_priority` (comma-separated, default `soulseek,tidal`;
+  `sync-api/sources_config.migrate_source_priority` seeds it on every API start when
+  absent, which is how pre-2.20 installs moved to Soulseek first). **Toggles** =
+  each Source's `toggle_key` (Soulseek keeps its historical `soulseek_fallback_enabled`;
+  Tidal is `source_tidal_enabled`).
+- `tasks/sources/order.py` answers "which source next?"; `registry.enabled_acquire_sources`
+  follows the configured order. `process_pipeline._dispatch_acquire` (matching stage)
+  sends a track to the first enabled source not yet tried for it:
+  Soulseek -> queued row in `fallback_attempts` whose `search_query` starts with
+  `SOULSEEK_FIRST_REASON`; Tidal -> `_match_track`.
+- **Fall-through**: a Soulseek miss (no candidates / all failed the lossless gate /
+  slskd not configured / error) on a Soulseek-FIRST row sends the track back to
+  `matching` (`soulseek_fallback.fall_through`), where the dispatcher skips Soulseek
+  (already attempted) and tries Tidal. A Tidal miss routes to Soulseek only if it has
+  not been tried. One attempt per source per arming; no loops.
+- **Tidal disabled** means NO Tidal call anywhere: `_match_track` refuses,
+  `_process_downloading` re-dispatches tracks parked on a Tidal download and skips the
+  token refresh, `metadata_fallback` skips its Tidal strategies, `lossless_upgrade`
+  walks only enabled sources. Tests in `tests/test_source_priority.py` fail loudly if
+  any Tidal function is reached.
+- Queued-for-Soulseek tracks sit at `pipeline_stage='error'` (the CHECK constraint has
+  no queue stage) with `match_status='pending'`; the hunter skips them while queued.
+- sync-api cannot import worker code, so `sync-api/sources_config.py` MIRRORS the
+  source names + toggle keys; `TestApiMirror` fails if they drift. Adding a source
+  means editing both.
+- The lossless gate is unchanged: nothing Soulseek delivers is imported unless
+  `lossless_verify.verify_lossless` passes.
 
 ## The path contract (READ THIS BEFORE TOUCHING PATHS)
 Rewritten 2026-08-08 after the library ended up split across two roots and Engine DJ

@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.20.0 — Soulseek first; choose and switch off your download sources
+
+Tidal is being phased out, and tiddl runs have been stalling. Soulseek (slskd) is now
+the primary source, and the order is yours to choose.
+
+- **Source order + toggles.** `source_priority` (default `soulseek,tidal`) sets which
+  download source a new track tries first; it moves to the next enabled source only
+  on a miss. Each source has an enable toggle. Settings has a new **Download
+  Sources** card (reorder with up/down, toggle each source, buy-link store toggles),
+  backed by `GET/PUT /api/sources`, which validates names against the known sources
+  and rejects unknown ones, link-only stores in the download order, duplicates, and
+  switching every download source off. `PATCH /api/settings` validates
+  `source_priority` the same way.
+- **Migration.** Existing installs have no `source_priority`; the API seeds it with
+  `soulseek,tidal` on start (and logs `source_priority_migrated`). An order you set
+  later is never overwritten.
+- **Soulseek first.** A track not already owned (ISRC index / Lexicon / disk dedup —
+  none of which uses Tidal) is queued straight for the Soulseek stage. A miss there
+  (no candidates, nothing passed the lossless gate, slskd not configured, error) falls
+  through to Tidal. With Tidal first, the old behaviour stands, plus: a Tidal
+  download that fails 5 times now falls through to Soulseek instead of stopping.
+- **Tidal can be switched off completely**: no Tidal search, download or token
+  refresh anywhere (matching, downloading, MusicBrainz fallback, lossless upgrade).
+  Tracks that were waiting on a Tidal download are re-routed to the next source.
+- The lossless-upgrade task tries sources in the configured order.
+- The hunter no longer picks up a track while it is queued for Soulseek.
+- **Dashboard**: one health row per download source, in order. Tidal now reports
+  whether its login is usable (it used to probe the legacy Tidarr URL); a source
+  switched off shows as "disabled", not as broken.
+- The default static source priorities swap (Soulseek 10, Tidal 20).
+
 ## 2.19.2 — fix: the worker never knew its own version
 
 Follow-up to 2.19.1. Once the auto-update check actually ran, it logged

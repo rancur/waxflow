@@ -4,7 +4,7 @@
 > — what is built, what is left, and the ground-truth facts that are
 > expensive to rediscover.
 
-**All your music, flowing home. Sync your Spotify Liked Songs to Lexicon DJ with lossless FLAC downloads from Tidal.**
+**All your music, flowing home. Sync your Spotify Liked Songs to Lexicon DJ with verified-lossless FLAC from Soulseek (and, optionally, Tidal).**
 
 ![Version](https://img.shields.io/badge/version-v2.3.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -16,8 +16,8 @@
 
 1. **Polls Spotify** for new Liked Songs on a configurable interval
 2. **Scans your existing music library** to avoid re-downloading tracks you already own
-3. **Matches tracks to Tidal** using ISRC codes, metadata search, and fuzzy title/artist matching
-4. **Downloads lossless FLAC** from Tidal via the `tiddl` CLI at max quality
+3. **Sources what you don't already own** from your download sources in the order you choose — Soulseek (via slskd) first by default, Tidal second and optional
+4. **Downloads lossless FLAC only**: every Soulseek file passes a lossless gate (codec, clean decode, spectral fake-FLAC detection, duration) before it is imported
 5. **Verifies downloads** are genuinely lossless with `ffprobe` codec checks and chromaprint fingerprinting
 6. **Imports into Lexicon DJ** with automatic playlist creation organized by month and year
 7. **Tracks parity** between your Spotify library and Lexicon in real time
@@ -35,7 +35,7 @@
 - Tracks Spotify metadata: ISRC, duration, album art, added date
 
 ### Intelligent Matching
-- **5-layer deduplication pipeline**: ISRC file index, Lexicon database lookup, on-disk library scan, Tidal ISRC search, Tidal metadata search
+- **Deduplication before any download**: ISRC file index, Lexicon database lookup, on-disk library scan — none of it needs Tidal, so dedup works with Tidal switched off
 - ISRC-based matching (guaranteed same recording, 1.0 confidence)
 - Fuzzy title/artist matching with Unicode normalization (accented characters, special chars)
 - Remix/edit suffix stripping for base title comparison
@@ -43,8 +43,21 @@
 - Duration-based confidence scoring to avoid wrong versions
 - Match review UI for manual approval/rejection of borderline matches
 
+### Download Sources (2.20.0)
+- **User-selectable order** (Settings > Download Sources, or `PUT /api/sources`):
+  Soulseek first, Tidal second by default. A new track tries the first enabled
+  source and moves to the next only on a miss (no candidates / nothing passed the
+  lossless gate / no Tidal match).
+- **Per-source toggles.** Switch Tidal off entirely and WaxFlow makes no Tidal
+  search, download or token-refresh call at all; the pipeline completes via Soulseek.
+- Buy-link stores (Qobuz, Beatport, Bandcamp) have their own toggles; they only
+  produce store links and never download or purchase.
+- Live availability per source on the dashboard: slskd reachable/logged in, Tidal
+  login valid, or "disabled".
+
 ### Lossless Downloads
-- Direct Tidal API downloads via `tiddl` CLI (no external downloader service)
+- Soulseek via slskd (P2P egress through a VPN), multi-peer, quality-ladder search
+- Direct Tidal API downloads via `tiddl` CLI (optional)
 - FLAC at master quality by default
 - Tidal device code authentication from the Settings page
 - Configurable download path and batch sizes
@@ -75,7 +88,7 @@
 - Monthly progress chart showing sync velocity
 - Pipeline stage breakdown (new, matching, downloading, verifying, organizing, complete)
 - Activity feed with detailed event logging
-- Service health indicators for API, worker, Lexicon, and Tidal
+- Service health indicators for API, worker, Lexicon, and each download source
 
 ### Self-Healing
 - 30-minute monitoring loop (`monitor-parity.sh`) detects stalled pipelines and errors
@@ -94,8 +107,8 @@
 ## Architecture
 
 ```
-Spotify API --> sync-worker --> [Scan Library] --> [Match via Tidal] --> [Download via tiddl] --> [Verify] --> [Lexicon API]
-                                       |
+Spotify API --> sync-worker --> [Scan Library / dedup] --> [Source order: Soulseek -> Tidal] --> [Verify lossless] --> [Lexicon API]
+                                       |                           (user-selectable, each toggleable)
                                  sync-api (FastAPI + SQLite)
                                        |
                                  sync-web (Next.js Dashboard)
@@ -321,6 +334,17 @@ volumes:
 | GET | `/api/spotify/callback` | OAuth callback |
 | GET | `/api/spotify/status` | Connection status |
 | POST | `/api/spotify/poll` | Trigger manual poll |
+
+### Download sources
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/sources` | Source order, toggles and live availability |
+| PUT | `/api/sources` | Set `{"priority": ["soulseek","tidal"], "enabled": {"tidal": false}}`; unknown or link-only names in the order are a 400, and at least one download source must stay enabled |
+
+Config keys behind it: `source_priority` (comma-separated, default `soulseek,tidal`),
+`soulseek_fallback_enabled`, `source_tidal_enabled`, `source_qobuz_enabled`,
+`source_beatport_enabled`, `source_bandcamp_enabled`. The worker reads them every
+cycle, so changes apply without a restart.
 
 ### Tidal
 | Method | Endpoint | Description |

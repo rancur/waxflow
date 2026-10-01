@@ -112,6 +112,14 @@ def enqueue_from_failures(db_path: str) -> int:
                  WHERE t.pipeline_stage IN ({placeholders})
                    AND t.id NOT IN (
                        SELECT track_id FROM wanted WHERE track_id IS NOT NULL
+                   )
+                   -- Parked at 'error' only while QUEUED for the Soulseek stage
+                   -- (Soulseek-first since 2.20.0): not a failure yet, so leave it
+                   -- to that stage instead of racing it with a Tidal re-arm.
+                   AND NOT EXISTS (
+                       SELECT 1 FROM fallback_attempts fa
+                        WHERE fa.track_id = t.id AND fa.source = 'soulseek'
+                          AND fa.status = 'queued'
                    )""",
             UNSOURCED_STAGES,
         )

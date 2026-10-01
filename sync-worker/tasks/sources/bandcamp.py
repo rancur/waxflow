@@ -32,6 +32,7 @@ class BandcampSource(Source):
     # not safe to auto-detect yet, so we default to a buy/search link (never buy).
     capabilities = frozenset({SourceCapability.SEARCH_LINK})
     priority = 50
+    toggle_key = "source_bandcamp_enabled"
 
     def is_enabled(self, db_path: str) -> bool:
         from tasks.helpers import get_config

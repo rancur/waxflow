@@ -31,6 +31,7 @@ class BeatportSource(Source):
     # and this phase never buys.
     capabilities = frozenset({SourceCapability.SEARCH_LINK})
     priority = 40
+    toggle_key = "source_beatport_enabled"
 
     def is_enabled(self, db_path: str) -> bool:
         from tasks.helpers import get_config
